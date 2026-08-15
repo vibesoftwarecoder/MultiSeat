@@ -564,6 +564,72 @@ public sealed class SeatManager
     /// 1024×768 — even though Apollo logs request 1920×1080.
     /// Both steps are best-effort; failures are logged and ignored.
     /// </summary>
+    /// <summary>
+    /// Second chance at finding the seat's SudoVDA display, run from the health-check tick.
+    ///
+    /// Provisioning looks for the display ~5s after Apollo starts, but Apollo does not create
+    /// one then. Creation happens in its <c>proc_t::execute()</c> — i.e. when a client connects
+    /// and launches an app — gated on <c>headless_mode</c> (which ApolloConfigBuilder now sets).
+    /// At provisioning time there is therefore nothing to find, DisplayDevicePath stays null,
+    /// and display isolation is skipped for the seat's whole life, leaving TermService CPU high.
+    ///
+    /// So retry while the seat runs. Once Apollo creates the display it logs a fresh
+    /// "Currently available display devices:" block, this picks it up, and isolation is applied.
+    ///
+    /// Deliberately does NOT restart Apollo the way the provisioning path does: a client is
+    /// streaming by the time this succeeds, and Apollo has already pointed itself at the new
+    /// display (it assigns config::video.output_name after creating it). Writing output_name to
+    /// the config here only makes the next start target it directly.
+    ///
+    /// Returns true when the display was found and isolation was attempted.
+    /// </summary>
+    public async Task<bool> TryLateDisplayDetectionAsync(SeatInfo seat, CancellationToken ct)
+    {
+        if (!string.IsNullOrEmpty(seat.DisplayDevicePath)) return false; // already known
+        if (seat.ApolloProcessId <= 0) return false;                     // Apollo not running
+
+        string text;
+        try
+        {
+            var logPath = _apolloManager.GetLogPath(seat.AccountName, _options.ApolloConfigDir);
+            if (!File.Exists(logPath)) return false;
+
+            // Apollo holds the log open, so share read AND write.
+            using var fs = new FileStream(
+                logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var sr = new StreamReader(fs);
+            text = await sr.ReadToEndAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Seat {Id}: late display detection could not read Apollo log", seat.Id);
+            return false;
+        }
+
+        // ParseSudoVdaDisplayIdFromLogText matches the FIRST display block, which is Apollo's
+        // startup enumeration — exactly the one that never contains the virtual display. Slice
+        // from the last block so we parse Apollo's most recent view instead.
+        const string marker = "Currently available display devices:";
+        var last = text.LastIndexOf(marker, StringComparison.Ordinal);
+        if (last < 0) return false;
+
+        var result = ApolloManager.ParseSudoVdaDisplayIdFromLogText(text[last..]);
+        if (result.DeviceId is null) return false; // still nothing — stay quiet, we run every tick
+
+        seat.DisplayDevicePath = result.DeviceId;
+
+        var configPath = _apolloManager.GetConfigPath(seat.Id);
+        if (configPath is not null)
+            _configBuilder.UpdateDisplayOutput(configPath, result.DeviceId);
+
+        _logger.LogInformation(
+            "Seat {Id}: SudoVDA display found after client connect ({Dev}) — applying display isolation",
+            seat.Id, result.DeviceId);
+
+        await ApplyDisplayIsolationAsync(seat, ct);
+        return true;
+    }
+
     public async Task ApplyDisplayIsolationAsync(SeatInfo seat, CancellationToken ct)
     {
         var helperExe = Path.Combine(AppContext.BaseDirectory, "MultiSeat.Service.exe");

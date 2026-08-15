@@ -194,6 +194,24 @@ public sealed class SessionHealthCheck
         // since the previous tick. Does not change seat state here.
         _onConnectApps.ProcessSeat(seat, ct);
 
+        // ── Late SudoVDA detection ────────────────────────────────
+        // Apollo creates the seat's virtual display when a client connects, not at startup,
+        // so provisioning's one-shot lookup always misses it and display isolation gets
+        // skipped for the seat's whole life. Retry here until it appears. No-op once
+        // DisplayDevicePath is set, and silent while there is still nothing to find.
+        if (string.IsNullOrEmpty(seat.DisplayDevicePath))
+        {
+            try
+            {
+                if (await _seatManager.TryLateDisplayDetectionAsync(seat, ct))
+                    return true; // DisplayDevicePath changed — worth broadcasting
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Seat {Id}: late display detection failed", seat.Id);
+            }
+        }
+
         return false; // no state change
     }
 

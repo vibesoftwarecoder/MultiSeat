@@ -146,6 +146,21 @@ public sealed class ApolloConfigBuilder
         sb.AppendLine("dd_refresh_rate_option = auto");
         sb.AppendLine();
 
+        // ── Force a virtual display for the seat ──────────────────────
+        // The dd_* keys above only configure a virtual display that already exists;
+        // nothing above causes Apollo to CREATE one. Apollo gates creation on
+        // (process.cpp): headless_mode || client-requested || per-app virtual_display
+        // || !allow_encoder_probing(). Inside an RDP-loopback seat the RDP surface is an
+        // active display, so encoder probing succeeds and none of the other triggers fire
+        // — Apollo creates nothing and the seat silently captures the RDP desktop instead
+        // (SeatManager then logs "SudoVDA display not found in Apollo log").
+        // headless_mode is the only trigger that is a config key, so it is the one we can
+        // set from here: "When enabled, all apps will start in virtual display."
+        sb.AppendLine("# Headless — force every app into a virtual display. Without this,");
+        sb.AppendLine("# Apollo never creates SudoVDA in an RDP seat and captures the RDP surface.");
+        sb.AppendLine("headless_mode = enabled");
+        sb.AppendLine();
+
         // ── Encoder ───────────────────────────────────────────────────
         // Prefer NVENC for hardware-accelerated low-latency encoding.
         // Apollo will fall back to AMF → software if NVENC is unavailable.
