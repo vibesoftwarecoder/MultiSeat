@@ -24,7 +24,7 @@ namespace MultiSeat.Service.Input;
 /// Two consequences fall straight out of that line and both are load-bearing:
 ///
 ///   * <b>Session 0 never matches</b>, so a service running there can use "can I still open this
-///     device?" as a live probe that a rule took effect — see <see cref="CanOpen"/>. Worth having
+///     device?" as a live probe that a rule took effect — see <see cref="Probe"/>. Worth having
 ///     for a feature that is undocumented and could be dropped by a future release without a word.
 ///   * On a session match <c>Blacklisted()</c> returns FALSE, so the <b>whitelist is never
 ///     consulted</b> for a confined device. That removes the whitelist's global-hole problem for
@@ -136,17 +136,61 @@ public static class HidHideSessionJail
     }
 
     /// <summary>
-    /// Can this process open the device right now? Run from the service (session 0) it is a live
-    /// check that a jail rule really took effect: session 0 never matches the jail, so a confined
-    /// device must become unopenable here while staying open inside its seat.
-    ///
-    /// Note what this does and does not prove. A false says session 0 is being refused, which is
-    /// what a working rule looks like from here — it does NOT prove the seat can still see the
-    /// pad. A plain global hide (or a rule whose suffix was stripped) produces the same false.
+    /// What a session-0 probe of a device found.
     /// </summary>
-    public static bool CanOpen(string symbolicLink)
+    public enum JailProbe
     {
-        if (string.IsNullOrWhiteSpace(symbolicLink)) return false;
+        /// <summary>The device opened. Whatever is on paper, the confinement is not in effect.</summary>
+        Open,
+
+        /// <summary>
+        /// The open was <b>refused</b>. Session 0 can never match a jail, so this is what a live
+        /// rule looks like from outside it.
+        /// </summary>
+        Confined,
+
+        /// <summary>
+        /// The open failed, but nothing refused it — most often the device is simply not there.
+        /// Nothing was proved either way.
+        ///
+        /// <para>Kept apart from <see cref="Confined"/> deliberately: see <see cref="Probe"/>.</para>
+        /// </summary>
+        Unreachable,
+    }
+
+    /// <summary>One probe: the verdict, and the Win32 error that produced it (0 when it opened).</summary>
+    public readonly record struct JailProbeResult(JailProbe Verdict, int Error);
+
+    /// <summary>
+    /// Ask, from this process's session, whether the device can still be opened.
+    ///
+    /// Run from the service (session 0) this is a live check that a jail rule really took effect:
+    /// session 0 never matches the jail, so a confined device must become unopenable here while
+    /// staying open inside its seat.
+    ///
+    /// ⚠️ <b>Which failure it was, is the whole answer.</b> A jail refuses the open with
+    /// <c>ERROR_ACCESS_DENIED</c> (5) and nothing else. An absent device — or a malformed path —
+    /// fails with <c>ERROR_FILE_NOT_FOUND</c> (2). Reading only "did the handle come back invalid"
+    /// turns both into "the jail is holding", so <b>a rule that matches nothing verifies as a rule
+    /// being enforced</b>: the exact silent success this probe exists to prevent, sitting inside
+    /// the probe.
+    ///
+    /// That distinction is also a cheap version of the "open an ordinary file first" control: a
+    /// probe that has broken and can open nothing returns 2, not 5, so it cannot fake a confined
+    /// device. It is the weaker of the two checks — it only catches breakage in the path rather
+    /// than in the process — but it costs one integer.
+    ///
+    /// Note what a <see cref="JailProbe.Confined"/> does and does not prove. It says session 0 is
+    /// being refused, which is what a working rule looks like from here — it does NOT prove the
+    /// seat can still see the pad. A plain global hide (or a rule whose suffix was stripped)
+    /// produces the same refusal.
+    /// </summary>
+    public static JailProbeResult Probe(string symbolicLink)
+    {
+        // An empty path is not a refusal. Returning "confined" for one would report a jail on a
+        // device that was never named.
+        if (string.IsNullOrWhiteSpace(symbolicLink))
+            return new JailProbeResult(JailProbe.Unreachable, ERROR_FILE_NOT_FOUND);
 
         using var handle = CreateFileW(
             symbolicLink,
@@ -157,7 +201,15 @@ public static class HidHideSessionJail
             0,
             IntPtr.Zero);
 
-        return !handle.IsInvalid;
+        // Immediately, and before anything else runs: the next managed call is free to overwrite
+        // the thread's last error.
+        var error = Marshal.GetLastWin32Error();
+
+        if (!handle.IsInvalid) return new JailProbeResult(JailProbe.Open, 0);
+
+        return new JailProbeResult(
+            error == ERROR_ACCESS_DENIED ? JailProbe.Confined : JailProbe.Unreachable,
+            error);
     }
 
     // ── interop ──────────────────────────────────────────────────────
@@ -166,6 +218,8 @@ public static class HidHideSessionJail
     private const uint FILE_SHARE_READ = 1;
     private const uint FILE_SHARE_WRITE = 2;
     private const uint OPEN_EXISTING = 3;
+    internal const int ERROR_FILE_NOT_FOUND = 2;
+    internal const int ERROR_ACCESS_DENIED = 5;
 
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     private static extern uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);

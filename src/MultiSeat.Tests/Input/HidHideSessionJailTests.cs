@@ -114,6 +114,72 @@ public class HidHideSessionJailTests
     // need a test of its own. This feature writes into a kernel-side, persistent blacklist and can
     // take a controller away from whoever is holding it, so "off unless asked for" has to be true
     // in both places at once.
+    // ── The session-0 probe ──────────────────────────────────────────
+    //
+    // These exist because the probe had the failure it was built to prevent, inside itself. It
+    // read only "did the handle come back invalid", so a rule matching NOTHING verified as a rule
+    // being enforced.
+    //
+    // A jail refuses an open with ERROR_ACCESS_DENIED (5) and nothing else. An absent device, or
+    // a malformed path, fails with ERROR_FILE_NOT_FOUND (2). Measured 2026-08-21 with a positive
+    // control, so a probe that can open nothing could not fake the result:
+    //
+    //   a real file (control that the P/Invoke works at all)          opens
+    //   a well-formed HID path for a device that is NOT present       fails, err=2
+    //   a malformed path                                              fails, err=2
+    //
+    // The bottom two rows used to report a working jail. There is deliberately no test asserting
+    // Confined: producing a 5 needs a live rule on a real device, which is exactly what cannot be
+    // arranged on a build agent — and is why the code reads the error rather than the boolean.
+
+    [Fact]
+    public void ARealFileOpens_SoTheProbeItselfWorks()
+    {
+        // The control. Without it every row below is satisfied by a probe that opens nothing at
+        // all, which is indistinguishable from a jail that is working perfectly.
+        var probe = HidHideSessionJail.Probe(typeof(HidHideSessionJailTests).Assembly.Location);
+
+        Assert.Equal(HidHideSessionJail.JailProbe.Open, probe.Verdict);
+        Assert.Equal(0, probe.Error);
+    }
+
+    [Fact]
+    public void AWellFormedPathToAnAbsentDeviceIsNotVerified()
+    {
+        // Shaped exactly like a real HID node's device path, naming a device that is not there.
+        // This is the case that used to report "the jail is holding".
+        const string absent =
+            @"\\?\hid#vid_045e&pid_028e&ig_00#3&00000000&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+
+        var probe = HidHideSessionJail.Probe(absent);
+
+        Assert.Equal(HidHideSessionJail.JailProbe.Unreachable, probe.Verdict);
+        Assert.NotEqual(HidHideSessionJail.ERROR_ACCESS_DENIED, probe.Error);
+    }
+
+    [Theory]
+    [InlineData(@"not a device path at all")]
+    [InlineData(@"\\?\hid#")]
+    [InlineData(@"USB\VID_045E&PID_028E\01")]   // an instance path, not a device path - a real mistake
+    public void AMalformedPathIsNotVerifiedEither(string path)
+    {
+        var probe = HidHideSessionJail.Probe(path);
+
+        Assert.Equal(HidHideSessionJail.JailProbe.Unreachable, probe.Verdict);
+        Assert.NotEqual(HidHideSessionJail.ERROR_ACCESS_DENIED, probe.Error);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void AnEmptyPathIsNotARefusal(string? path)
+    {
+        // A device that was never named cannot have been refused. Returning "confined" here would
+        // report a jail on nothing at all.
+        Assert.Equal(HidHideSessionJail.JailProbe.Unreachable, HidHideSessionJail.Probe(path!).Verdict);
+    }
+
     [Fact]
     public void TheShippedDefaultsMatchTheCompiledOnesAndAreOff()
     {

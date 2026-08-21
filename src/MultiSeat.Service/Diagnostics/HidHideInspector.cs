@@ -111,7 +111,15 @@ public static class HidHideInspector
             Console.WriteLine($"    HID parent  : {hidParent ?? "<unknown>"}");
             Console.WriteLine($"    XUSB parent : {xusbParent ?? "<unknown>"}   <- ROOT\\... here means emulated");
             Console.WriteLine($"    verdict     : {(emulated ? "EMULATED (ours to confine)" : "physical (left alone)")}");
-            Console.WriteLine($"    session 0 can open it: {HidHideSessionJail.CanOpen(pad.SymbolicLink)}");
+            var probe = HidHideSessionJail.Probe(pad.SymbolicLink);
+            Console.WriteLine($"    session 0 probe: {probe.Verdict}" +
+                              (probe.Error == 0 ? "" : $" (win32 {probe.Error})") +
+                              probe.Verdict switch
+                              {
+                                  HidHideSessionJail.JailProbe.Open => "   <- openable here, so no jail is in effect",
+                                  HidHideSessionJail.JailProbe.Confined => "   <- refused, which is what a live jail looks like",
+                                  _ => "   <- not a refusal, so nothing is proved either way",
+                              });
             Console.WriteLine($"    rules a jail to session N would write:");
             foreach (var rule in HidHideSessionJail.ConfineAll(pad, 99))
                 Console.WriteLine($"       --dev-hide \"{rule.Replace("!99", "!<N>")}\"");

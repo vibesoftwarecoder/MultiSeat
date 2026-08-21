@@ -355,27 +355,47 @@ public sealed class HidHideConfigurator
     /// ⚠️ What it proves is one-directional: a refusal here means session 0 is being denied. It
     /// does not prove the seat can still see the pad — a plain global hide, or a rule whose suffix
     /// was stripped, would look exactly the same from here.
+    ///
+    /// ⚠️ And it is the KIND of failure that answers, not the fact of one. A jail refuses with
+    /// <c>ERROR_ACCESS_DENIED</c>; an absent device fails with <c>ERROR_FILE_NOT_FOUND</c>. Only
+    /// the first is evidence — see <see cref="HidHideSessionJail.Probe"/>.
     /// </summary>
     private void VerifyJail(SeatInfo seat, HidHideDevice pad)
     {
         if (!_options.VerifyHidHideJail) return;
         if (string.IsNullOrWhiteSpace(pad.SymbolicLink)) return;
 
-        if (HidHideSessionJail.CanOpen(pad.SymbolicLink))
+        var probe = HidHideSessionJail.Probe(pad.SymbolicLink);
+
+        switch (probe.Verdict)
         {
-            _logger.LogWarning(
-                "Seat {Id}: jail rules were written but session 0 can still open '{Pad}'. The " +
-                "confinement is NOT in effect — either cloaking is off, an application whitelist " +
-                "entry is defeating it, or this HidHide build no longer honours the '!<session>' " +
-                "suffix (it is undocumented). Gamepad input is not isolated.",
-                seat.Id, pad.FriendlyName);
-        }
-        else
-        {
-            _logger.LogInformation(
-                "Seat {Id}: verified — session 0 is refused '{Pad}', which is what a live jail " +
-                "looks like from outside it.",
-                seat.Id, pad.FriendlyName);
+            case HidHideSessionJail.JailProbe.Open:
+                _logger.LogWarning(
+                    "Seat {Id}: jail rules were written but session 0 can still open '{Pad}'. The " +
+                    "confinement is NOT in effect — either cloaking is off, an application whitelist " +
+                    "entry is defeating it, or this HidHide build no longer honours the '!<session>' " +
+                    "suffix (it is undocumented). Gamepad input is not isolated.",
+                    seat.Id, pad.FriendlyName);
+                break;
+
+            case HidHideSessionJail.JailProbe.Confined:
+                _logger.LogInformation(
+                    "Seat {Id}: verified — session 0 is refused '{Pad}', which is what a live jail " +
+                    "looks like from outside it.",
+                    seat.Id, pad.FriendlyName);
+                break;
+
+            default:
+                // NOT a success. Nobody can open a device that is not there, so this says nothing
+                // about the rule — and reporting it as a working jail is how a rule that matches
+                // nothing gets recorded as one being enforced.
+                _logger.LogWarning(
+                    "Seat {Id}: could not verify the jail on '{Pad}' — opening it failed with " +
+                    "Win32 error {Error}, which is not a refusal (a jail gives {Denied}). The " +
+                    "device is most likely gone, so the rules that were written may match nothing. " +
+                    "Nothing was proved either way.",
+                    seat.Id, pad.FriendlyName, probe.Error, HidHideSessionJail.ERROR_ACCESS_DENIED);
+                break;
         }
     }
 
