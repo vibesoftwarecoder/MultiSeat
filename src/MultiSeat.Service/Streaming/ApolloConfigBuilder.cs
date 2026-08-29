@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.AccessControl;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -72,7 +73,7 @@ public sealed class ApolloConfigBuilder
         // generated sunshine.conf so Apollo uses that path instead of the shared exe-dir default.
         // Only create if absent — pairings (stored in sunshine_state) survive re-provisioning.
         EnsureSeatConfigDir(seatDir);
-        EnsureSeatStateFile(seatDir);
+        EnsureSeatStateFile(seatDir, seat.AccountName);
         EnsureSeatAppsJson(seatDir);
 
         var sb = new StringBuilder(2048);
@@ -520,10 +521,15 @@ public sealed class ApolloConfigBuilder
     /// Apollo is pointed here via file_state = {seatDir}/config/sunshine_state.json in the config.
     /// Only creates the file if absent — preserves pairings on re-provision.
     /// </summary>
-    private void EnsureSeatStateFile(string seatDir)
+    private void EnsureSeatStateFile(string seatDir, string accountName)
     {
         var statePath = Path.Combine(seatDir, "config", "sunshine_state.json");
-        if (File.Exists(statePath)) return;
+        if (File.Exists(statePath))
+        {
+            // Seats provisioned before this ran still carry the read-only ACL.
+            GrantSeatWrite(statePath, accountName);
+            return;
+        }
 
         // UUID format matches what Apollo writes: uppercase 8-4-4-4-12
         var uuid = Guid.NewGuid().ToString("D").ToUpperInvariant();
@@ -537,7 +543,37 @@ public sealed class ApolloConfigBuilder
             """;
 
         File.WriteAllText(statePath, json, Encoding.UTF8);
+        GrantSeatWrite(statePath, accountName);
         _logger.LogInformation("Created per-seat state file with UUID {Uuid}: {Path}", uuid, statePath);
+    }
+
+    /// <summary>
+    /// Give the seat account write access to a file the service created.
+    ///
+    /// Files written here inherit ProgramData's ACL, where Users get read and
+    /// execute but not write. Apollo runs as the seat account and rewrites the
+    /// state file every time it pairs a client — add_authorized_client() calls
+    /// save_state() then load_state(). The write fails silently, the reload puts
+    /// the old contents back, and the client that just paired is gone. The seat
+    /// pairs successfully and then refuses that client's certificate on every
+    /// call after, which is a hard failure to trace from either end.
+    /// </summary>
+    private void GrantSeatWrite(string path, string accountName)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            var acl = info.GetAccessControl();
+            acl.AddAccessRule(new FileSystemAccessRule(accountName, FileSystemRights.Modify, AccessControlType.Allow));
+            info.SetAccessControl(acl);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Could not grant {Account} write access to {Path} — Apollo will not be able to remember the clients this seat pairs",
+                accountName, path);
+        }
     }
 
     /// <summary>
