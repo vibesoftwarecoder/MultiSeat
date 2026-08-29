@@ -64,6 +64,7 @@ public sealed class ApolloConfigBuilder
         // All seats share one credentials file so web UI login persists across re-provisioning.
         // The file is created by MultiSeat on first run (from Apollo's default config) and survives seat teardown.
         var credPath = Path.Combine(configDir, "shared_credentials.json").Replace('\\', '/');
+        var tlsDir = Path.Combine(seatDir, "config", "credentials").Replace('\\', '/');
         EnsureSharedCredentials(configDir);
         // platf::appdata() on Windows resolves to {exe_dir}/config/ — not the working directory.
         // To isolate each seat's state file (and thus its UUID), we seed sunshine_state.json in
@@ -278,6 +279,13 @@ public sealed class ApolloConfigBuilder
         sb.AppendLine("# Security");
         sb.AppendLine($"file_state = {statePath}");
         sb.AppendLine($"credentials_file = {credPath}");
+        // The same reasoning covers the TLS material. Left at its default Apollo
+        // looks for cakey.pem under {exe_dir}/config/credentials/, inside Program
+        // Files — which a seat account cannot write, so it cannot even generate
+        // one. It dies on "HTTP interface failed to initialize" and never opens a
+        // port. The per-seat credentials/ dir is already created for this.
+        sb.AppendLine($"pkey = {tlsDir}/cakey.pem");
+        sb.AppendLine($"cert = {tlsDir}/cacert.pem");
         // Each seat has independent pairing — Moonlight pairs per-seat
         sb.AppendLine("origin_web_ui_allowed = lan");
         sb.AppendLine();
