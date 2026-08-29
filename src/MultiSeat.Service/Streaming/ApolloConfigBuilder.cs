@@ -162,10 +162,16 @@ public sealed class ApolloConfigBuilder
         sb.AppendLine();
 
         // ── Encoder ───────────────────────────────────────────────────
-        // Prefer NVENC for hardware-accelerated low-latency encoding.
-        // Apollo will fall back to AMF → software if NVENC is unavailable.
-        sb.AppendLine("# Encoder — NVENC for hardware-accelerated low-latency encoding");
-        sb.AppendLine("encoder = nvenc");
+        // NVENC by default, for hardware-accelerated low-latency encoding, and
+        // Apollo falls back on its own where it is absent. That fallback is not
+        // safe everywhere: on AMD it lands on AMF, whose startup probe runs
+        // against the RDP surface a seat provides — 1000Hz refresh, no real
+        // display — and hangs there. Apollo then never reaches the point where
+        // it opens its HTTP servers, so the seat reports Ready with no port
+        // listening. MultiSeat:Encoder lets such a host say what to use.
+        var encoder = string.IsNullOrWhiteSpace(_options.Encoder) ? "nvenc" : _options.Encoder.Trim();
+        sb.AppendLine($"# Encoder — {encoder} (MultiSeat:Encoder)");
+        sb.AppendLine($"encoder = {encoder}");
         sb.AppendLine();
 
         // ── NVENC tuning ──────────────────────────────────────────────

@@ -17,6 +17,16 @@ public sealed class MultiSeatOptions
     // Apollo default is 1; we raise it because the NVENC hardware handles P4 at full framerate.
     public int NvencPreset { get; set; } = 4;
 
+    /// <summary>
+    /// Apollo encoder used for every seat. Left at "nvenc" nothing changes:
+    /// Apollo falls back on its own where NVENC is absent. Set it explicitly on
+    /// hosts where that fallback misbehaves — on AMD the AMF probe runs at
+    /// startup against the RDP surface a seat provides, and can hang there
+    /// before Apollo ever opens its ports. Apollo's own values: nvenc,
+    /// quicksync, amdvce, software.
+    /// </summary>
+    public string Encoder { get; set; } = "nvenc";
+
     // ── API ──────────────────────────────────────────────────────────
     public int ApiPort { get; set; } = Shared.Constants.DefaultApiPort;
     public string ApiKey { get; set; } = string.Empty;  // set in appsettings or env
