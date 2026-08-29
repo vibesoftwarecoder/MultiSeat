@@ -27,6 +27,14 @@ public sealed class MultiSeatOptions
     /// </summary>
     public string Encoder { get; set; } = "nvenc";
 
+    /// <summary>
+    /// Apollo's own log level for every seat. "info" is what a seat needs day
+    /// to day; "debug" is the only way to see why a seat's Apollo refuses a
+    /// pairing or a client, since its log is the sole window into a session
+    /// nobody can watch. Apollo's values: verbose, debug, info, warning, error.
+    /// </summary>
+    public string ApolloLogLevel { get; set; } = "info";
+
     // ── API ──────────────────────────────────────────────────────────
     public int ApiPort { get; set; } = Shared.Constants.DefaultApiPort;
     public string ApiKey { get; set; } = string.Empty;  // set in appsettings or env

@@ -312,7 +312,8 @@ public sealed class ApolloConfigBuilder
 
         // ── Logging ───────────────────────────────────────────────────
         sb.AppendLine("# Logging");
-        sb.AppendLine("min_log_level = info");
+        var logLevel = string.IsNullOrWhiteSpace(_options.ApolloLogLevel) ? "info" : _options.ApolloLogLevel.Trim();
+        sb.AppendLine($"min_log_level = {logLevel}");
         sb.AppendLine($"log_path = {logPath}");
         sb.AppendLine();
 
