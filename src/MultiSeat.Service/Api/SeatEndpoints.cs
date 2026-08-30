@@ -209,8 +209,25 @@ public static class SeatEndpoints
                 // Pass the seat's geometry: if the session has to be recreated rather than
                 // reattached, it must come back at the seat's own size, not inherit the
                 // console desktop's.
-                await sessionLauncher.LaunchSessionAsync(
+                //
+                // And keep the id it answers with. A recreated session is a NEW session,
+                // and everything that acts on this seat afterwards reads SessionId:
+                // ProcessInjector, the health check, display isolation. Dropped, they all
+                // keep aiming at the session that just went away — apollo/start fails with
+                // 500 and the seat can never come back.
+                seat.SessionId = await sessionLauncher.LaunchSessionAsync(
                     seat.AccountName, ct, RdpGeometry.ForClient(seat.Width, seat.Height));
+
+                // The health check parks a seat in Error when its session dies, and nothing
+                // ever takes it out again. Leave it there and the checks that would restart
+                // Apollo are skipped, so the seat stays broken although it now has a live
+                // session. Hand it back to the health check in the state it is actually in.
+                if (seat.Status == SeatStatus.Error)
+                {
+                    seat.Status = SeatStatus.Ready;
+                    seat.ErrorMessage = null;
+                }
+
                 return Results.Ok(new { sessionId = seat.SessionId, message = "Session reconnected" });
             });
 
