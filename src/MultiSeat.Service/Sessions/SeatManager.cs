@@ -95,6 +95,45 @@ public sealed class SeatManager
         _lifecycleGate = lifecycleGate;
     }
 
+    // Guards the account-ownership critical section in ProvisionSeatAsync (dedup check +
+    // seat registration). It is held only for that short check-and-insert — never across the
+    // long-running provisioning work, which serializes per seat via SeatLifecycleGate. The
+    // seat registry itself is concurrent, so this lock exists only to make
+    // "is AccountName free?" + "register seat" atomic: two concurrent provisions for the same
+    // account must not both pass the check and register.
+    private readonly object _accountOwnershipLock = new();
+
+    /// <summary>
+    /// True when any seat in <paramref name="seats"/> occupies <paramref name="accountName"/> —
+    /// i.e. is live or currently provisioning that account. Mirrors <see cref="ActiveSeatCount"/>'s
+    /// notion of "live": Idle entries were never provisioned and Error entries hold no resources
+    /// (their ports/sessions were released on failure), so neither blocks a fresh provision of the
+    /// same account. Comparison is case-insensitive because Windows account names are, and the
+    /// per-account config directory (ApolloConfigBuilder) is case-insensitive on NTFS.
+    /// </summary>
+    internal static bool AccountNameHasLiveSeat(IEnumerable<SeatInfo> seats, string accountName) =>
+        seats.Any(s => s.Status is not (SeatStatus.Idle or SeatStatus.Error)
+            && string.Equals(s.AccountName, accountName, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Atomically register <paramref name="seat"/> in <paramref name="seats"/> unless another
+    /// live/provisioning seat already occupies its AccountName. The check and the insert run
+    /// under <paramref name="ownershipLock"/> — a lock covering only this short ownership
+    /// decision, never the long provisioning work — so two concurrent provisions of the same
+    /// account cannot both register. Returns true when the seat was registered.
+    /// </summary>
+    internal static bool TryRegisterSeat(
+        ConcurrentDictionary<Guid, SeatInfo> seats, object ownershipLock, SeatInfo seat)
+    {
+        lock (ownershipLock)
+        {
+            if (AccountNameHasLiveSeat(seats.Values, seat.AccountName))
+                return false;
+
+            return seats.TryAdd(seat.Id, seat);
+        }
+    }
+
     public int ActiveSeatCount => _seats.Count(s => s.Value.Status is not SeatStatus.Idle and not SeatStatus.Error);
     public IReadOnlyCollection<SeatInfo> GetAllSeats() => _seats.Values.ToList().AsReadOnly();
     public SeatInfo? GetSeat(Guid id) => _seats.GetValueOrDefault(id);
@@ -129,7 +168,20 @@ public sealed class SeatManager
             ProvisioningStep = "Session"
         };
 
-        _seats.TryAdd(seat.Id, seat);
+        // Register the seat under the account-ownership lock so the "already provisioned?"
+        // check and the dictionary insert are one atomic step. At most one live/provisioning
+        // seat may exist per AccountName: the per-account Apollo config directory, log, and
+        // sunshine_state.json are keyed by AccountName (not seat id), so a second live seat
+        // for the same account would share them — last-writer-wins config, and the first
+        // seat's later restart would re-read the second seat's ports.
+        //
+        // The per-seat SeatLifecycleGate cannot protect this: each provision creates a fresh
+        // seat Guid, so two provisions of the same account hold different gates. This lock
+        // covers only the ownership decision; it is released before any provisioning work.
+        if (!TryRegisterSeat(_seats, _accountOwnershipLock, seat))
+            throw new InvalidOperationException(
+                $"Account '{request.AccountName}' already has a seat — tear it down first.");
+
         await BroadcastState(seat);
 
         // Serialize everything that follows against recovery/reconnect/teardown for this seat.
