@@ -191,4 +191,108 @@ public class SeatPresetStoreTests : IDisposable
         Assert.False(store.DeleteByAccount("NeverExisted"));
         Assert.Single(store.GetAll());
     }
+
+    // ── Corruption quarantine (G10) ─────────────────────────────────────
+    //
+    // A malformed seat-presets.json used to load as empty with the corrupt bytes left in
+    // place — indistinguishable from "no presets yet" — and the next Save then overwrote
+    // the evidence. Load now moves proven-corrupt bytes aside before recovering empty.
+
+    [Fact]
+    public void MalformedFile_IsQuarantined_AndRecoversEmpty()
+    {
+        const string corrupt = "{ this is not valid json";
+        File.WriteAllText(_path, corrupt);
+        try
+        {
+            var store = NewStore();
+
+            Assert.Empty(store.GetAll());                       // documented recovery
+            Assert.False(File.Exists(_path));                   // corrupt bytes gone from the live path
+            var quarantine = Assert.Single(QuarantineArtifacts());
+            Assert.Equal(corrupt, File.ReadAllText(quarantine)); // original bytes preserved verbatim
+        }
+        finally
+        {
+            DeleteQuarantineArtifacts();
+        }
+    }
+
+    [Fact]
+    public void SecondCorruption_DoesNotOverwriteFirstQuarantine()
+    {
+        const string first = "{ corrupt one";
+        const string second = "{ corrupt two";
+        File.WriteAllText(_path, first);
+        try
+        {
+            NewStore();
+            File.WriteAllText(_path, second);
+            NewStore();
+
+            var artifacts = QuarantineArtifacts();
+            Assert.Equal(2, artifacts.Count);
+            var bodies = artifacts.Select(File.ReadAllText).ToList();
+            Assert.Contains(first, bodies);
+            Assert.Contains(second, bodies);
+        }
+        finally
+        {
+            DeleteQuarantineArtifacts();
+        }
+    }
+
+    [Fact]
+    public void LockedFile_IsNotQuarantined()
+    {
+        // An unreadable file is NOT proof of corruption (sharing violation, transient I/O):
+        // it must be left alone. An exclusive lock makes the read fail deterministically.
+        File.WriteAllText(_path, "[");
+        try
+        {
+            using var lockHandle = File.Open(_path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+            var store = NewStore();
+
+            Assert.Empty(store.GetAll());               // same in-memory recovery as before
+            Assert.True(File.Exists(_path));            // but the file was not moved
+            Assert.Empty(QuarantineArtifacts());
+        }
+        finally
+        {
+            DeleteQuarantineArtifacts();
+        }
+    }
+
+    [Fact]
+    public void SaveAfterQuarantine_WritesFreshState_AndKeepsEvidence()
+    {
+        const string corrupt = "{ this is not valid json";
+        File.WriteAllText(_path, corrupt);
+        try
+        {
+            NewStore().Upsert(Preset("Gaming", autoStart: true));
+
+            var quarantine = Assert.Single(QuarantineArtifacts());
+            Assert.Equal(corrupt, File.ReadAllText(quarantine)); // evidence intact
+            var reloaded = NewStore().GetByAccount("Gaming");    // fresh state round-trips
+            Assert.NotNull(reloaded);
+            Assert.True(reloaded.AutoStart);
+        }
+        finally
+        {
+            DeleteQuarantineArtifacts();
+        }
+    }
+
+    private List<string> QuarantineArtifacts() =>
+        Directory.EnumerateFiles(
+            Path.GetDirectoryName(_path)!,
+            Path.GetFileName(_path) + ".corrupt-*").ToList();
+
+    private void DeleteQuarantineArtifacts()
+    {
+        foreach (var artifact in QuarantineArtifacts())
+            try { File.Delete(artifact); } catch { /* best effort */ }
+    }
 }
