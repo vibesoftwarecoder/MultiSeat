@@ -173,7 +173,8 @@ public sealed class ApolloConfigBuilder
         // display — and hangs there. Apollo then never reaches the point where
         // it opens its HTTP servers, so the seat reports Ready with no port
         // listening. MultiSeat:Encoder lets such a host say what to use.
-        var encoder = SanitizeConfigValue(_options.Encoder, "nvenc", "Encoder");
+        var encoder = SanitizeConfigValue(_options.Encoder, "nvenc", "Encoder",
+            ["nvenc", "quicksync", "amdvce", "software"]);
         sb.AppendLine($"# Encoder — {encoder} (MultiSeat:Encoder)");
         sb.AppendLine($"encoder = {encoder}");
         sb.AppendLine();
@@ -314,7 +315,8 @@ public sealed class ApolloConfigBuilder
 
         // ── Logging ───────────────────────────────────────────────────
         sb.AppendLine("# Logging");
-        var logLevel = SanitizeConfigValue(_options.ApolloLogLevel, "info", "ApolloLogLevel");
+        var logLevel = SanitizeConfigValue(_options.ApolloLogLevel, "info", "ApolloLogLevel",
+            ["verbose", "debug", "info", "warning", "error"]);
         sb.AppendLine($"min_log_level = {logLevel}");
         sb.AppendLine($"log_path = {logPath}");
         sb.AppendLine();
@@ -767,7 +769,14 @@ public sealed class ApolloConfigBuilder
         }
     }
 
-    private string SanitizeConfigValue(string? value, string fallback, string key)
+    /// <summary>
+    /// Validate a host-supplied string that is written verbatim into sunshine.conf.
+    /// Empty, injection-shaped, or (when <paramref name="allowed"/> is given) undocumented
+    /// values warn and keep <paramref name="fallback"/> instead of reaching Apollo: an
+    /// unknown encoder or log level would otherwise be baked into every seat's live config
+    /// from a single appsettings typo. Matching is ordinal — Apollo's own keys are lowercase.
+    /// </summary>
+    private string SanitizeConfigValue(string? value, string fallback, string key, string[]? allowed = null)
     {
         var trimmed = (value ?? string.Empty).Trim();
         if (trimmed.Length == 0) return fallback;
@@ -779,6 +788,15 @@ public sealed class ApolloConfigBuilder
                 + "using {Fallback}. A value written straight into sunshine.conf can otherwise "
                 + "inject Apollo keys nobody chose.",
                 key, fallback);
+            return fallback;
+        }
+
+        if (allowed is not null && !allowed.Contains(trimmed, StringComparer.Ordinal))
+        {
+            _logger.LogWarning(
+                "MultiSeat:{Key} has unsupported value '{Value}' and was ignored; "
+                + "using {Fallback}. Supported values: {Allowed}.",
+                key, trimmed, fallback, string.Join(", ", allowed));
             return fallback;
         }
 
