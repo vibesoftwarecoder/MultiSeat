@@ -86,8 +86,41 @@ public sealed class SeatPresetStore
         try
         {
             if (!File.Exists(_filePath)) return;
-            var json = File.ReadAllText(_filePath);
-            _presets = JsonSerializer.Deserialize<List<SeatPreset>>(json, _json) ?? [];
+
+            string json;
+            try
+            {
+                json = File.ReadAllText(_filePath);
+            }
+            catch (Exception ex)
+            {
+                // The bytes could not be read at all (locked, denied, transient I/O).
+                // That is NOT proof of corruption, so the file is left alone.
+                _logger.LogWarning(ex,
+                    "Could not read seat presets from {Path} — starting empty", _filePath);
+                _presets = [];
+                return;
+            }
+
+            List<SeatPreset>? parsed;
+            try
+            {
+                parsed = JsonSerializer.Deserialize<List<SeatPreset>>(json, _json);
+            }
+            catch (JsonException ex)
+            {
+                // Readable but not valid JSON: definitely corrupt. Move the original bytes
+                // aside before recovering, otherwise the next Save would silently destroy
+                // the evidence of what the presets used to be.
+                QuarantineCorruptFile();
+                _logger.LogWarning(ex,
+                    "Seat presets at {Path} are corrupt and were quarantined — starting empty",
+                    _filePath);
+                _presets = [];
+                return;
+            }
+
+            _presets = parsed ?? [];
             _logger.LogInformation("Loaded {Count} seat preset(s) from {Path}",
                 _presets.Count, _filePath);
         }
@@ -95,6 +128,37 @@ public sealed class SeatPresetStore
         {
             _logger.LogWarning(ex, "Failed to load seat presets from {Path} — starting empty", _filePath);
             _presets = [];
+        }
+    }
+
+    /// <summary>
+    /// Move a proven-corrupt presets file aside next to the original, preserving its exact
+    /// bytes for diagnosis. The name carries a UTC timestamp (human-sortable) plus a random
+    /// suffix so repeated corruptions never overwrite previous evidence — and the move never
+    /// overwrites an existing artifact. Same directory, so no cross-volume move is involved.
+    ///
+    /// Best-effort by design: presets are autostart convenience, and refusing startup over
+    /// them would be worse than the corruption. If the move fails the original stays and
+    /// recovery proceeds empty in memory, exactly as before.
+    /// </summary>
+    private void QuarantineCorruptFile()
+    {
+        try
+        {
+            var dest = _filePath
+                + ".corrupt-"
+                + DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss")
+                + "-"
+                + Guid.NewGuid().ToString("N")[..8];
+            File.Move(_filePath, dest);
+            _logger.LogWarning("Quarantined corrupt seat presets {Path} → {Quarantine}",
+                _filePath, dest);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not quarantine corrupt seat presets at {Path} — evidence left in place",
+                _filePath);
         }
     }
 
