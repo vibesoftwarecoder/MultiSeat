@@ -1114,8 +1114,12 @@ $apolloPath = "$apolloInstallDir\sunshine.exe"
 # shipped sunshine.exe only (missing assets\), so checking sunshine.exe alone would
 # wrongly treat a broken install as complete and skip the fix. See MultiSeat issue #5.
 $apolloAssetsSeed = "$apolloInstallDir\assets\apps.json"
-$apolloZipName = "apollovibe-v2026.6.1-multiseat.1-windows-x64.zip"
-$apolloDownloadUrl = "https://github.com/vibesoftwarecoder/Apollo/releases/download/v2026.6.1-multiseat.1/$apolloZipName"
+# Deliberately version-free, and pointed at /releases/latest/ rather than a tag.
+# This used to name an exact tag and filename, so every ApolloVibe release needed a
+# matching edit here. That coupling is why installs sat on the June 2026 build until
+# 2026-09-05, three source fixes behind. Leave this URL alone and it stays current.
+$apolloZipName = "apollovibe-windows-x64.zip"
+$apolloDownloadUrl = "https://github.com/vibesoftwarecoder/ApolloVibe/releases/latest/download/$apolloZipName"
 
 $apolloComplete = (Test-Path $apolloPath) -and (Test-Path $apolloAssetsSeed)
 
@@ -1128,7 +1132,7 @@ if ($apolloComplete) {
     }
     $zip = Get-ChildItem $ScriptDir | Where-Object { $_.Name -eq $apolloZipName } | Select-Object -First 1
     if (-not $zip) {
-        $f = Get-Prerequisite $apolloZipName $apolloDownloadUrl "ApolloVibe v2026.6.1-multiseat.1 (vibesoftwarecoder fork)"
+        $f = Get-Prerequisite $apolloZipName $apolloDownloadUrl "ApolloVibe, latest release (vibesoftwarecoder fork)"
         if ($f) { $zip = Get-Item $f }
     }
     if ($zip) {
@@ -1146,7 +1150,7 @@ if ($apolloComplete) {
             Write-Host "  Check the zip structure and set ApolloExePath in appsettings.json." -ForegroundColor Yellow
         }
     } else {
-        Write-Skip "Apollo  --  download from https://github.com/vibesoftwarecoder/Apollo/releases"
+        Write-Skip "Apollo  --  download from https://github.com/vibesoftwarecoder/ApolloVibe/releases"
     }
 }
 
