@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using MultiSeat.Shared.Models;
 
@@ -102,10 +103,10 @@ public sealed class SeatPresetStore
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_filePath)!);
-            // Write-then-rename so a crash mid-write can't truncate the existing file.
-            var tmp = _filePath + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(_presets, _json));
-            File.Move(tmp, _filePath, overwrite: true);
+            // Atomic write-then-rename so a crash mid-write can't truncate the existing file.
+            // BOM-less UTF-8, exactly as the previous direct write produced.
+            AtomicFile.WriteAllText(_filePath,
+                JsonSerializer.Serialize(_presets, _json), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         }
         catch (Exception ex)
         {
