@@ -324,7 +324,9 @@ public sealed class ApolloConfigBuilder
         sb.AppendLine("# ping_timeout = 10000");
         sb.AppendLine("# back_button_timeout = 2000");
 
-        File.WriteAllText(configPath, sb.ToString(), Encoding.UTF8);
+        // Atomic replacement: Apollo reads this file at every (re)start, so a crash
+        // mid-write must never leave a torn config behind. Same bytes as before.
+        AtomicFile.WriteAllText(configPath, sb.ToString(), Encoding.UTF8);
         _logger.LogDebug("Wrote Apollo config to {Path} ({Bytes} bytes)",
             configPath, sb.Length);
 
@@ -359,7 +361,13 @@ public sealed class ApolloConfigBuilder
 
         if (updated)
         {
-            File.WriteAllLines(configPath, lines, Encoding.UTF8);
+            // Byte-identical to the previous File.WriteAllLines call (each line followed
+            // by a newline, including the last), written atomically: this runs on live
+            // seats whose Apollo may re-read the file, so a torn write is not acceptable.
+            var contents = lines.Length == 0
+                ? string.Empty
+                : string.Join(Environment.NewLine, lines) + Environment.NewLine;
+            AtomicFile.WriteAllText(configPath, contents, Encoding.UTF8);
             _logger.LogInformation("Updated output_name={DevicePath} in {Path}", displayDevicePath, configPath);
         }
     }
@@ -447,7 +455,9 @@ public sealed class ApolloConfigBuilder
             var json = File.ReadAllText(source);
             var stripped = StripConsoleOnlyAppKeys(json, out var removed);
 
-            File.WriteAllText(dest, stripped, Encoding.UTF8);
+            // Atomic: Apollo reads this at startup. The seat grant below targets the
+            // NEW file object, so it stays after the move (a rename does not carry ACEs).
+            AtomicFile.WriteAllText(dest, stripped, Encoding.UTF8);
 
             // Same hazard as the state file: the service writes this, so the seat inherits
             // read-and-execute and cannot save app edits made in Apollo's web UI. The write
@@ -603,7 +613,10 @@ public sealed class ApolloConfigBuilder
             }
             """;
 
-        File.WriteAllText(statePath, json, Encoding.UTF8);
+        // Atomic create: a torn initial file would satisfy the File.Exists check above
+        // forever, permanently breaking this seat's pairing. The grant targets the new
+        // file object, so it stays after the move.
+        AtomicFile.WriteAllText(statePath, json, Encoding.UTF8);
         GrantSeatWrite(statePath, accountName, StateFileConsequence);
         _logger.LogInformation("Created per-seat state file with UUID {Uuid}: {Path}", uuid, statePath);
     }
@@ -1108,8 +1121,10 @@ public sealed class ApolloConfigBuilder
     private static string GetStateFilePath(string accountName, string configDir) =>
         Path.Combine(configDir, accountName, "config", "sunshine_state.json");
 
+    // Atomic read-modify-write: Apollo holds pairing state in memory and rewrites this
+    // file, so a torn write loses pairings with no error at either end (see GrantSeatWrite).
     private static void WriteStateFile(string path, JsonNode node) =>
-        File.WriteAllText(path,
+        AtomicFile.WriteAllText(path,
             node.ToJsonString(new JsonSerializerOptions { WriteIndented = true }),
             Encoding.UTF8);
 
