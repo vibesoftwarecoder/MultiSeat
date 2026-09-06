@@ -95,4 +95,25 @@ public class SessionHealthCheckTests
     {
         Assert.False(SessionHealthCheck.IsWorthChecking(status));
     }
+
+    // ── ResolveRecoveryStatus ───────────────────────────────────────
+
+    [Theory]
+    [InlineData(SeatStatus.Ready, true, SeatStatus.Ready)]
+    [InlineData(SeatStatus.Streaming, true, SeatStatus.Streaming)]
+    [InlineData(SeatStatus.Ready, false, SeatStatus.Error)]
+    [InlineData(SeatStatus.Streaming, false, SeatStatus.Error)]
+    // A successful recovery from a non-operational state is anomalous by itself
+    // (CheckSeatAsync only recovers Ready/Streaming seats), so it parks in Error.
+    [InlineData(SeatStatus.Connecting, true, SeatStatus.Error)]
+    [InlineData(SeatStatus.Connecting, false, SeatStatus.Error)]
+    [InlineData(SeatStatus.Idle, true, SeatStatus.Error)]
+    [InlineData(SeatStatus.Provisioning, true, SeatStatus.Error)]
+    [InlineData(SeatStatus.TearingDown, true, SeatStatus.Error)]
+    [InlineData(SeatStatus.Error, true, SeatStatus.Error)]
+    public void ResolveRecoveryStatus_MapsPreviousStateAndOutcome(
+        SeatStatus previous, bool succeeded, SeatStatus expected)
+    {
+        Assert.Equal(expected, SessionHealthCheck.ResolveRecoveryStatus(previous, succeeded));
+    }
 }

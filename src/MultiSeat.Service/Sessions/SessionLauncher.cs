@@ -585,16 +585,12 @@ public sealed class SessionLauncher
             HideProcessWindows(primaryConsoleToken, consoleSessionId, mstscProcess.Id);
             MuteMstscAudio(primaryConsoleToken, consoleSessionId, mstscProcess.Id);
 
-            // Kill any orphaned mstsc from a previous attempt for the same session.
-            // This can happen if a reconnect or fresh-session creation overwrites an
-            // entry that was never cleaned up via DisconnectSession.
-            if (_pendingMstsc.TryRemove(sessionId, out var previousMstsc) && previousMstsc != null)
-            {
-                _logger.LogWarning(
-                    "Orphaned mstsc PID {Pid} found for session {Sid} — killing before replacement",
-                    previousMstsc.Id, sessionId);
-                KillMstsc(previousMstsc);
-            }
+            // Kill an mstsc left over for this same session id before overwriting the entry.
+            // Assigning straight into _pendingMstsc drops the previous Process without killing
+            // it, and nothing else holds a handle — so it survives as an orphan holding a
+            // session open. Reachable when a session is recreated or reconnected without a
+            // DisconnectSession in between.
+            KillOrphanedMstsc(sessionId);
 
             _pendingMstsc[sessionId] = mstscProcess;
             mstscProcess = null; // Don't kill in finally block
@@ -690,16 +686,8 @@ public sealed class SessionLauncher
             HideProcessWindows(primaryToken, consoleSessionId, mstscProcess.Id);
             MuteMstscAudio(primaryToken, consoleSessionId, mstscProcess.Id);
 
-            // Kill any orphaned mstsc from a previous attempt for the same session.
-            // This can happen if a fresh-session creation stored an entry that was
-            // never cleaned up via DisconnectSession.
-            if (_pendingMstsc.TryRemove(sessionId, out var previousMstsc) && previousMstsc != null)
-            {
-                _logger.LogWarning(
-                    "Orphaned mstsc PID {Pid} found for session {Sid} — killing before replacement",
-                    previousMstsc.Id, sessionId);
-                KillMstsc(previousMstsc);
-            }
+            // Same orphan risk as the fresh-session path above.
+            KillOrphanedMstsc(sessionId);
 
             _pendingMstsc[sessionId] = mstscProcess;
             mstscProcess = null;
