@@ -1116,7 +1116,7 @@ public sealed class ApolloConfigBuilder
 
             if (removed)
             {
-                WriteStateFile(statePath, node!);
+                WriteStateFile(statePath, accountName, node!);
                 _logger.LogInformation("Unpaired client '{Name}' from seat {Account}", clientName, accountName);
             }
 
@@ -1146,7 +1146,7 @@ public sealed class ApolloConfigBuilder
             if (devices == null) return;
 
             devices.Clear();
-            WriteStateFile(statePath, node!);
+            WriteStateFile(statePath, accountName, node!);
             _logger.LogInformation("Unpaired all clients from seat {Account}", accountName);
         }
         catch (Exception ex)
@@ -1158,12 +1158,33 @@ public sealed class ApolloConfigBuilder
     private static string GetStateFilePath(string accountName, string configDir) =>
         Path.Combine(configDir, accountName, "config", "sunshine_state.json");
 
-    // Atomic read-modify-write: Apollo holds pairing state in memory and rewrites this
-    // file, so a torn write loses pairings with no error at either end (see GrantSeatWrite).
-    private static void WriteStateFile(string path, JsonNode node) =>
+    /// <summary>
+    /// Atomic read-modify-write of a seat's pairing state. Apollo holds that state in memory and
+    /// rewrites the file, so a torn write loses pairings with no error at either end.
+    ///
+    /// ⛔ The re-grant is not optional. <see cref="AtomicFile.WriteAllText"/> replaces the target by
+    /// rename, and a renamed file is a NEW file object that carries none of the explicit ACEs the
+    /// old one had — including the seat's Modify, which is granted per file by
+    /// <see cref="GrantSeatWrite"/>. Without this the seat's Apollo silently loses write access to
+    /// its own pairing state after any unpair, and the failure only shows up on the NEXT pairing
+    /// request. That is exactly what <see cref="StateFileConsequence"/> describes.
+    ///
+    /// ⚠️ This method was `static` when the atomic write was introduced, which is how it shipped
+    /// without the re-grant while both sibling call sites had one — a static helper has no
+    /// accountName to grant with. Keep it an instance method.
+    ///
+    /// ⚠️ Since the seat directory is locked down (GH #28) the seat also inherits Modify from the
+    /// directory, so on a current host this grant is belt as well as braces. Do not remove it on
+    /// that basis: relying on directory inheritance to cover a missing per-file grant breaks
+    /// quietly if that ACL is ever loosened.
+    /// </summary>
+    private void WriteStateFile(string path, string accountName, JsonNode node)
+    {
         AtomicFile.WriteAllText(path,
             node.ToJsonString(new JsonSerializerOptions { WriteIndented = true }),
             Encoding.UTF8);
+        GrantSeatWrite(path, accountName, StateFileConsequence);
+    }
 
     // ── NVENC preset tables ───────────────────────────────────────────────
 
