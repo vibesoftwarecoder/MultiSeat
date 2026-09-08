@@ -21,6 +21,36 @@ namespace MultiSeat.Tests.Streaming;
 /// </summary>
 public class ApolloConfigAtomicTests
 {
+    // ── GH #28 follow-up: the re-grant that the atomic write made necessary ──
+    //
+    // AtomicFile replaces a file by rename, and a renamed file is a NEW file object carrying
+    // none of the explicit ACEs the old one had — including the seat's Modify, granted per file
+    // by GrantSeatWrite. Two of the three AtomicFile call sites re-granted; WriteStateFile did
+    // not, because it was `static` and so had no accountName to grant with.
+    //
+    // The consequence is silent and delayed: after an unpair the seat's Apollo cannot write its
+    // own pairing state, and nothing fails until the NEXT pairing request.
+    //
+    // Asserting the ACL itself would need a real local account and elevation, so this pins the
+    // structural property that made the bug possible instead — it is fast, deterministic, and
+    // fails the moment someone makes the helper static again.
+
+    [Fact]
+    public void WriteStateFile_IsAnInstanceMethodTakingAnAccountName_soItCanReGrant()
+    {
+        var m = typeof(ApolloConfigBuilder).GetMethod(
+            "WriteStateFile",
+            System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Public);
+
+        Assert.NotNull(m);
+        Assert.False(m!.IsStatic, "WriteStateFile must stay an instance method: a static helper has "
+            + "no accountName and cannot call GrantSeatWrite after the rename (GH #28).");
+        Assert.Contains(m.GetParameters(), p => p.ParameterType == typeof(string)
+            && string.Equals(p.Name, "accountName", System.StringComparison.Ordinal));
+    }
+
     [Fact]
     public void UpdateDisplayOutput_ChangesOnlyTargetLine_ByteIdenticalElsewhere()
     {
