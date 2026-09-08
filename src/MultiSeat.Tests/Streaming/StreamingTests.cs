@@ -1048,6 +1048,55 @@ public class StreamingTests
         finally { DeleteTestDir(seatDir); }
     }
 
+    // ── ApolloManager.IsTrustedLogOwner (GH #28) ─────────────────────────
+    // ResolveLogPath picks a log by name pattern and write time, and OnConnectAppLauncher then
+    // acts on its CLIENT CONNECTED lines. Both are forgeable by anyone who can create a file in
+    // the seat directory. Ownership is not, so it is the tiebreak.
+
+    private static SecurityIdentifier Sid(string value) => new(value);
+    private static SecurityIdentifier SeatAccountSid() => Sid("S-1-5-21-99-99-99-1001");
+    private static SecurityIdentifier OtherAccountSid() => Sid("S-1-5-21-99-99-99-1002");
+
+    [Fact]
+    public void IsTrustedLogOwner_RejectsAFileOwnedByAnotherAccount()
+    {
+        // The whole point: another seat plants apollo-evil.log, and it must not be selected.
+        Assert.False(ApolloManager.IsTrustedLogOwner(OtherAccountSid(), SeatAccountSid()));
+    }
+
+    [Fact]
+    public void IsTrustedLogOwner_AcceptsTheSeatsOwnLog()
+    {
+        // Apollo runs as the seat, so the seat owns the log it writes.
+        Assert.True(ApolloManager.IsTrustedLogOwner(SeatAccountSid(), SeatAccountSid()));
+    }
+
+    [Fact]
+    public void IsTrustedLogOwner_AcceptsSystemAndAdministrators()
+    {
+        // MultiSeat runs as SYSTEM, so the service owns anything it creates.
+        Assert.True(ApolloManager.IsTrustedLogOwner(
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), SeatAccountSid()));
+        Assert.True(ApolloManager.IsTrustedLogOwner(
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), SeatAccountSid()));
+    }
+
+    [Fact]
+    public void IsTrustedLogOwner_FailsOpenWhenTheOwnerCannotBeRead()
+    {
+        Assert.True(ApolloManager.IsTrustedLogOwner(null, SeatAccountSid()));
+    }
+
+    [Fact]
+    public void IsTrustedLogOwner_FailsOpenWhenTheSeatAccountDoesNotResolve()
+    {
+        // ⛔ Regression guard. An earlier draft only failed open on an unreadable owner, so an
+        // unresolvable account excluded EVERY candidate and handed back the requested path —
+        // silently blinding display detection and launch-on-connect, which is the exact failure
+        // the pattern search exists to avoid. Four ResolveLogPath tests caught it.
+        Assert.True(ApolloManager.IsTrustedLogOwner(OtherAccountSid(), null));
+    }
+
     // -- Dangling junction repair --------------------------------------
     //
     // Apollo resolves SUNSHINE_ASSETS_DIR ("assets", a RELATIVE string on Windows) against its
