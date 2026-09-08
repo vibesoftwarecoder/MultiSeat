@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using MultiSeat.Service.Configuration;
@@ -352,6 +354,11 @@ public sealed class ApolloManager
 
         try
         {
+            // The seat directory is named for the account, so the owner we expect is derivable
+            // without threading it through both call sites.
+            var seatSid = ResolveAccountSid(Path.GetFileName(seatDir.TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)));
+
             FileInfo? newest = null;
             foreach (var dir in new[] { seatDir, Path.Combine(seatDir, "logs") })
             {
@@ -360,6 +367,7 @@ public sealed class ApolloManager
                 foreach (var candidate in new DirectoryInfo(dir).EnumerateFiles("apollo*.log"))
                 {
                     if (!HasContent(candidate)) continue;
+                    if (!IsTrustedLogOwner(OwnerOf(candidate), seatSid)) continue;
                     if (newest is null || candidate.LastWriteTimeUtc > newest.LastWriteTimeUtc)
                         newest = candidate;
                 }
@@ -387,6 +395,64 @@ public sealed class ApolloManager
     /// because the streaming binary holds the log open for writing the whole time.
     /// A file we cannot open is one we could not read later either, so it counts as empty.
     /// </summary>
+    /// <summary>
+    /// Whether a candidate log may be believed, judged by who owns it (GH #28).
+    ///
+    /// <see cref="ResolveLogPath"/> picks a log by filename pattern and write time, and
+    /// <c>OnConnectAppLauncher</c> then acts on its "CLIENT CONNECTED" lines. Both of those are
+    /// forgeable by anyone who can create a file in the seat directory. Ownership is not: a planted
+    /// file is owned by whoever planted it.
+    ///
+    /// Only two accounts legitimately author these. Apollo runs as the seat, so the seat owns its
+    /// own log; MultiSeat runs as SYSTEM, so SYSTEM owns anything the service creates.
+    ///
+    /// ⚠️ Fails OPEN, deliberately, on BOTH unknowns - an owner that cannot be read and a seat
+    /// account that does not resolve. Excluding on doubt would hand back the requested path and
+    /// silently blind display detection and launch-on-connect, which is the regression the pattern
+    /// search exists to avoid in the first place. ⛔ Getting this wrong is not theoretical: an
+    /// earlier draft filtered when only the owner was unknown, which excluded every candidate any
+    /// time the account failed to resolve. Four ResolveLogPath tests caught it.
+    ///
+    /// The directory ACL applied in ApolloConfigBuilder is the control that actually closes GH #28.
+    /// This is defence in depth, and it covers the window on an existing host before its seats next
+    /// provision.
+    /// </summary>
+    internal static bool IsTrustedLogOwner(SecurityIdentifier? owner, SecurityIdentifier? seatSid)
+    {
+        // Both unknowns fail open, and for the same reason: filtering on a comparison we cannot
+        // make would exclude every candidate and hand back the requested path, blinding display
+        // detection and launch-on-connect on a host that has done nothing wrong.
+        if (owner is null) return true;    // owner unreadable
+        if (seatSid is null) return true;  // seat account did not resolve, so there is nothing to compare against
+
+        if (owner.IsWellKnown(WellKnownSidType.LocalSystemSid)) return true;
+        if (owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid)) return true;
+
+        return owner.Equals(seatSid);
+    }
+
+    /// <summary>Owner SID of a file, or null when it cannot be read.</summary>
+    private static SecurityIdentifier? OwnerOf(FileInfo file)
+    {
+        try
+        {
+            return file.GetAccessControl().GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+        }
+        catch (Exception) { return null; }
+    }
+
+    /// <summary>Local account name to SID, or null when it does not resolve.</summary>
+    private static SecurityIdentifier? ResolveAccountSid(string accountName)
+    {
+        if (string.IsNullOrWhiteSpace(accountName)) return null;
+        try
+        {
+            return (SecurityIdentifier)new NTAccount(Environment.MachineName, accountName)
+                .Translate(typeof(SecurityIdentifier));
+        }
+        catch (Exception) { return null; }
+    }
+
     private static bool HasContent(FileInfo file)
     {
         try

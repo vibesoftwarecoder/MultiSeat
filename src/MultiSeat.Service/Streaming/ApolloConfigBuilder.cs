@@ -56,6 +56,11 @@ public sealed class ApolloConfigBuilder
             throw new InvalidOperationException(
                 $"Account name '{seat.AccountName}' would escape the Apollo config directory.");
         Directory.CreateDirectory(seatDir);
+        // Lock the seat directory before anything is written into it (GH #28). Left inheriting, it
+        // carries ProgramData's BUILTIN\Users:(W) on the directory itself, so any local account -
+        // including every other seat - can create files here. Re-applied on every provision, so an
+        // existing host is fixed the next time its seats come up rather than needing a migration.
+        ProtectSeatDirectory(seatDir, seat.AccountName, SeatDirConsequence);
 
         var configPath = Path.Combine(seatDir, "sunshine.conf");
         // Requested, not guaranteed: some builds ignore log_path (Vibepollo writes timestamped
@@ -389,7 +394,7 @@ public sealed class ApolloConfigBuilder
         // carries ProgramData's BUILTIN\Users:(RX), so every standard user on the host -
         // including every OTHER seat - can read the TLS private key and impersonate this
         // seat's pairing endpoint.
-        ProtectSeatCredentialsDir(credDir, accountName);
+        ProtectSeatDirectory(credDir, accountName, CredentialsDirConsequence);
 
         // Apollo uses relative paths for its assets and tools directories
         // (e.g. ./assets/shaders/ for GPU shaders). Create junction points so
@@ -548,6 +553,11 @@ public sealed class ApolloConfigBuilder
     private const string LogFileConsequence =
         "this seat's Apollo will run but write no log at all, so the next fault on this seat has "
         + "to be diagnosed blind";
+    private const string CredentialsDirConsequence =
+        "its TLS private key stays readable by every local user";
+    private const string SeatDirConsequence =
+        "every local user - including every OTHER seat - can keep creating files in this seat's "
+        + "directory, so a planted apollo*.log can impersonate or suppress this seat's real log";
 
     /// <summary>
     /// Make sure the seat can write the log its Apollo is about to open.
@@ -717,11 +727,22 @@ public sealed class ApolloConfigBuilder
     /// entries on children when a parent's inheritable entries change.
     ///
     /// If the seat account cannot be resolved this does NOTHING and says so. Protecting the
-    /// directory without granting the seat would leave Apollo unable to read or write its own key,
-    /// which breaks the seat outright - a worse outcome than the exposure this closes, and that
-    /// exposure is the state the host was already in.
+    /// directory without granting the seat would leave Apollo unable to read or write its own
+    /// files, which breaks the seat outright - a worse outcome than the exposure this closes, and
+    /// that exposure is the state the host was already in.
+    ///
+    /// Used for two directories, and the seat one matters most (GH #28). ProgramData grants
+    /// BUILTIN\Users Write on the seat directory itself - ContainerInherit without ObjectInherit,
+    /// so existing files are safe but the directory is not - which let any local account, including
+    /// every OTHER seat, create files there. That is reachable: ApolloManager.ResolveLogPath picks
+    /// the newest apollo*.log by write time, and OnConnectAppLauncher acts on its CLIENT CONNECTED
+    /// lines, so a planted file could drive or suppress another seat's connect handling.
+    ///
+    /// ⭐ Applying this to the seat directory also makes the seat's Modify grant INHERITED rather
+    /// than a single explicit ACE per file, so a file replaced by rename keeps it. The explicit
+    /// GrantSeatWrite calls stay as defence in depth - do not remove them on the strength of this.
     /// </summary>
-    private void ProtectSeatCredentialsDir(string credDir, string accountName)
+    private void ProtectSeatDirectory(string dir, string accountName, string consequence)
     {
         SecurityIdentifier sid;
         try
@@ -734,23 +755,21 @@ public sealed class ApolloConfigBuilder
             _logger.LogWarning(
                 ex,
                 "Could not resolve {Account} to a SID, so {Dir} keeps its inherited permissions - "
-                + "its TLS private key stays readable by every local user",
-                accountName, credDir);
+                + "{Consequence}",
+                accountName, dir, consequence);
             return;
         }
 
         try
         {
-            new DirectoryInfo(credDir).SetAccessControl(BuildSeatCredentialsAcl(sid));
+            new DirectoryInfo(dir).SetAccessControl(BuildSeatCredentialsAcl(sid));
             _logger.LogInformation(
-                "Restricted {Dir} to SYSTEM, Administrators and {Account}", credDir, accountName);
+                "Restricted {Dir} to SYSTEM, Administrators and {Account}", dir, accountName);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(
-                ex,
-                "Could not restrict {Dir} - its TLS private key stays readable by every local user",
-                credDir);
+                ex, "Could not restrict {Dir} - {Consequence}", dir, consequence);
         }
     }
 
