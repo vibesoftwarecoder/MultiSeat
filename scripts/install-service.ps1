@@ -242,6 +242,104 @@ Write-Host ""
 # The real fix is signing the generated .rdp with rdpsign.exe and trusting the thumbprint
 # via the TrustedCertThumbprints policy. Not done yet.
 
+# -- RDP Wrapper check ------------------------------------------------
+# Every seat IS an RDP session, so without multi-session RDP no seat can ever start.
+# This script used to gate on SudoVDA and the audio cables but say nothing about the one
+# dependency nothing works without: it would register and start the service on a host where
+# seats were impossible, and the first sign the user got was a seat timing out (issue #33).
+#
+# Before 0.6.0 that was masked -- installing meant cloning the repo, so prerequisites\ was
+# in front of you. The zip install removed the clone and with it the reminder.
+#
+# Test BEHAVIOUR, not presence: an installed wrapper whose ini has no section for this
+# host's termsrv.dll is inactive, and looks identical to a correct install from the outside.
+# This mirrors RdpWrapper.EnsureMultiSession() in the service so the two cannot disagree.
+Write-Step "Checking RDP Wrapper (multi-session support)..."
+
+# termsrv.dll's StringFileInfo and its VS_FIXEDFILEINFO DISAGREE -- measured 2026-09-01, the
+# string said 10.0.26100.8115 while the raw fixed-info said .8972, and the raw one is what
+# RDPWrap keys on. Read FileVersionRaw and never fall back to the string.
+function Get-TermSrvVersionForGate {
+    $termsrv = Join-Path $env:SystemRoot "System32\termsrv.dll"
+    if (-not (Test-Path $termsrv)) { return $null }
+    $raw = (Get-Item $termsrv).VersionInfo.FileVersionRaw
+    if (-not $raw) { return $null }
+    return ("{0}.{1}.{2}.{3}" -f $raw.Major, $raw.Minor, $raw.Build, $raw.Revision)
+}
+
+# BOTH sections are required. RDPWrap patches with whatever it finds, so a half-present
+# pair is worse than none.
+function Test-RdpWrapCoverage($iniPath, $version) {
+    if (-not $version -or -not $iniPath -or -not (Test-Path $iniPath)) { return $false }
+    $ini = Get-Content $iniPath
+    $main   = [bool]($ini | Select-String -SimpleMatch -Pattern "[$version]"        -Quiet)
+    $slInit = [bool]($ini | Select-String -SimpleMatch -Pattern "[$version-SLInit]" -Quiet)
+    return ($main -and $slInit)
+}
+
+$script:RdpWrapProblem = $null
+$rdpWrapDll = $null
+$rdpWrapIni = $null
+
+$sys32Dll = Join-Path $env:SystemRoot "System32\rdpwrap.dll"
+if (Test-Path $sys32Dll) {
+    # Classic install: rdpwrap.dll dropped into System32.
+    $rdpWrapDll = $sys32Dll
+    $classicIni = Join-Path ${env:ProgramFiles} "RDP Wrapper\rdpwrap.ini"
+    if (Test-Path $classicIni) { $rdpWrapIni = $classicIni }
+} else {
+    # ServiceDll install (RDPWrap 1.6.2+, and TermWrap): TermService redirected away from
+    # the stock termsrv.dll. Do NOT require the name "rdpwrap" -- TermWrap is a different
+    # patch that works the same way, and demanding the name reported a working host as
+    # broken in issue #15. What matters is that the redirect exists.
+    try {
+        $svcDll = (Get-ItemProperty `
+            'HKLM:\SYSTEM\CurrentControlSet\Services\TermService\Parameters' `
+            -Name ServiceDll -ErrorAction Stop).ServiceDll
+        if ($svcDll) {
+            $expanded = [Environment]::ExpandEnvironmentVariables($svcDll)
+            if ((Split-Path $expanded -Leaf) -ne 'termsrv.dll' -and (Test-Path $expanded)) {
+                $rdpWrapDll = $expanded
+                # Only RDPWrap is keyed by an offsets ini. No sibling ini means the patch
+                # finds its offsets another way, and there is nothing to validate.
+                $sibling = Join-Path (Split-Path $expanded -Parent) "rdpwrap.ini"
+                if (Test-Path $sibling) { $rdpWrapIni = $sibling }
+            }
+        }
+    } catch {
+        # No ServiceDll value at all -- stock TermService. Handled as "not found" below.
+    }
+}
+
+$termSrvVersion = Get-TermSrvVersionForGate
+
+if (-not $rdpWrapDll) {
+    $script:RdpWrapProblem = "not installed"
+    Write-Host ""
+    Write-Host "  *** WARNING: no multi-session patch found. ***" -ForegroundColor Red
+    Write-Host "  No rdpwrap.dll in System32, and TermService still points at the stock" -ForegroundColor Yellow
+    Write-Host "  termsrv.dll. Every seat is an RDP session, so NO SEAT CAN START." -ForegroundColor Yellow
+    Write-Host "  Run prerequisites\install-prerequisites.ps1 to install RDP Wrapper." -ForegroundColor Yellow
+    Write-Host ""
+} elseif (-not $rdpWrapIni) {
+    Write-Host "  OK: multi-session patch at $rdpWrapDll (not ini-keyed, nothing to verify)" -ForegroundColor DarkGray
+} elseif (Test-RdpWrapCoverage $rdpWrapIni $termSrvVersion) {
+    Write-Host "  OK: RDP Wrapper covers termsrv $termSrvVersion" -ForegroundColor DarkGray
+} elseif (-not $termSrvVersion) {
+    Write-Host "  WARNING: could not read termsrv.dll's version -- coverage unverified." -ForegroundColor Yellow
+} else {
+    $script:RdpWrapProblem = "installed but does not cover termsrv $termSrvVersion"
+    Write-Host ""
+    Write-Host "  *** WARNING: RDP Wrapper is installed but INACTIVE. ***" -ForegroundColor Red
+    Write-Host "  $rdpWrapIni has no section pair for termsrv $termSrvVersion," -ForegroundColor Yellow
+    Write-Host "  which a Windows update almost certainly replaced. Every seat is an RDP" -ForegroundColor Yellow
+    Write-Host "  session, so NO SEAT CAN START until this build is covered." -ForegroundColor Yellow
+    Write-Host "  Fix: prerequisites\install-prerequisites.ps1 refreshes the ini, and" -ForegroundColor Yellow
+    Write-Host "       scripts\check-rdpwrap-offsets.ps1 -Generate computes the offsets" -ForegroundColor Yellow
+    Write-Host "       locally if the community ini has not caught up yet." -ForegroundColor Yellow
+    Write-Host ""
+}
+
 # -- SudoVDA check ---------------------------------------------------
 # SudoVDA is required for per-seat virtual display isolation.
 # Without it, Apollo captures the primary physical display and all seats
@@ -615,3 +713,17 @@ Write-Host "`n[MultiSeat] Service installed and $($svc.Status)!" -ForegroundColo
 Write-Host "  Dashboard: http://localhost:9550"
 Write-Host "  Logs:      Windows Event Log (Application / MultiSeat.Service) -- run scripts\show-logs.ps1"
 Write-Host "  Config:    $InstallDir\appsettings.json"
+
+# Repeat the RDP Wrapper verdict LAST. It was already printed above, but a successful
+# "Service installed" is what the user reads, and a warning several screens up is a
+# warning nobody sees -- which is how issue #33 arrived as a seat timeout instead.
+if ($script:RdpWrapProblem) {
+    Write-Host ""
+    Write-Host "  ================================================================" -ForegroundColor Red
+    Write-Host "  NO SEAT WILL START YET: RDP Wrapper is $($script:RdpWrapProblem)." -ForegroundColor Red
+    Write-Host "  Every seat is an RDP session. The service is installed and running," -ForegroundColor Yellow
+    Write-Host "  but seats will fail with a session timeout until you run:" -ForegroundColor Yellow
+    Write-Host "      prerequisites\install-prerequisites.ps1" -ForegroundColor White
+    Write-Host "  Then re-check with: scripts\check-rdpwrap-offsets.ps1" -ForegroundColor Yellow
+    Write-Host "  ================================================================" -ForegroundColor Red
+}
