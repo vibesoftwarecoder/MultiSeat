@@ -9,7 +9,17 @@
     Remove the service and clean up.
 #>
 param(
-    [switch]$Uninstall
+    [switch]$Uninstall,
+
+    # Install from a release asset instead of building. Point this at
+    # multiseat-windows-x64.zip from a MultiSeat release:
+    #
+    #     .\scripts\install-service.ps1 -FromZip .\multiseat-windows-x64.zip
+    #
+    # The asset is self-contained, so this path needs NO .NET SDK, NO .NET runtime and NO
+    # Node on the target - which is the entire point of issue #32. Everything after the
+    # deploy step (RDP setup, certificates, service registration) is identical either way.
+    [string]$FromZip
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,7 +56,11 @@ if ($Uninstall) {
 # -- Prerequisites check ---------------------------------------------
 Write-Step "Checking prerequisites..."
 $missing = @()
-if (!(Get-Command dotnet -ErrorAction SilentlyContinue)) { $missing += ".NET SDK" }
+# -FromZip installs a self-contained build, so the SDK is only a prerequisite when this run
+# is actually going to compile something. Demanding it either way would leave the barrier
+# issue #32 exists to remove.
+if (-not $FromZip -and !(Get-Command dotnet -ErrorAction SilentlyContinue)) { $missing += ".NET SDK" }
+if ($FromZip -and !(Test-Path $FromZip)) { $missing += "the zip at $FromZip (file not found)" }
 # Detect HidHide the same way the service does — via its driver service or the CLI on disk.
 # The old check keyed off an "HKLM:\SOFTWARE\Nefarius Software Solutions\HidHide" registry key
 # that HidHide 1.5.x doesn't reliably create, so it warned "not detected" even when HidHide was
@@ -393,105 +407,154 @@ foreach ($proc in $lingering) {
 Start-Sleep -Milliseconds 500
 Write-Step "Service stopped and file handles released"
 
-# -- Publish ----------------------------------------------------------
-Write-Step "Publishing MultiSeat.Service..."
-dotnet publish $ProjectDir -c Release -o "$InstallDir" --no-self-contained 2>&1
-if ($LASTEXITCODE -ne 0) {
-    throw "dotnet publish failed"
-}
+# -- Deploy: extract a release zip, or build from source --------------
+#
+# -FromZip installs the published asset from a MultiSeat release instead of building. That
+# is the whole point of issue #32: a release zip is self-contained, so this path needs no
+# .NET SDK, no .NET runtime and no Node on the target. The build path below is unchanged and
+# is still what a developer gets by default.
+if ($FromZip) {
+    $zipFull = (Resolve-Path $FromZip -ErrorAction Stop).Path
+    Write-Step "Installing from $zipFull"
 
-# -- Build InputHook DLL ----------------------------------------------
-# OPTIONAL component. MSYS2 is a developer dependency, not a MultiSeat prerequisite, and
-# EnableKeyboardMouseIsolation is OFF by default (the hook is a no-op as architected — see
-# MultiSeatOptions.EnableKeyboardMouseIsolation). A missing DLL changes nothing about how
-# MultiSeat runs, so these are informational notes, NOT warnings: emitting WARNING here made
-# a normal install look broken and got reported as a bug (issue #14).
-$InputHookSrc = Join-Path $PSScriptRoot "..\src\MultiSeat.InputHook"
-$Bash = "C:\msys64\usr\bin\bash.exe"
-if (Test-Path $Bash) {
-    Write-Step "Building MultiSeatInputHook.dll..."
-
-    # Windows path -> MSYS path, without a scriptblock -replace: scriptblock substitution is
-    # PowerShell 7 only and does NOT fail loudly on 5.1 - it stringifies the block into the
-    # result, producing a path like ' "/$(([string]C:/...[0]).ToLower())" /Users/...' and a
-    # CMake error about a directory that does not exist. Resolve-Path also drops the '..'.
-    $srcFull = (Resolve-Path $InputHookSrc).Path
-    $srcUnix = '/' + $srcFull.Substring(0, 1).ToLower() + ($srcFull.Substring(2) -replace '\\', '/')
-
-    $buildScript = "export PATH='/ucrt64/bin:`$PATH'; cmake -B '$srcUnix/build/Release' -S '$srcUnix' -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/ucrt64/bin/g++.exe -DCMAKE_MAKE_PROGRAM=/ucrt64/bin/ninja.exe && cmake --build '$srcUnix/build/Release'"
-
-    # This step is optional and must never abort the install. With $ErrorActionPreference =
-    # 'Stop' at the top of the file, anything the compiler writes to stderr surfaces as a
-    # NativeCommandError and kills the whole script - which on 5.1 left the service STOPPED
-    # mid-deploy, publish done and nothing restarted. Contain it here.
-    $prevEap = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
+    # Verify the payload BEFORE clearing the install directory. Extracting a bad zip over a
+    # working install would leave the host with neither.
+    $stage = Join-Path ([IO.Path]::GetTempPath()) ("multiseat-stage-" + [guid]::NewGuid().ToString("N").Substring(0,8))
+    New-Item -ItemType Directory -Path $stage -Force | Out-Null
     try {
-        & $Bash -lc $buildScript 2>&1 | Out-Null
-    }
-    catch {
-        $global:LASTEXITCODE = 1
+        Expand-Archive -Path $zipFull -DestinationPath $stage -Force
+
+        $required = @("MultiSeat.Service.exe", "appsettings.json", "wwwroot\index.html")
+        $absent = @($required | Where-Object { -not (Test-Path (Join-Path $stage $_)) })
+        if ($absent.Count -gt 0) {
+            throw "This zip is missing $($absent -join ', '). It is not a MultiSeat release asset -- nothing was installed."
+        }
+        # A framework-dependent zip would run only where the ASP.NET Core runtime happens to
+        # be installed, and would fail confusingly where it is not. Release assets are
+        # self-contained; refuse anything else rather than half-install it.
+        if (-not (Test-Path (Join-Path $stage "hostfxr.dll"))) {
+            throw "This zip is not self-contained (no hostfxr.dll), so it would need a .NET runtime on this host. Refusing to install it."
+        }
+
+        if (Test-Path $InstallDir) {
+            Get-ChildItem $InstallDir -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+        }
+        Copy-Item (Join-Path $stage "*") $InstallDir -Recurse -Force
+
+        $ver = "unknown"
+        try {
+            $ver = (& "$InstallDir\MultiSeat.Service.exe" --config 2>&1 |
+                    Select-String "version\s*:" | Select-Object -First 1) -replace ".*:\s*", ""
+        } catch { }
+        Write-Step "Extracted release $ver -- no SDK, runtime or Node needed"
     }
     finally {
-        $ErrorActionPreference = $prevEap
+        Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
-
+}
+else {
+    # -- Publish ----------------------------------------------------------
+    Write-Step "Publishing MultiSeat.Service..."
+    dotnet publish $ProjectDir -c Release -o "$InstallDir" --no-self-contained 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  Note: InputHook build failed -- skipping (optional, off by default)" -ForegroundColor DarkGray
+        throw "dotnet publish failed"
     }
-} else {
-    Write-Host "  Note: MSYS2 not present at C:\msys64 -- skipping optional InputHook build" -ForegroundColor DarkGray
-}
 
-# -- Copy InputHook DLL -----------------------------------------------
-if (Test-Path $InputHookBuild) {
-    Copy-Item $InputHookBuild "$InstallDir\MultiSeatInputHook.dll" -Force
-    Write-Step "Copied MultiSeatInputHook.dll"
-} else {
-    Write-Host "  Note: MultiSeatInputHook.dll not built -- keyboard/mouse isolation stays unavailable." -ForegroundColor DarkGray
-    Write-Host "        This is expected and safe: the feature is off by default and currently inert." -ForegroundColor DarkGray
-}
+    # -- Build InputHook DLL ----------------------------------------------
+    # OPTIONAL component. MSYS2 is a developer dependency, not a MultiSeat prerequisite, and
+    # EnableKeyboardMouseIsolation is OFF by default (the hook is a no-op as architected — see
+    # MultiSeatOptions.EnableKeyboardMouseIsolation). A missing DLL changes nothing about how
+    # MultiSeat runs, so these are informational notes, NOT warnings: emitting WARNING here made
+    # a normal install look broken and got reported as a bug (issue #14).
+    $InputHookSrc = Join-Path $PSScriptRoot "..\src\MultiSeat.InputHook"
+    $Bash = "C:\msys64\usr\bin\bash.exe"
+    if (Test-Path $Bash) {
+        Write-Step "Building MultiSeatInputHook.dll..."
 
-# -- Build and deploy Dashboard ---------------------------------------
-$DashboardDir = Join-Path $PSScriptRoot "..\src\MultiSeat.Dashboard"
-if (Test-Path (Join-Path $DashboardDir "package.json")) {
-    Write-Step "Building dashboard..."
-    Push-Location $DashboardDir
-    try {
-        # Install npm dependencies if node_modules is missing or incomplete
-        $nodeModules = Join-Path $DashboardDir "node_modules"
-        $viteMarker  = Join-Path $nodeModules "vite\bin\vite.js"
-        if (-not (Test-Path $viteMarker)) {
-            Write-Step "Installing dashboard npm dependencies..."
-            # Not (Get-Command ...)?.Source - the null-conditional operator is PowerShell 7 only,
-            # and a parse error is fatal for the WHOLE file, so this one line made the documented
-            # ".\scripts\install-service.ps1" fail on Windows PowerShell 5.1 before it ran a
-            # single step. Keep this script 5.1-clean; that is the shell the docs imply.
-            $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
-            $nodeExe = if ($nodeCmd) { $nodeCmd.Source } else { $null }
-            if (-not $nodeExe) { $nodeExe = "C:\Program Files\nodejs\node.exe" }
-            if (-not (Test-Path $nodeExe)) { throw "node.exe not found. Install Node.js first." }
-            $result = Start-Process $nodeExe -ArgumentList "install.cjs" `
-                -Wait -NoNewWindow -PassThru -WorkingDirectory $DashboardDir
-            if ($result.ExitCode -ne 0) { throw "npm install failed (exit $($result.ExitCode))" }
+        # Windows path -> MSYS path, without a scriptblock -replace: scriptblock substitution is
+        # PowerShell 7 only and does NOT fail loudly on 5.1 - it stringifies the block into the
+        # result, producing a path like ' "/$(([string]C:/...[0]).ToLower())" /Users/...' and a
+        # CMake error about a directory that does not exist. Resolve-Path also drops the '..'.
+        $srcFull = (Resolve-Path $InputHookSrc).Path
+        $srcUnix = '/' + $srcFull.Substring(0, 1).ToLower() + ($srcFull.Substring(2) -replace '\\', '/')
+
+        $buildScript = "export PATH='/ucrt64/bin:`$PATH'; cmake -B '$srcUnix/build/Release' -S '$srcUnix' -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/ucrt64/bin/g++.exe -DCMAKE_MAKE_PROGRAM=/ucrt64/bin/ninja.exe && cmake --build '$srcUnix/build/Release'"
+
+        # This step is optional and must never abort the install. With $ErrorActionPreference =
+        # 'Stop' at the top of the file, anything the compiler writes to stderr surfaces as a
+        # NativeCommandError and kills the whole script - which on 5.1 left the service STOPPED
+        # mid-deploy, publish done and nothing restarted. Contain it here.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $Bash -lc $buildScript 2>&1 | Out-Null
+        }
+        catch {
+            $global:LASTEXITCODE = 1
+        }
+        finally {
+            $ErrorActionPreference = $prevEap
         }
 
-        & cmd /c "$DashboardDir\build.bat"
-        if ($LASTEXITCODE -ne 0) { throw "Dashboard build failed" }
-        $distDir = Join-Path $DashboardDir "dist"
-        if (Test-Path $distDir) {
-            $wwwroot = Join-Path $InstallDir "wwwroot"
-            if (Test-Path $wwwroot) { Remove-Item $wwwroot -Recurse -Force }
-            Copy-Item $distDir $wwwroot -Recurse
-            Write-Step "Dashboard deployed to $wwwroot"
-        } else {
-            Write-Warning "Dashboard dist/ not found after build"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  Note: InputHook build failed -- skipping (optional, off by default)" -ForegroundColor DarkGray
         }
-    } finally {
-        Pop-Location
+    } else {
+        Write-Host "  Note: MSYS2 not present at C:\msys64 -- skipping optional InputHook build" -ForegroundColor DarkGray
     }
-} else {
-    Write-Warning "Dashboard not found -- skipping"
+
+    # -- Copy InputHook DLL -----------------------------------------------
+    if (Test-Path $InputHookBuild) {
+        Copy-Item $InputHookBuild "$InstallDir\MultiSeatInputHook.dll" -Force
+        Write-Step "Copied MultiSeatInputHook.dll"
+    } else {
+        Write-Host "  Note: MultiSeatInputHook.dll not built -- keyboard/mouse isolation stays unavailable." -ForegroundColor DarkGray
+        Write-Host "        This is expected and safe: the feature is off by default and currently inert." -ForegroundColor DarkGray
+    }
+
+    # -- Build and deploy Dashboard ---------------------------------------
+    $DashboardDir = Join-Path $PSScriptRoot "..\src\MultiSeat.Dashboard"
+    if (Test-Path (Join-Path $DashboardDir "package.json")) {
+        Write-Step "Building dashboard..."
+        Push-Location $DashboardDir
+        try {
+            # Install npm dependencies if node_modules is missing or incomplete
+            $nodeModules = Join-Path $DashboardDir "node_modules"
+            $viteMarker  = Join-Path $nodeModules "vite\bin\vite.js"
+            if (-not (Test-Path $viteMarker)) {
+                Write-Step "Installing dashboard npm dependencies..."
+                # Not (Get-Command ...)?.Source - the null-conditional operator is PowerShell 7 only,
+                # and a parse error is fatal for the WHOLE file, so this one line made the documented
+                # ".\scripts\install-service.ps1" fail on Windows PowerShell 5.1 before it ran a
+                # single step. Keep this script 5.1-clean; that is the shell the docs imply.
+                $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+                $nodeExe = if ($nodeCmd) { $nodeCmd.Source } else { $null }
+                if (-not $nodeExe) { $nodeExe = "C:\Program Files\nodejs\node.exe" }
+                if (-not (Test-Path $nodeExe)) { throw "node.exe not found. Install Node.js first." }
+                $result = Start-Process $nodeExe -ArgumentList "install.cjs" `
+                    -Wait -NoNewWindow -PassThru -WorkingDirectory $DashboardDir
+                if ($result.ExitCode -ne 0) { throw "npm install failed (exit $($result.ExitCode))" }
+            }
+
+            & cmd /c "$DashboardDir\build.bat"
+            if ($LASTEXITCODE -ne 0) { throw "Dashboard build failed" }
+            $distDir = Join-Path $DashboardDir "dist"
+            if (Test-Path $distDir) {
+                $wwwroot = Join-Path $InstallDir "wwwroot"
+                if (Test-Path $wwwroot) { Remove-Item $wwwroot -Recurse -Force }
+                Copy-Item $distDir $wwwroot -Recurse
+                Write-Step "Dashboard deployed to $wwwroot"
+            } else {
+                Write-Warning "Dashboard dist/ not found after build"
+            }
+        } finally {
+            Pop-Location
+        }
+    } else {
+        Write-Warning "Dashboard not found -- skipping"
+    }
 }
 
 # -- Create data directories ------------------------------------------

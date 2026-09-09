@@ -148,9 +148,19 @@ Two separate scripts — prereqs and service deploy are intentionally split:
 # Step 2: Build and deploy the MultiSeat service (run from scripts\)
 .\scripts\install-service.ps1
 
+# ...or install a release asset instead of building. Self-contained, so this path needs NO
+# .NET SDK, NO .NET runtime and NO Node on the target - the point of issue #32. Everything
+# after the deploy step (RDP setup, certs, service registration) is identical either way.
+.\scripts\install-service.ps1 -FromZip .\multiseat-windows-x64.zip
+
 # Remove the service
 .\scripts\install-service.ps1 -Uninstall
 ```
+
+⚠️ **The shipped version comes from `version.txt` at the repo root**, read into `<Version>` by the
+csproj. `.github/workflows/release.yml` refuses to publish when the git tag and that file disagree,
+so `v0.5.2` requires `version.txt` to say `0.5.2`. Before 2026-09-09 there was no version file and
+releases tagged `v0.5.1` shipped an assembly reporting `1.0.0`.
 
 ### RDPWrap offsets — the installer now verifies, it does not assume
 
@@ -440,5 +450,6 @@ a healthy jail — and it is why this is off by default. Set `SeatPadDevicePaths
 - HidHide v1.5.230 (controller isolation)
 - ViGEmBus v1.22.0 EXE — not MSI (virtual controller bus)
 - RDPWrap (multi-session RDP on Windows Home/Pro)
-- .NET 9 SDK
-- Node.js 20+
+- .NET 9 SDK — **source builds only.** A release zip is self-contained; `-FromZip` needs no SDK and
+  no runtime.
+- Node.js 20+ — **source builds only.** A release zip ships the dashboard already built.

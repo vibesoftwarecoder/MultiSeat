@@ -24,6 +24,26 @@
     ContinueOnError and the Exists guard matter: someone building from a source zip has no .git
     and no git on PATH, and that must produce an unstamped build, not a failed one.
   -->
+  <!--
+    The shipped version comes from version.txt at the repo root, so one file is the single
+    answer to "what version is this" for the binary, the release title and the tag. The
+    release workflow refuses to publish when the tag and this file disagree.
+
+    Before 2026-09-09 there was no version file at all: releases were tagged v0.5.1 while the
+    assembly reported 1.0.0, so the config inspector on a deployed host named a version that
+    matched no release. Exists() guard: a source zip without version.txt still builds, just
+    unversioned.
+  -->
+  <Target Name="ReadVersionFile" BeforeTargets="GetAssemblyVersion"
+          Condition="Exists('$(MSBuildProjectDirectory)/../../version.txt')">
+    <ReadLinesFromFile File="$(MSBuildProjectDirectory)/../../version.txt">
+      <Output TaskParameter="Lines" PropertyName="VersionFromFile" />
+    </ReadLinesFromFile>
+    <PropertyGroup Condition="'$(VersionFromFile)' != ''">
+      <Version>$(VersionFromFile.Trim())</Version>
+    </PropertyGroup>
+  </Target>
+
   <Target Name="StampCommit" BeforeTargets="GetAssemblyVersion"
           Condition="Exists('$(MSBuildProjectDirectory)/../../.git')">
     <Exec Command="git rev-parse --short=9 HEAD" ConsoleToMSBuild="true" ContinueOnError="true"

@@ -46,6 +46,27 @@ See [REQUIREMENTS.md](REQUIREMENTS.md) for the full hardware and software requir
 > **All commands must be run as Administrator in PowerShell 7+.** Windows PowerShell 5 is not supported.
 > Install PowerShell 7 if needed: `winget install Microsoft.PowerShell`
 
+### Installing from a release — no SDK, no runtime, no Node
+
+Download `multiseat-windows-x64.zip` from the [latest release](https://github.com/vibesoftwarecoder/MultiSeat/releases/latest)
+and point the installer at it:
+
+```powershell
+.\scripts\install-service.ps1 -FromZip .\multiseat-windows-x64.zip
+```
+
+The asset is **self-contained**, so this path needs no .NET SDK, no .NET runtime and no Node —
+only the prerequisites from Step 2 below, which are drivers and are needed either way. Everything
+else the installer does (RDP configuration, certificates, service registration) is identical to a
+source install.
+
+The installer refuses a zip that is missing the service, the dashboard or the bundled runtime, and
+it checks that **before** touching an existing install — so a bad download cannot leave you with a
+half-installed host.
+
+Build from source instead if you are developing MultiSeat, or want a build of a commit that has no
+release. That is what the rest of this section covers.
+
 ### Step 1 — Clone the repository
 
 ```powershell
@@ -79,8 +100,8 @@ This script automatically downloads and installs everything:
 | RDPWrap + rdpwrap.ini | Enables concurrent RDP sessions on Windows Home/Pro |
 | Apollo | Sunshine fork with multi-instance streaming support |
 | SudoVDA | Virtual display driver (one display per seat) |
-| .NET 9 SDK | Required to build and run MultiSeat.Service |
-| Node.js LTS | Required to build the dashboard |
+| .NET 9 SDK | Required only to **build from source**. Not needed with `-FromZip`, which installs a self-contained release asset. |
+| Node.js LTS | Required only to **build the dashboard from source**. Not needed with `-FromZip`, which ships it prebuilt. |
 
 It also enables Remote Desktop and opens the required firewall ports automatically.
 
@@ -203,8 +224,8 @@ Remove-Item "C:\ProgramData\MultiSeat"   -Recurse -Force
 
 ### Prerequisites
 
-- [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
-- [Node.js 20+](https://nodejs.org/)
+- [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) - **source builds only**; a release zip bundles the runtime
+- [Node.js 20+](https://nodejs.org/) - **source builds only**; a release zip ships the dashboard already built
 - **Optional:** [CMake 3.20+](https://cmake.org/) and [MSYS2 UCRT64](https://www.msys2.org/) with `mingw-w64-ucrt-x86_64-gcc` and `ninja` — only for the InputHook DLL, which is off by default and currently inert. Skip these unless you're working on that component; `install-service.ps1` builds it automatically if MSYS2 happens to be present at `C:\msys64`.
 
 > If you ran `prerequisites\install-prerequisites.ps1`, .NET SDK and Node.js are already installed.

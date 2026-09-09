@@ -1,0 +1,198 @@
+---
+name: Release - MultiSeat Windows x64
+
+# Every release from v0.2.0 to v0.5.1 shipped ZERO assets, so installing meant cloning the
+# repo and building it. scripts/install-service.ps1 runs `dotnet publish` and rebuilds the
+# dashboard, so a consumer needed the .NET 9 SDK *and* Node 20+ on their gaming host just to
+# try a seat manager. See issue #32.
+#
+# This publishes multiseat-windows-x64.zip on a v* tag.
+#
+# SELF-CONTAINED, deliberately. A framework-dependent build is far smaller (7.9 MB zipped
+# against 53.7 MB, measured 2026-09-09) but its runtimeconfig.json requires BOTH
+# Microsoft.NETCore.App and Microsoft.AspNetCore.App. That means the target has to install the
+# ASP.NET Core Runtime specifically - not the plain .NET Runtime, not the Desktop Runtime,
+# all three of which Microsoft offers on the same page. Trading 46 MB for "no runtime, ever"
+# is the right side of that deal for this audience, and it removes a whole class of support
+# round trip where the real answer is "you installed the wrong runtime".
+#
+# The asset name carries NO version, so releases/latest/download/ always resolves and nothing
+# downstream needs editing when a version changes - the same trick ApolloVibe uses and that
+# this repo's own prerequisite script already depends on.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:      # builds and uploads an artifact, never publishes a release
+
+permissions:
+  contents: write         # required to create the release
+
+jobs:
+  release:
+    name: Publish windows-x64 asset
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '9.0.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Resolve version, and refuse a tag that disagrees with version.txt
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(tr -d ' \r\n' < version.txt)
+          if [ -z "$VERSION" ]; then
+            echo "::error::version.txt is empty."
+            exit 1
+          fi
+          # On a tag build the tag and version.txt must agree, or the release title and the
+          # binary would claim different versions - invisible until someone reports it. This
+          # is the failure MoonlightVibe already guards the same way.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            if [ "v${VERSION}" != "$TAG" ]; then
+              echo "::error::Tag ${TAG} does not match version.txt (${VERSION}). Bump version.txt or move the tag."
+              exit 1
+            fi
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish service (self-contained)
+        run: >
+          dotnet publish src/MultiSeat.Service
+          -c Release -r win-x64 --self-contained
+          -o publish/MultiSeat
+
+      - name: Build dashboard
+        working-directory: src/MultiSeat.Dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - name: Stage dashboard into wwwroot
+        shell: pwsh
+        # install-service.ps1 puts the built dashboard in wwwroot beside the exe; the zip has
+        # to match that layout exactly or the extract-based install serves nothing.
+        run: |
+          $dist = "src/MultiSeat.Dashboard/dist"
+          if (-not (Test-Path $dist)) { throw "dashboard build produced no dist/ - refusing to ship a zip with no UI" }
+          Copy-Item $dist "publish/MultiSeat/wwwroot" -Recurse -Force
+
+      # The InputHook is built with CMake + Ninja under MSYS2's ucrt64 toolchain, exactly as
+      # scripts/install-service.ps1 does it. The runner ships MSYS2 but not that toolchain, so
+      # it is installed here rather than assumed.
+      - name: Set up MSYS2 ucrt64 toolchain
+        uses: msys2/setup-msys2@v2
+        continue-on-error: true
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Build InputHook DLL
+        shell: pwsh
+        # Optional by design, and it must stay that way. EnableKeyboardMouseIsolation is OFF by
+        # default and, as issue #18 established, the hook is a no-op as architected - a missing
+        # DLL changes nothing about how MultiSeat runs. So a failure here must never sink a
+        # release. It must still be VISIBLE, because a silently absent DLL is how a feature
+        # quietly stops existing.
+        continue-on-error: true
+        run: |
+          $src = "src/MultiSeat.InputHook"
+          if (-not (Test-Path "$src/CMakeLists.txt")) {
+            Write-Host "::warning::no InputHook CMakeLists.txt; skipping"
+            exit 0
+          }
+          $bash = "C:\msys64\usr\bin\bash.exe"
+          if (-not (Test-Path $bash)) {
+            Write-Host "::warning::MSYS2 not present; zip ships without MultiSeatInputHook.dll"
+            exit 0
+          }
+          # Windows path -> MSYS path. Same conversion install-service.ps1 uses, and for the
+          # same reason: CMake under MSYS will not accept a C:\ path.
+          $srcFull = (Resolve-Path $src).Path
+          $srcUnix = '/' + $srcFull.Substring(0,1).ToLower() + ($srcFull.Substring(2) -replace '\\','/')
+          $script = "export PATH='/ucrt64/bin:`$PATH'; cmake -B '$srcUnix/build/Release' -S '$srcUnix' -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/ucrt64/bin/g++.exe -DCMAKE_MAKE_PROGRAM=/ucrt64/bin/ninja.exe && cmake --build '$srcUnix/build/Release'"
+          & $bash -lc $script 2>&1 | Write-Host
+          $dll = "$src/build/Release/MultiSeatInputHook.dll"
+          if (Test-Path $dll) {
+            Copy-Item $dll "publish/MultiSeat/MultiSeatInputHook.dll" -Force
+            Write-Host "MultiSeatInputHook.dll included"
+          } else {
+            Write-Host "::warning::MultiSeatInputHook.dll was not produced - the zip ships without it. Harmless today (the feature is off by default and a no-op per #18), but it means a zip install and a source install differ."
+          }
+
+      - name: Verify the payload before zipping it
+        shell: pwsh
+        # A release that extracts to a broken tree is worse than no release, because it looks
+        # installed. Check the three things the installer relies on.
+        run: |
+          $root = "publish/MultiSeat"
+          $problems = @()
+          if (-not (Test-Path "$root/MultiSeat.Service.exe")) { $problems += "MultiSeat.Service.exe missing" }
+          if (-not (Test-Path "$root/wwwroot/index.html"))    { $problems += "wwwroot/index.html missing (dashboard not staged)" }
+          if (-not (Test-Path "$root/appsettings.json"))      { $problems += "appsettings.json missing" }
+          # Self-contained means the runtime must be inside. If this is absent the zip would
+          # silently require a .NET install, which is the entire thing this release fixes.
+          if (-not (Test-Path "$root/hostfxr.dll"))           { $problems += "hostfxr.dll missing - build is NOT self-contained" }
+          if ($problems.Count) {
+            $problems | ForEach-Object { Write-Host "::error::$_" }
+            throw "payload verification failed"
+          }
+          $mb = [math]::Round((Get-ChildItem $root -Recurse | Measure-Object Length -Sum).Sum / 1MB, 1)
+          Write-Host "payload OK, $mb MB before compression"
+
+      - name: Zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "publish/MultiSeat/*" -DestinationPath "dist/multiseat-windows-x64.zip" -CompressionLevel Optimal
+          $mb = [math]::Round((Get-Item "dist/multiseat-windows-x64.zip").Length / 1MB, 1)
+          Write-Host "multiseat-windows-x64.zip is $mb MB"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        # On a tag this is a convenience copy; the release below is the real output. Transient
+        # artifact-storage failures have aborted a tag build elsewhere in these repos and left
+        # a tag with no release, so on tags this must not be fatal. On workflow_dispatch the
+        # artifact IS the only output, so there it must still fail the job.
+        continue-on-error: ${{ startsWith(github.ref, 'refs/tags/') }}
+        with:
+          name: multiseat-windows-x64-${{ steps.version.outputs.version }}
+          path: dist/multiseat-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        # Tag pushes only. workflow_dispatch builds and stops, which is what makes it safe for
+        # verifying this workflow without publishing anything.
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: MultiSeat ${{ steps.version.outputs.version }}
+          files: dist/multiseat-windows-x64.zip
+          body: |
+            **`multiseat-windows-x64.zip` is a complete, self-contained install.** No .NET SDK,
+            no .NET runtime, no Node — extract it and run the installer.
+
+            ```powershell
+            .\scripts\install-service.ps1 -FromZip .\multiseat-windows-x64.zip
+            ```
+
+            Built from `${{ github.sha }}`.
+
+            The asset name carries no version on purpose, so
+            `releases/latest/download/multiseat-windows-x64.zip` always resolves to the newest
+            release and scripts that fetch it never need editing.
