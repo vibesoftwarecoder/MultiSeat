@@ -414,15 +414,24 @@ Write-Step "Service stopped and file handles released"
 # .NET SDK, no .NET runtime and no Node on the target. The build path below is unchanged and
 # is still what a developer gets by default.
 if ($FromZip) {
-    $zipFull = (Resolve-Path $FromZip -ErrorAction Stop).Path
-    Write-Step "Installing from $zipFull"
+    $srcFull = (Resolve-Path $FromZip -ErrorAction Stop).Path
+    Write-Step "Installing from $srcFull"
+
+    # Accept EITHER the .zip or an already-extracted folder. The asset now carries scripts\ , so
+    # the natural flow is to extract it and run the installer from inside - at which point asking
+    # the user to point back at the .zip would be circular, and would extract it a second time.
+    $isDir = (Test-Path $srcFull -PathType Container)
 
     # Verify the payload BEFORE clearing the install directory. Extracting a bad zip over a
     # working install would leave the host with neither.
     $stage = Join-Path ([IO.Path]::GetTempPath()) ("multiseat-stage-" + [guid]::NewGuid().ToString("N").Substring(0,8))
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     try {
-        Expand-Archive -Path $zipFull -DestinationPath $stage -Force
+        if ($isDir) {
+            $stage = $srcFull          # already extracted; read it in place
+        } else {
+            Expand-Archive -Path $srcFull -DestinationPath $stage -Force
+        }
 
         $required = @("MultiSeat.Service.exe", "appsettings.json", "wwwroot\index.html")
         $absent = @($required | Where-Object { -not (Test-Path (Join-Path $stage $_)) })
@@ -441,7 +450,15 @@ if ($FromZip) {
         } else {
             New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
         }
-        Copy-Item (Join-Path $stage "*") $InstallDir -Recurse -Force
+
+        # The asset carries scripts\ , prerequisites\ and README.md so it can install itself
+        # without a clone. They are NOT part of the deployed service - copying them would put a
+        # stale copy of the installer inside Program Files, which is exactly the kind of thing
+        # someone later runs by mistake.
+        $skip = @('scripts', 'prerequisites', 'README.md')
+        Get-ChildItem $stage -Force |
+            Where-Object { $skip -notcontains $_.Name } |
+            ForEach-Object { Copy-Item $_.FullName $InstallDir -Recurse -Force }
 
         $ver = "unknown"
         try {
@@ -451,7 +468,12 @@ if ($FromZip) {
         Write-Step "Extracted release $ver -- no SDK, runtime or Node needed"
     }
     finally {
-        Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+        # ONLY remove a staging dir we created. When -FromZip was given an already-extracted
+        # folder, $stage IS the user's own directory and deleting it would destroy the thing they
+        # just downloaded - along with the installer they are currently running from.
+        if (-not $isDir) {
+            Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 else {

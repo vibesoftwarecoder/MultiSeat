@@ -156,13 +156,33 @@ jobs:
           # the signal; a green step here should mean "handled", not "hidden".
           exit 0
 
+      # The asset has to carry the installer, not just the binary. v0.6.0 shipped without these and
+      # its own release notes told people to run `.\scripts\install-service.ps1` - a path that only
+      # existed if they had already cloned the repo. The release removed the SDK and Node
+      # requirement but not the clone, which is not what the notes claimed.
+      #
+      # These land at the zip ROOT alongside the service payload. install-service.ps1 -FromZip
+      # explicitly skips them when copying into Program Files, so they ship without polluting the
+      # install directory.
+      - name: Stage the installer scripts into the asset
+        shell: pwsh
+        run: |
+          foreach ($d in @('scripts','prerequisites')) {
+            if (-not (Test-Path $d)) { throw "$d/ is missing from the checkout - the asset would ship without the installer" }
+            Copy-Item $d "publish/MultiSeat/$d" -Recurse -Force
+          }
+          Copy-Item 'README.md' 'publish/MultiSeat/README.md' -Force
+          Write-Host "staged scripts/, prerequisites/ and README.md into the asset"
+
       - name: Verify the payload before zipping it
         shell: pwsh
         # A release that extracts to a broken tree is worse than no release, because it looks
-        # installed. Check the three things the installer relies on.
+        # installed. Check the things the installer relies on.
         run: |
           $root = "publish/MultiSeat"
           $problems = @()
+          if (-not (Test-Path "$root/scripts/install-service.ps1")) { $problems += "scripts/install-service.ps1 missing - the asset cannot install itself" }
+          if (-not (Test-Path "$root/prerequisites/install-prerequisites.ps1")) { $problems += "prerequisites/install-prerequisites.ps1 missing" }
           if (-not (Test-Path "$root/MultiSeat.Service.exe")) { $problems += "MultiSeat.Service.exe missing" }
           if (-not (Test-Path "$root/wwwroot/index.html"))    { $problems += "wwwroot/index.html missing (dashboard not staged)" }
           if (-not (Test-Path "$root/appsettings.json"))      { $problems += "appsettings.json missing" }
@@ -209,11 +229,13 @@ jobs:
           # softprops ignores an empty body_path, so this degrades cleanly.
           body_path: ${{ steps.version.outputs.notes_file }}
           body: |
-            **`multiseat-windows-x64.zip` is a complete, self-contained install.** No .NET SDK,
-            no .NET runtime, no Node — extract it and run the installer.
+            **`multiseat-windows-x64.zip` is a complete, self-contained install.** No clone, no
+            .NET SDK, no .NET runtime, no Node — it carries the installer scripts too. Extract it
+            anywhere and run, from inside the extracted folder:
 
             ```powershell
-            .\scripts\install-service.ps1 -FromZip .\multiseat-windows-x64.zip
+            .\prerequisites\install-prerequisites.ps1     # drivers - needed either way
+            .\scripts\install-service.ps1 -FromZip .
             ```
 
             Built from `${{ github.sha }}`.

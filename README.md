@@ -48,17 +48,22 @@ See [REQUIREMENTS.md](REQUIREMENTS.md) for the full hardware and software requir
 
 ### Installing from a release — no SDK, no runtime, no Node
 
-Download `multiseat-windows-x64.zip` from the [latest release](https://github.com/vibesoftwarecoder/MultiSeat/releases/latest)
-and point the installer at it:
+Download `multiseat-windows-x64.zip` from the [latest release](https://github.com/vibesoftwarecoder/MultiSeat/releases/latest),
+extract it anywhere, and run the installer from inside:
 
 ```powershell
-.\scripts\install-service.ps1 -FromZip .\multiseat-windows-x64.zip
+# from the extracted folder
+.\prerequisites\install-prerequisites.ps1     # drivers - needed either way
+.\scripts\install-service.ps1 -FromZip .
 ```
 
-The asset is **self-contained**, so this path needs no .NET SDK, no .NET runtime and no Node —
-only the prerequisites from Step 2 below, which are drivers and are needed either way. Everything
-else the installer does (RDP configuration, certificates, service registration) is identical to a
-source install.
+**No clone required.** The asset carries the installer scripts as well as the binary, and it is
+**self-contained** — no .NET SDK, no .NET runtime and no Node. Everything the installer does
+afterwards (RDP configuration, certificates, service registration) is identical to a source
+install.
+
+`-FromZip` accepts either the extracted folder (as above) or the `.zip` itself, so
+`-FromZip .\multiseat-windows-x64.zip` works too if you would rather not extract it first.
 
 The installer refuses a zip that is missing the service, the dashboard or the bundled runtime, and
 it checks that **before** touching an existing install — so a bad download cannot leave you with a
