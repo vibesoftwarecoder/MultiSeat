@@ -41,7 +41,7 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -88,18 +88,25 @@ jobs:
           Copy-Item $dist "publish/MultiSeat/wwwroot" -Recurse -Force
 
       # The InputHook is built with CMake + Ninja under MSYS2's ucrt64 toolchain, exactly as
-      # scripts/install-service.ps1 does it. The runner ships MSYS2 but not that toolchain, so
-      # it is installed here rather than assumed.
-      - name: Set up MSYS2 ucrt64 toolchain
-        uses: msys2/setup-msys2@v2
+      # scripts/install-service.ps1 does it. The runner ships MSYS2 at C:\msys64 but without
+      # that toolchain, so install it INTO THAT INSTANCE.
+      #
+      # The first run of this workflow used msys2/setup-msys2 here, which installs its own
+      # separate MSYS2 under the temp dir. The packages went there while the build step below
+      # invoked C:\msys64\usr\bin\bash.exe, so the build died on "cmake: command not found" -
+      # the toolchain was installed into one MSYS2 and the build ran in another. Using pacman
+      # against C:\msys64 keeps a single instance and matches install-service.ps1 exactly.
+      - name: Install ucrt64 toolchain into the runner's MSYS2
+        shell: pwsh
         continue-on-error: true
-        with:
-          msystem: UCRT64
-          update: false
-          install: >-
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-ninja
+        run: |
+          $bash = "C:\msys64\usr\bin\bash.exe"
+          if (-not (Test-Path $bash)) {
+            Write-Host "::warning::no MSYS2 at C:\msys64 on this runner image"
+            exit 0
+          }
+          & $bash -lc "pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja" 2>&1 | Write-Host
+          exit 0
 
       - name: Build InputHook DLL
         shell: pwsh
@@ -133,6 +140,11 @@ jobs:
           } else {
             Write-Host "::warning::MultiSeatInputHook.dll was not produced - the zip ships without it. Harmless today (the feature is off by default and a no-op per #18), but it means a zip install and a source install differ."
           }
+          # Exit clean deliberately. A failing native command leaves $LASTEXITCODE non-zero, so
+          # without this the step exits 1 and is only rescued by continue-on-error - which
+          # renders it GREEN in the UI while something really did fail. The warning above is
+          # the signal; a green step here should mean "handled", not "hidden".
+          exit 0
 
       - name: Verify the payload before zipping it
         shell: pwsh
