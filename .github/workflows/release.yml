@@ -65,6 +65,16 @@ jobs:
             fi
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          # Hand-written notes for this version if they exist, otherwise the generic body
+          # below. Release text is public and worth writing deliberately, but a release must
+          # never be blocked on someone having remembered to write it.
+          NOTES="docs/release-notes/${VERSION}.md"
+          if [ -f "$NOTES" ]; then
+            echo "notes_file=${NOTES}" >> "$GITHUB_OUTPUT"
+            echo "Using hand-written notes from ${NOTES}"
+          else
+            echo "No ${NOTES}; falling back to the generic release body."
+          fi
 
       - name: Publish service (self-contained)
         run: >
@@ -195,6 +205,9 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: MultiSeat ${{ steps.version.outputs.version }}
           files: dist/multiseat-windows-x64.zip
+          # body_path wins when docs/release-notes/<version>.md exists; body is the fallback.
+          # softprops ignores an empty body_path, so this degrades cleanly.
+          body_path: ${{ steps.version.outputs.notes_file }}
           body: |
             **`multiseat-windows-x64.zip` is a complete, self-contained install.** No .NET SDK,
             no .NET runtime, no Node — extract it and run the installer.
