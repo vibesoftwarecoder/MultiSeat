@@ -38,15 +38,24 @@ public sealed class SeatInfo
     /// <summary>
     /// The identity — PID plus the OS-reported start time — of the Apollo this seat launched.
     ///
-    /// ⭐ This is what makes a kill safe when <c>ApolloManager</c>'s in-memory instance record is
-    /// gone, which is exactly the state after a service restart. Without it the only survivor is
-    /// <see cref="ApolloProcessId"/>, a bare number Windows is free to have handed to something
-    /// else in the meantime, and terminating on that alone can kill an unrelated process tree.
-    /// PR B narrowed that path to a process-name check; carrying the identity here closes it.
+    /// It is the seat's own record of which process it owns, so a client can see it and a kill
+    /// has a second source to verify against. <see cref="ApolloProcessId"/> alone is a bare
+    /// number Windows is free to have handed to something else, and terminating on that can kill
+    /// an unrelated process tree.
     ///
-    /// Null when the start time could not be read at launch. ⛔ Never populate it with a
-    /// substitute timestamp: an identity carrying a made-up time can compare equal to a recycled
-    /// PID by coincidence, which is worse than having no identity at all.
+    /// ⚠️ This was first justified as covering "the instance record is gone after a service
+    /// restart, but the seat survives". That is NOT true — seats are in-memory only, with no
+    /// persistence and no restore, so the seat and the instance record are lost together. The
+    /// field is genuinely useful; that particular argument for it was wrong.
+    ///
+    /// ⛔ It must be rewritten wherever <see cref="ApolloProcessId"/> is, and cleared wherever
+    /// that is cleared. A restart that advanced the PID while leaving this pointing at the dead
+    /// process made <c>IsAlive</c> report a healthy Apollo as dead and made teardown leak the
+    /// live one.
+    ///
+    /// Null when the start time could not be read. ⛔ Never populate it with a substitute
+    /// timestamp: an identity carrying a made-up time can compare equal to a recycled PID by
+    /// coincidence, which is worse than having no identity at all.
     /// </summary>
     public ProcessIdentity? ApolloIdentity { get; set; }
 

@@ -247,6 +247,64 @@ public class ProcessIdentityTests
         }
     }
 
+    // ── the record must never contradict itself ─────────────────────────────────
+
+    [Fact]
+    public void AnInstanceWhoseIdentityNamesADifferentPid_ReportsDead()
+    {
+        // This is the shape RestartAsync used to produce: a NEW ProcessId carried alongside the
+        // PREVIOUS identity. Both readers then fail, in opposite and dangerous directions —
+        // IsAlive calls a healthy Apollo dead (restart loop), and Stop kills the old PID and
+        // leaks the live one. The test documents WHY the two fields must be written together.
+        using var victim = StartVictim();
+        try
+        {
+            var realStart = ApolloManager.GetProcessStartTime(victim.Id);
+            Assert.NotNull(realStart);
+
+            var contradictory = new ApolloInstance(
+                SeatId: Guid.NewGuid(),
+                ProcessId: victim.Id,                                  // the live process
+                ConfigPath: "x", SessionId: 2, AccountName: "GuestTest",
+                StartedAt: DateTimeOffset.UtcNow, RestartCount: 1,
+                Identity: new ProcessIdentity(victim.Id + 1, realStart!.Value));   // a different one
+
+            Assert.False(contradictory.IsAlive);   // healthy process, reported dead
+
+            // The same record with a consistent identity reports the truth.
+            var consistent = contradictory with
+            {
+                Identity = new ProcessIdentity(victim.Id, realStart.Value)
+            };
+            Assert.True(consistent.IsAlive);
+        }
+        finally
+        {
+            if (!victim.HasExited) victim.Kill(entireProcessTree: true);
+        }
+    }
+
+    [Fact]
+    public void AnInstanceWithNoIdentity_FallsBackToPidExistence()
+    {
+        // Start time unreadable at launch. Reporting dead here would make SessionHealthCheck
+        // restart a seat whose Apollo is running fine, so the fallback must say alive.
+        using var victim = StartVictim();
+        try
+        {
+            var noIdentity = new ApolloInstance(
+                SeatId: Guid.NewGuid(), ProcessId: victim.Id,
+                ConfigPath: "x", SessionId: 2, AccountName: "GuestTest",
+                StartedAt: DateTimeOffset.UtcNow, RestartCount: 0, Identity: null);
+
+            Assert.True(noIdentity.IsAlive);
+        }
+        finally
+        {
+            if (!victim.HasExited) victim.Kill(entireProcessTree: true);
+        }
+    }
+
     [Fact]
     public void TryKillIdentifiedProcess_NeverThrows()
     {

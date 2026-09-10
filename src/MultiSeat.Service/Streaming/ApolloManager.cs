@@ -176,7 +176,12 @@ public sealed class ApolloManager
         }
 
         // Reset restart count — a sleep reconnect is not a crash
-        _instances[seat.Id] = instance with { ProcessId = 0, RestartCount = 0 };
+        // Clear the identity along with the PID. Leaving it behind describes a process that has
+        // just been killed, and the record would then claim an identity it does not have. It
+        // fails closed rather than dangerously — a stale identity matches nothing — but a record
+        // that contradicts itself is exactly what made the restart path wrong.
+        _instances[seat.Id] = instance with { ProcessId = 0, RestartCount = 0, Identity = null };
+        seat.ApolloIdentity = null;
     }
 
     /// <summary>
@@ -198,8 +203,18 @@ public sealed class ApolloManager
             return;
         }
 
-        // The instance record is gone — the normal state after a service restart. The seat itself
-        // still carries the identity, so this stays a verified kill rather than a hopeful one.
+        // Second source for the identity, when the instance record has none.
+        //
+        // ⚠️ CORRECTION. This branch was originally justified by "after a service restart
+        // _instances is empty while the seat is still alive". That cannot happen: seats are held
+        // in memory only, with no persistence and no restore, so _seats and _instances are
+        // populated together and lost together. A restarted service has no SeatInfo to call this
+        // with in the first place.
+        //
+        // It is kept because it is cheap, correct, and the honest fallback if either store ever
+        // gains independent lifetime — not because the scenario above occurs today. The two are
+        // now written together at every site (start, restart, reconnect-kill), so they cannot
+        // disagree.
         if (seat.ApolloIdentity is { } seatIdentity)
         {
             var outcome = TryKillIdentifiedProcess(
@@ -250,16 +265,40 @@ public sealed class ApolloManager
 
         if (pid > 0)
         {
+            // ⛔ The identity MUST be re-read here. Carrying `prev`'s forward alongside a new
+            // ProcessId produces a record that contradicts itself, and both readers then fail in
+            // dangerous directions:
+            //
+            //   IsAlive  compares the new ProcessId against the OLD identity's, so a perfectly
+            //            healthy restarted Apollo reports DEAD — and SessionHealthCheck restarts
+            //            it again, forever, until MaxRestartAttempts.
+            //   Stop     kills using the OLD identity, finds that PID long gone, reports
+            //            AlreadyGone, and never touches the Apollo that is actually running —
+            //            leaking it on every teardown that follows a restart.
+            //
+            // Found by runtime-testing a real provision/teardown cycle; no unit test caught it.
+            var restartedAt = GetProcessStartTime(pid);
+            if (restartedAt is null)
+            {
+                _logger.LogWarning(
+                    "Seat {Id}: Apollo restarted (PID {Pid}) but its start time could not be " +
+                    "read — no PID-reuse protection for this instance", seat.Id, pid);
+            }
+
+            ProcessIdentity? identity = restartedAt is { } t ? new ProcessIdentity(pid, t) : null;
+
             _instances[seat.Id] = prev with
             {
                 ProcessId = pid,
                 StartedAt = DateTimeOffset.UtcNow,
                 RestartCount = prev.RestartCount + 1,
                 SessionId = seat.SessionId,
-                AccountName = seat.AccountName
+                AccountName = seat.AccountName,
+                Identity = identity
             };
 
             seat.ApolloProcessId = pid;
+            seat.ApolloIdentity = identity;
             _logger.LogInformation(
                 "Seat {Id}: Apollo restarted (PID {Pid})", seat.Id, pid);
         }
