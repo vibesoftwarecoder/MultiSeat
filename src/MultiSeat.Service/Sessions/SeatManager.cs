@@ -139,6 +139,58 @@ public sealed class SeatManager
     public SeatInfo? GetSeat(Guid id) => _seats.GetValueOrDefault(id);
 
     /// <summary>
+    /// Re-resolve a seat AFTER the lifecycle gate has been acquired, returning null when it is
+    /// gone or on its way out.
+    ///
+    /// ⭐ Every gated operation must call this. Resolving the seat before <c>AcquireAsync</c> and
+    /// then acting on that reference is a time-of-check/time-of-use race: the gate can be held by
+    /// a teardown for up to <see cref="SeatLifecycleGate.DefaultAcquisitionTimeout"/>, and the
+    /// seat we captured may not exist by the time we are let in. Acting on it then recreates the
+    /// very things teardown just destroyed — a Windows session, an mstsc, an Apollo, a display
+    /// assignment — with nothing left in <c>_seats</c> that would ever clean them up. An orphan
+    /// created this way is invisible: no seat owns it, so no teardown reaches it.
+    ///
+    /// The captured reference is deliberately NOT reused. A stale <see cref="SeatInfo"/> can
+    /// still be mutated and still looks healthy, which is what makes this class of bug quiet.
+    /// </summary>
+    private SeatInfo? LiveSeatAfterGate(Guid seatId, string operation)
+    {
+        var (seat, reason) = ResolveLiveSeat(_seats, seatId);
+
+        if (reason is not null)
+            _logger.LogInformation(
+                "Seat {Id}: {Operation} abandoned — {Reason}", seatId, operation, reason);
+
+        return seat;
+    }
+
+    /// <summary>
+    /// The decision behind <see cref="LiveSeatAfterGate"/>, as a pure function of the registry so
+    /// it can be tested without a constructed <see cref="SeatManager"/> — the same shape as
+    /// <see cref="TryRegisterSeat"/>. Returns the seat, or null plus why it was rejected.
+    /// </summary>
+    internal static (SeatInfo? Seat, string? Reason) ResolveLiveSeat(
+        ConcurrentDictionary<Guid, SeatInfo> seats, Guid seatId)
+    {
+        if (!seats.TryGetValue(seatId, out var seat))
+            return (null, "the seat was torn down while this operation waited for the lifecycle gate");
+
+        if (seat.Status == SeatStatus.TearingDown)
+            return (null, "the seat is tearing down");
+
+        return (seat, null);
+    }
+
+    /// <summary>
+    /// Put a pre-built seat straight into the registry.
+    ///
+    /// ⚠️ Exists for tests. The registry is otherwise only written by the full provisioning
+    /// pipeline, which needs a real Windows session, a virtual display and a running Apollo —
+    /// none of which exist on a build agent. Nothing in production calls this.
+    /// </summary>
+    internal void RegisterSeatDirect(SeatInfo seat) => _seats[seat.Id] = seat;
+
+    /// <summary>
     /// Full seat provisioning pipeline.
     /// </summary>
     public async Task<SeatInfo> ProvisionSeatAsync(SeatRequest request, CancellationToken ct)
@@ -490,8 +542,17 @@ public sealed class SeatManager
     /// </summary>
     public async Task LaunchAppInSeatAsync(Guid seatId, LaunchAppRequest request, CancellationToken ct)
     {
-        var seat = GetSeat(seatId)
-            ?? throw new InvalidOperationException("Seat not found.");
+        if (GetSeat(seatId) is null)
+            throw new InvalidOperationException("Seat not found.");
+
+        // Without the gate, a teardown could remove the seat — disconnecting and logging off its
+        // session — between the status check and the process creation below, orphaning the app in
+        // a session nothing in _seats would ever tear down.
+        using var lease = await _lifecycleGate.AcquireAsync(seatId, ct);
+
+        var seat = LiveSeatAfterGate(seatId, "app launch");
+        if (seat is null)
+            throw new InvalidOperationException("Seat not found.");
 
         if (seat.Status is not SeatStatus.Ready and not SeatStatus.Streaming)
             throw new InvalidOperationException($"Seat is in {seat.Status} state — cannot launch apps.");
@@ -508,18 +569,43 @@ public sealed class SeatManager
     /// <summary>
     /// Teardown a single seat — reverse order of provisioning.
     /// </summary>
-    public async Task TeardownSeatAsync(Guid seatId, CancellationToken ct)
+    public Task TeardownSeatAsync(Guid seatId, CancellationToken ct) =>
+        TeardownSeatAsync(seatId, SeatLifecycleGate.DefaultAcquisitionTimeout, ct);
+
+    /// <summary>
+    /// As <see cref="TeardownSeatAsync(Guid, CancellationToken)"/>, with the gate wait exposed so
+    /// the timeout path can be tested without a 30-second test. Production always uses the
+    /// default; this overload exists so the ordering guarantee is pinned by the REAL method
+    /// rather than by a copy of it in a test.
+    /// </summary>
+    internal async Task TeardownSeatAsync(Guid seatId, TimeSpan gateTimeout, CancellationToken ct)
     {
+        if (GetSeat(seatId) is null)
+            return;
+
+        // ⛔ Acquire the gate BEFORE removing the seat from _seats, not after.
+        //
+        // The reverse order looks harmless and is not: AcquireAsync throws TimeoutException after
+        // DefaultAcquisitionTimeout when another lifecycle operation holds the gate. Removing
+        // first meant that timeout left the seat OUT of the registry with its session, mstsc,
+        // Apollo and ports all still alive — an orphan nothing owned and no retry could reach,
+        // because every path into teardown starts by looking the seat up.
+        //
+        // Gate first, and a timeout propagates with the seat still registered and its status
+        // untouched, so the caller can simply try again.
+        //
+        // CancellationToken.None deliberately: a teardown that abandons half its cleanup leaks a
+        // session, an mstsc and a virtual display.
+        using var lease = await _lifecycleGate.AcquireAsync(
+            seatId, gateTimeout, CancellationToken.None);
+
+        // Only now is removal safe. Double teardown stays a no-op: the gate serialises the two
+        // callers and the loser finds the seat already gone.
         if (!_seats.TryRemove(seatId, out var seat))
             return;
 
         seat.TransitionTo(SeatStatus.TearingDown, _logger);
         await BroadcastState(seat);
-
-        // Makes Apollo Stop + DisconnectSession + DestroyDisplay atomic against any in-flight
-        // lifecycle operation for this seat. CancellationToken.None deliberately: a teardown
-        // that abandons half its cleanup leaks a session, an mstsc and a virtual display.
-        using var lease = await _lifecycleGate.AcquireAsync(seatId, CancellationToken.None);
 
         await TeardownSeatInternalAsync(seat, ct);
         _logger.LogInformation("Seat {Id}: torn down", seat.Id);
@@ -601,11 +687,14 @@ public sealed class SeatManager
     /// <summary>Stop Apollo for a seat without tearing down everything else.</summary>
     public async Task StopApollo(Guid seatId)
     {
-        var seat = GetSeat(seatId)
-            ?? throw new InvalidOperationException("Seat not found.");
+        if (GetSeat(seatId) is null)
+            throw new InvalidOperationException("Seat not found.");
 
         // Mutates ApolloProcessId and the ApolloManager instance record.
         using var lease = await _lifecycleGate.AcquireAsync(seatId, CancellationToken.None);
+
+        var seat = LiveSeatAfterGate(seatId, "Apollo stop");
+        if (seat is null) return;
 
         _apolloManager.Stop(seat);
         seat.ApolloProcessId = 0;
@@ -616,11 +705,14 @@ public sealed class SeatManager
     /// <summary>Start Apollo for a seat (must already have session + display).</summary>
     public async Task StartApolloAsync(Guid seatId, CancellationToken ct)
     {
-        var seat = GetSeat(seatId)
-            ?? throw new InvalidOperationException("Seat not found.");
+        if (GetSeat(seatId) is null)
+            throw new InvalidOperationException("Seat not found.");
 
         // Per-seat lifecycle gate: starts Apollo and mutates ApolloProcessId.
         using var lease = await _lifecycleGate.AcquireAsync(seatId, ct);
+
+        var seat = LiveSeatAfterGate(seatId, "Apollo start");
+        if (seat is null) return;
 
         if (seat.SessionId < 0)
             throw new InvalidOperationException("No active session — provision the seat first.");
@@ -642,11 +734,14 @@ public sealed class SeatManager
     /// <summary>Restart Apollo for a seat (stop + start).</summary>
     public async Task RestartApolloAsync(Guid seatId, CancellationToken ct)
     {
-        var seat = GetSeat(seatId)
-            ?? throw new InvalidOperationException("Seat not found.");
+        if (GetSeat(seatId) is null)
+            throw new InvalidOperationException("Seat not found.");
 
         // Per-seat lifecycle gate: Stop + Start is one compound mutation, not two.
         using var lease = await _lifecycleGate.AcquireAsync(seatId, ct);
+
+        var seat = LiveSeatAfterGate(seatId, "Apollo restart");
+        if (seat is null) return;
 
         _apolloManager.Stop(seat);
         seat.ApolloProcessId = 0;
@@ -803,10 +898,10 @@ public sealed class SeatManager
     }
 
     /// <summary>Reset the audio routing for a seat (release + re-assign cable + re-apply session defaults).</summary>
-    public void ResetAudio(Guid seatId)
+    public async Task ResetAudioAsync(Guid seatId)
     {
-        var seat = GetSeat(seatId)
-            ?? throw new InvalidOperationException("Seat not found.");
+        if (GetSeat(seatId) is null)
+            throw new InvalidOperationException("Seat not found.");
 
         // Nothing to reset under per-session audio: MultiSeat assigns no device, and the
         // session's Remote Audio endpoint lives and dies with the session itself. Re-assigning
@@ -819,6 +914,15 @@ public sealed class SeatManager
                 seatId);
             return;
         }
+
+        // Gate only the SharedHost path — PerSession returned above and stays gate-free, since it
+        // touches no shared cable state. A concurrent teardown (which releases the cable and logs
+        // the session off) interleaving between the release and the re-assign below would hand a
+        // cable to a seat no longer in _seats, orphaning the AudioRouter assignment.
+        using var lease = await _lifecycleGate.AcquireAsync(seatId, CancellationToken.None);
+
+        var seat = LiveSeatAfterGate(seatId, "audio reset");
+        if (seat is null) return;
 
         _audioRouter.ReleaseCable(seat);
         seat.VacCableIndex = _audioRouter.AssignCable(seat);
@@ -875,11 +979,14 @@ public sealed class SeatManager
     public async Task SetNvencPresetAsync(Guid seatId, NvencQualityPreset preset,
         SeatPresetStore presetStore, CancellationToken ct)
     {
-        var seat = GetSeat(seatId)
-            ?? throw new InvalidOperationException("Seat not found.");
+        if (GetSeat(seatId) is null)
+            throw new InvalidOperationException("Seat not found.");
 
         // Per-seat lifecycle gate: KillForReconnect + Start mutate ApolloProcessId.
         using var lease = await _lifecycleGate.AcquireAsync(seatId, ct);
+
+        var seat = LiveSeatAfterGate(seatId, "NVENC preset change");
+        if (seat is null) return;
 
         seat.NvencPreset = preset;
 
@@ -921,11 +1028,17 @@ public sealed class SeatManager
     public async Task SetResolutionAsync(Guid seatId, int width, int height,
         SeatPresetStore presetStore, CancellationToken ct)
     {
-        var seat = GetSeat(seatId)
-            ?? throw new InvalidOperationException("Seat not found.");
+        if (GetSeat(seatId) is null)
+            throw new InvalidOperationException("Seat not found.");
 
         // Per-seat lifecycle gate: rebuilds the session: SessionId, mstsc and ApolloProcessId all change.
         using var lease = await _lifecycleGate.AcquireAsync(seatId, ct);
+
+        // This one is the sharpest case for the re-check: everything below creates a NEW Windows
+        // session and a new Apollo. Run it against a seat a concurrent DELETE already removed and
+        // both are orphaned immediately, owned by nothing.
+        var seat = LiveSeatAfterGate(seatId, "resolution change");
+        if (seat is null) return;
 
         var geometry = RdpGeometry.ForClient(width, height);
         if (!geometry.IsValid)
@@ -978,8 +1091,16 @@ public sealed class SeatManager
     /// <summary>Recreate the virtual display for a seat.</summary>
     public async Task ResetDisplayAsync(Guid seatId, CancellationToken ct)
     {
-        var seat = GetSeat(seatId)
-            ?? throw new InvalidOperationException("Seat not found.");
+        if (GetSeat(seatId) is null)
+            throw new InvalidOperationException("Seat not found.");
+
+        // A concurrent teardown between the destroy and create below — teardown releases the
+        // display assignment and cleans the seat's Apollo config — would re-register a display
+        // record and rewrite a config for a seat that no longer exists.
+        using var lease = await _lifecycleGate.AcquireAsync(seatId, ct);
+
+        var seat = LiveSeatAfterGate(seatId, "display reset");
+        if (seat is null) return;
 
         await _displayManager.DestroyDisplayAsync(seat, ct);
         await _displayManager.CreateDisplayAsync(seat, ct);
@@ -994,16 +1115,23 @@ public sealed class SeatManager
     }
 
     /// <summary>Recreate the virtual controller for a seat.</summary>
-    public void ResetController(Guid seatId)
+    public async Task ResetControllerAsync(Guid seatId)
     {
-        var seat = GetSeat(seatId)
-            ?? throw new InvalidOperationException("Seat not found.");
+        if (GetSeat(seatId) is null)
+            throw new InvalidOperationException("Seat not found.");
 
         if (!_options.EnableViGEmController)
         {
             _logger.LogDebug("Seat {Id}: controller reset skipped — ViGEm controller disabled", seatId);
             return;
         }
+
+        // Destroy + recreate is not atomic on its own: a teardown interleaving here leaves a
+        // ViGEm pad created for a seat that no longer exists, and nothing to destroy it.
+        using var lease = await _lifecycleGate.AcquireAsync(seatId, CancellationToken.None);
+
+        var seat = LiveSeatAfterGate(seatId, "controller reset");
+        if (seat is null) return;
 
         UnassignControllersForSeat(seatId);
         _controllerManager.DestroyController(seat);
