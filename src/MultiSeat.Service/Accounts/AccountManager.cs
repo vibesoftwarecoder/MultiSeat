@@ -110,7 +110,7 @@ public sealed class AccountManager
     public AccountInfo CreateAccount(string username, string? password = null)
     {
         if (_managedAccounts.ContainsKey(username))
-            throw new InvalidOperationException($"Account '{username}' already exists.");
+            throw new ResourceConflictException($"Account '{username}' already exists.");
 
         // Generate a strong random password if not provided
         password ??= GeneratePassword();
@@ -127,7 +127,7 @@ public sealed class AccountManager
         var result = NetApi.NetUserAdd(null, 1, ref userInfo, out var paramErr);
 
         if (result == NetApi.NERR_UserExists)
-            throw new InvalidOperationException($"Windows account '{username}' already exists.");
+            throw new ResourceConflictException($"Windows account '{username}' already exists.");
 
         if (result != NetApi.NERR_Success)
             throw new InvalidOperationException(

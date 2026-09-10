@@ -135,6 +135,12 @@ public sealed class ApolloManager
 
         _instances[seat.Id] = instance;
 
+        // Also record it on the seat, which outlives this dictionary. _instances is in-memory
+        // only, so after a service restart it is empty while the seat and its Apollo are both
+        // still very much alive — and that is precisely when a kill would otherwise have nothing
+        // but a bare PID to go on.
+        seat.ApolloIdentity = instance.Identity;
+
         _logger.LogInformation(
             "Seat {Id}: Apollo started (PID {Pid}) — Moonlight can connect on port {Port}",
             seat.Id, pid, seat.PortBase + 1);
@@ -192,9 +198,20 @@ public sealed class ApolloManager
             return;
         }
 
-        // No identity available. This is the path after a service restart, where the instance
-        // record is gone and SeatInfo carries only a bare PID. Carrying the identity on SeatInfo
-        // would close it, but that is a contract change and belongs to PR D (issue #29).
+        // The instance record is gone — the normal state after a service restart. The seat itself
+        // still carries the identity, so this stays a verified kill rather than a hopeful one.
+        if (seat.ApolloIdentity is { } seatIdentity)
+        {
+            var outcome = TryKillIdentifiedProcess(
+                seatIdentity, $"stop for seat {seat.Id} (identity from seat)", waitMs: 5000);
+            _logger.LogInformation(
+                "Seat {Id}: Apollo stop via seat identity — {Outcome} (PID {Pid})",
+                seat.Id, outcome, seatIdentity.ProcessId);
+            return;
+        }
+
+        // Neither source has an identity, which means the start time was unreadable at launch.
+        // Fall back to the name check — weaker, and the last resort rather than the default.
         if (seat.ApolloProcessId <= 0) return;
         KillUnidentifiedApollo(seat.Id, seat.ApolloProcessId, "stop", waitMs: 5000);
     }

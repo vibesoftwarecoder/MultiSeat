@@ -35,6 +35,21 @@ public sealed class SeatInfo
     public int PortBase { get; set; }
     public int ApolloProcessId { get; set; }
 
+    /// <summary>
+    /// The identity — PID plus the OS-reported start time — of the Apollo this seat launched.
+    ///
+    /// ⭐ This is what makes a kill safe when <c>ApolloManager</c>'s in-memory instance record is
+    /// gone, which is exactly the state after a service restart. Without it the only survivor is
+    /// <see cref="ApolloProcessId"/>, a bare number Windows is free to have handed to something
+    /// else in the meantime, and terminating on that alone can kill an unrelated process tree.
+    /// PR B narrowed that path to a process-name check; carrying the identity here closes it.
+    ///
+    /// Null when the start time could not be read at launch. ⛔ Never populate it with a
+    /// substitute timestamp: an identity carrying a made-up time can compare equal to a recycled
+    /// PID by coincidence, which is worse than having no identity at all.
+    /// </summary>
+    public ProcessIdentity? ApolloIdentity { get; set; }
+
     // Emulator netplay — RetroArch host port for this seat (PortBase + offset; 0 = disabled).
     // Seats connect to each other over loopback at 127.0.0.1:<this port>.
     public int RetroArchNetplayPort { get; set; }

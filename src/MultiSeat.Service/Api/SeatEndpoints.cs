@@ -32,7 +32,7 @@ public static class SeatEndpoints
             }
             catch (InvalidOperationException ex)
             {
-                return Results.BadRequest(new { error = ex.Message });
+                return ApiErrors.ToResult(ex);
             }
         });
 
@@ -50,7 +50,7 @@ public static class SeatEndpoints
                 }
                 catch (InvalidOperationException ex)
                 {
-                    return Results.BadRequest(new { error = ex.Message });
+                    return ApiErrors.ToResult(ex);
                 }
             });
 
@@ -84,7 +84,7 @@ public static class SeatEndpoints
             }
             catch (InvalidOperationException ex)
             {
-                return Results.BadRequest(new { error = ex.Message });
+                return ApiErrors.ToResult(ex);
             }
         });
 
@@ -100,7 +100,7 @@ public static class SeatEndpoints
                 }
                 catch (InvalidOperationException ex)
                 {
-                    return Results.BadRequest(new { error = ex.Message });
+                    return ApiErrors.ToResult(ex);
                 }
             });
 
@@ -116,7 +116,7 @@ public static class SeatEndpoints
                 }
                 catch (InvalidOperationException ex)
                 {
-                    return Results.BadRequest(new { error = ex.Message });
+                    return ApiErrors.ToResult(ex);
                 }
             });
 
@@ -131,7 +131,7 @@ public static class SeatEndpoints
             }
             catch (InvalidOperationException ex)
             {
-                return Results.BadRequest(new { error = ex.Message });
+                return ApiErrors.ToResult(ex);
             }
         });
 
@@ -147,7 +147,7 @@ public static class SeatEndpoints
                 }
                 catch (InvalidOperationException ex)
                 {
-                    return Results.BadRequest(new { error = ex.Message });
+                    return ApiErrors.ToResult(ex);
                 }
             });
 
@@ -162,7 +162,7 @@ public static class SeatEndpoints
             }
             catch (InvalidOperationException ex)
             {
-                return Results.BadRequest(new { error = ex.Message });
+                return ApiErrors.ToResult(ex);
             }
         });
 
@@ -255,11 +255,13 @@ public static class SeatEndpoints
                 }
                 catch (ArgumentException ex)
                 {
+                    // An unusable resolution genuinely IS a malformed request, so 400 is right
+                    // here and this one deliberately does not go through ApiErrors.
                     return Results.BadRequest(new { error = ex.Message });
                 }
                 catch (InvalidOperationException ex)
                 {
-                    return Results.BadRequest(new { error = ex.Message });
+                    return ApiErrors.ToResult(ex);
                 }
             });
 
@@ -344,7 +346,7 @@ public static class SeatEndpoints
                 }
                 catch (InvalidOperationException ex)
                 {
-                    return Results.BadRequest(new { error = ex.Message });
+                    return ApiErrors.ToResult(ex);
                 }
             });
     }
