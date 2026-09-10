@@ -1,3 +1,4 @@
+using MultiSeat.Service;
 using MultiSeat.Service.Streaming;
 using MultiSeat.Shared;
 using Xunit;
@@ -27,7 +28,14 @@ public class PortAllocatorTests
         for (int i = 0; i < Constants.MaxSeats; i++)
             allocator.Allocate();
 
-        Assert.Throws<InvalidOperationException>(() => allocator.Allocate());
+        // Running out of port blocks is a CAPACITY condition, which the API answers with 503
+        // rather than 400 — the request was fine, the host is full (#29 PR D).
+        var ex = Assert.Throws<CapacityExhaustedException>(() => allocator.Allocate());
+
+        // ⭐ And it is still an InvalidOperationException, which is what lets every non-HTTP
+        // caller that already catches that keep working untouched. Assert.Throws demands an
+        // exact type, so this second assertion is the one that pins the compatibility promise.
+        Assert.IsAssignableFrom<InvalidOperationException>(ex);
     }
 
     [Fact]

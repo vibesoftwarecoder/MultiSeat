@@ -24,7 +24,7 @@ public sealed class PortAllocator
         lock (_lock)
         {
             if (_available.Count == 0)
-                throw new InvalidOperationException("No port blocks available. All seats occupied.");
+                throw new CapacityExhaustedException("No port blocks available. All seats occupied.");
 
             var port = _available.Min;
             _available.Remove(port);

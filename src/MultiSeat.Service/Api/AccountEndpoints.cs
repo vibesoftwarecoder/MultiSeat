@@ -23,7 +23,7 @@ public static class AccountEndpoints
             }
             catch (InvalidOperationException ex)
             {
-                return Results.BadRequest(new { error = ex.Message });
+                return ApiErrors.ToResult(ex);
             }
         });
 
@@ -38,7 +38,7 @@ public static class AccountEndpoints
             }
             catch (InvalidOperationException ex)
             {
-                return Results.BadRequest(new { error = ex.Message });
+                return ApiErrors.ToResult(ex);
             }
         });
 
@@ -53,7 +53,7 @@ public static class AccountEndpoints
             }
             catch (InvalidOperationException ex)
             {
-                return Results.BadRequest(new { error = ex.Message });
+                return ApiErrors.ToResult(ex);
             }
         });
     }

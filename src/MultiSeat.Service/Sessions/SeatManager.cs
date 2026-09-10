@@ -198,7 +198,7 @@ public sealed class SeatManager
         // Count only live seats — Error/Idle entries hold no resources (their ports and
         // sessions were already released on failure) and must not block new provisioning.
         if (ActiveSeatCount >= _options.MaxSeats)
-            throw new InvalidOperationException($"Maximum seat count ({_options.MaxSeats}) reached.");
+            throw new CapacityExhaustedException($"Maximum seat count ({_options.MaxSeats}) reached.");
 
         if (!_accounts.AccountExists(request.AccountName))
             throw new InvalidOperationException($"Account '{request.AccountName}' does not exist. Create it first via /api/accounts.");
@@ -231,7 +231,7 @@ public sealed class SeatManager
         // seat Guid, so two provisions of the same account hold different gates. This lock
         // covers only the ownership decision; it is released before any provisioning work.
         if (!TryRegisterSeat(_seats, _accountOwnershipLock, seat))
-            throw new InvalidOperationException(
+            throw new ResourceConflictException(
                 $"Account '{request.AccountName}' already has a seat — tear it down first.");
 
         await BroadcastState(seat);
@@ -543,7 +543,7 @@ public sealed class SeatManager
     public async Task LaunchAppInSeatAsync(Guid seatId, LaunchAppRequest request, CancellationToken ct)
     {
         if (GetSeat(seatId) is null)
-            throw new InvalidOperationException("Seat not found.");
+            throw new SeatNotFoundException();
 
         // Without the gate, a teardown could remove the seat — disconnecting and logging off its
         // session — between the status check and the process creation below, orphaning the app in
@@ -552,10 +552,10 @@ public sealed class SeatManager
 
         var seat = LiveSeatAfterGate(seatId, "app launch");
         if (seat is null)
-            throw new InvalidOperationException("Seat not found.");
+            throw new SeatNotFoundException();
 
         if (seat.Status is not SeatStatus.Ready and not SeatStatus.Streaming)
-            throw new InvalidOperationException($"Seat is in {seat.Status} state — cannot launch apps.");
+            throw new ResourceConflictException($"Seat is in {seat.Status} state — cannot launch apps.");
 
         await _processInjector.LaunchInSessionAsync(
             seat.SessionId, seat.AccountName,
@@ -688,7 +688,7 @@ public sealed class SeatManager
     public async Task StopApollo(Guid seatId)
     {
         if (GetSeat(seatId) is null)
-            throw new InvalidOperationException("Seat not found.");
+            throw new SeatNotFoundException();
 
         // Mutates ApolloProcessId and the ApolloManager instance record.
         using var lease = await _lifecycleGate.AcquireAsync(seatId, CancellationToken.None);
@@ -706,7 +706,7 @@ public sealed class SeatManager
     public async Task StartApolloAsync(Guid seatId, CancellationToken ct)
     {
         if (GetSeat(seatId) is null)
-            throw new InvalidOperationException("Seat not found.");
+            throw new SeatNotFoundException();
 
         // Per-seat lifecycle gate: starts Apollo and mutates ApolloProcessId.
         using var lease = await _lifecycleGate.AcquireAsync(seatId, ct);
@@ -735,7 +735,7 @@ public sealed class SeatManager
     public async Task RestartApolloAsync(Guid seatId, CancellationToken ct)
     {
         if (GetSeat(seatId) is null)
-            throw new InvalidOperationException("Seat not found.");
+            throw new SeatNotFoundException();
 
         // Per-seat lifecycle gate: Stop + Start is one compound mutation, not two.
         using var lease = await _lifecycleGate.AcquireAsync(seatId, ct);
@@ -901,7 +901,7 @@ public sealed class SeatManager
     public async Task ResetAudioAsync(Guid seatId)
     {
         if (GetSeat(seatId) is null)
-            throw new InvalidOperationException("Seat not found.");
+            throw new SeatNotFoundException();
 
         // Nothing to reset under per-session audio: MultiSeat assigns no device, and the
         // session's Remote Audio endpoint lives and dies with the session itself. Re-assigning
@@ -942,7 +942,7 @@ public sealed class SeatManager
     public void ApplyAudioDefaults(Guid seatId)
     {
         var seat = GetSeat(seatId)
-            ?? throw new InvalidOperationException("Seat not found.");
+            ?? throw new SeatNotFoundException();
         ApplyAudioDefaults(seat);
     }
 
@@ -980,7 +980,7 @@ public sealed class SeatManager
         SeatPresetStore presetStore, CancellationToken ct)
     {
         if (GetSeat(seatId) is null)
-            throw new InvalidOperationException("Seat not found.");
+            throw new SeatNotFoundException();
 
         // Per-seat lifecycle gate: KillForReconnect + Start mutate ApolloProcessId.
         using var lease = await _lifecycleGate.AcquireAsync(seatId, ct);
@@ -1029,7 +1029,7 @@ public sealed class SeatManager
         SeatPresetStore presetStore, CancellationToken ct)
     {
         if (GetSeat(seatId) is null)
-            throw new InvalidOperationException("Seat not found.");
+            throw new SeatNotFoundException();
 
         // Per-seat lifecycle gate: rebuilds the session: SessionId, mstsc and ApolloProcessId all change.
         using var lease = await _lifecycleGate.AcquireAsync(seatId, ct);
@@ -1092,7 +1092,7 @@ public sealed class SeatManager
     public async Task ResetDisplayAsync(Guid seatId, CancellationToken ct)
     {
         if (GetSeat(seatId) is null)
-            throw new InvalidOperationException("Seat not found.");
+            throw new SeatNotFoundException();
 
         // A concurrent teardown between the destroy and create below — teardown releases the
         // display assignment and cleans the seat's Apollo config — would re-register a display
@@ -1118,7 +1118,7 @@ public sealed class SeatManager
     public async Task ResetControllerAsync(Guid seatId)
     {
         if (GetSeat(seatId) is null)
-            throw new InvalidOperationException("Seat not found.");
+            throw new SeatNotFoundException();
 
         if (!_options.EnableViGEmController)
         {

@@ -38,6 +38,22 @@ public class ProcessIdentityTests
         configBuilder: null!,      // untouched by the kill paths under test
         processInjector: null!);
 
+    /// <summary>
+    /// A manager whose configured Apollo executable IS the victim process.
+    ///
+    /// ⭐ This is what makes the stale-identity test mean anything. Stop falls back to a
+    /// process-NAME check when it has no identity, and with the default ApolloExePath
+    /// ("sunshine.exe") that check refuses to kill a "ping" process all by itself — so the test
+    /// would pass whether or not the identity branch existed. Pointing the config at ping.exe
+    /// makes the name check say YES, leaving the identity comparison as the only thing that can
+    /// still stop the kill.
+    /// </summary>
+    private static ApolloManager NewManagerTargetingVictim() => new(
+        new NoopLogger<ApolloManager>(),
+        Options.Create(new MultiSeatOptions { ApolloExePath = @"C:\Windows\System32\ping.exe" }),
+        configBuilder: null!,
+        processInjector: null!);
+
     /// <summary>A real, long-lived child process to act on. Killed by the caller or by dispose.</summary>
     private static Process StartVictim() =>
         Process.Start(new ProcessStartInfo("ping.exe", "127.0.0.1 -n 120")
@@ -165,6 +181,70 @@ public class ProcessIdentityTests
         // Either the PID is free, or it is held by something else and fails the identity check.
         // Both are non-destructive; what must never happen is Killed.
         Assert.NotEqual(ApolloKillOutcome.Killed, outcome);
+    }
+
+    // ── PR D: the identity survives on the seat, so a restart does not lose it ──
+
+    [Fact]
+    public void Stop_WithNoInstanceRecord_UsesTheIdentityCarriedOnTheSeat()
+    {
+        // The state after a service restart: _instances is empty, the seat and its Apollo are
+        // both still alive. Before SeatInfo.ApolloIdentity this fell back to a name check.
+        using var victim = StartVictim();
+        try
+        {
+            var realStart = ApolloManager.GetProcessStartTime(victim.Id);
+            Assert.NotNull(realStart);
+
+            var seat = new SeatInfo
+            {
+                Id = Guid.NewGuid(),
+                AccountName = "GuestTest",
+                ApolloProcessId = victim.Id,
+                ApolloIdentity = new ProcessIdentity(victim.Id, realStart!.Value)
+            };
+
+            NewManager().Stop(seat);
+
+            victim.Refresh();
+            Assert.True(victim.HasExited);
+        }
+        finally
+        {
+            if (!victim.HasExited) victim.Kill(entireProcessTree: true);
+        }
+    }
+
+    [Fact]
+    public void Stop_WithAStaleIdentityOnTheSeat_LeavesTheProcessRunning()
+    {
+        // ⭐ The one that proves the seat's identity is VERIFIED rather than merely present.
+        // A recycled PID reaches here looking exactly like this.
+        using var victim = StartVictim();
+        try
+        {
+            var realStart = ApolloManager.GetProcessStartTime(victim.Id);
+            Assert.NotNull(realStart);
+
+            var seat = new SeatInfo
+            {
+                Id = Guid.NewGuid(),
+                AccountName = "GuestTest",
+                ApolloProcessId = victim.Id,
+                ApolloIdentity = new ProcessIdentity(victim.Id, realStart!.Value.AddSeconds(-30))
+            };
+
+            // Configured so the name-check fallback WOULD kill this process. The only thing
+            // left that can spare it is the identity comparison.
+            NewManagerTargetingVictim().Stop(seat);
+
+            victim.Refresh();
+            Assert.False(victim.HasExited);
+        }
+        finally
+        {
+            if (!victim.HasExited) victim.Kill(entireProcessTree: true);
+        }
     }
 
     [Fact]
