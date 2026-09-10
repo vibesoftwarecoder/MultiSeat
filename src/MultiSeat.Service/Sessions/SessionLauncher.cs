@@ -71,17 +71,27 @@ public sealed class SessionLauncher
     /// </summary>
     private readonly RdpCredentialStore _credentials;
 
+    /// <summary>
+    /// Consulted only when a seat's session fails to appear, to say WHY in the exception.
+    /// Every seat is an RDP session, so an inactive wrapper means no seat can ever start —
+    /// but the timeout alone looks identical to a slow host, and issue #33 was diagnosed
+    /// four steps below the actual cause because of it.
+    /// </summary>
+    private readonly RdpWrapper _rdpWrapper;
+
     // RDP loopback address — use 127.0.0.2 to avoid conflicts with 127.0.0.1/localhost
     private const string RdpLoopbackAddress = "127.0.0.2";
 
     public SessionLauncher(
         ILogger<SessionLauncher> logger,
         IOptions<MultiSeatOptions> options,
-        AccountManager accounts)
+        AccountManager accounts,
+        RdpWrapper rdpWrapper)
     {
         _logger = logger;
         _options = options.Value;
         _accounts = accounts;
+        _rdpWrapper = rdpWrapper;
         _credentials = new RdpCredentialStore(logger);
     }
 
@@ -558,14 +568,29 @@ public sealed class SessionLauncher
 
             if (sessionId < 0)
             {
+                // Ask WHY before listing remedies. Multi-session being unavailable is not one
+                // cause among four — it is the cause that makes the other three unreachable,
+                // and the reason lands in the log from EnsureMultiSession itself.
+                var multiSessionOk = _rdpWrapper.EnsureMultiSession();
+
                 throw new InvalidOperationException(
                     $"RDP loopback session for '{accountName}' did not appear within timeout. " +
-                    "Check the service log for the mstsc exit code logged above. " +
-                    "Steps to diagnose: " +
-                    "(1) Re-run prerequisites\\install-prerequisites.ps1 to refresh rdpwrap.ini for your Windows build. " +
-                    "(2) Open RDPConf.exe and verify Listener state is 'Listening [fully supported]'. " +
-                    "(3) Manually run: mstsc /v:127.0.0.2 and log in as the seat account to verify RDP works. " +
-                    "(4) Check HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp: UserAuthentication must be 0.");
+                    (multiSessionOk
+                        ? "Multi-session RDP checks out, so the wrapper is not the problem here. " +
+                          "Check the service log for the mstsc exit code logged above. " +
+                          "Steps to diagnose: " +
+                          "(1) Manually run: mstsc /v:127.0.0.2 and log in as the seat account to verify RDP works. " +
+                          "(2) Check HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp: " +
+                          "UserAuthentication must be 0."
+                        : "CAUSE: multi-session RDP is NOT available on this host — see the RDP Wrapper " +
+                          "lines logged just above for which check failed. Every seat is an RDP session, " +
+                          "so no seat can start until that is fixed, and the steps below are downstream of it. " +
+                          "Fix it with: " +
+                          "(1) Run prerequisites\\install-prerequisites.ps1 — it installs RDP Wrapper and " +
+                          "refreshes rdpwrap.ini for your Windows build. " +
+                          "(2) If it reports your build as uncovered, run scripts\\check-rdpwrap-offsets.ps1 " +
+                          "-Generate to compute the offsets locally, then -Apply to merge them in. " +
+                          "(3) Confirm with RDPConf.exe that Listener state reads 'Listening [fully supported]'."));
             }
 
             _logger.LogInformation(
