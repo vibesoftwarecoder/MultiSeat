@@ -214,6 +214,20 @@ Put anything true of **this machine** rather than of MultiSeat in
 the shipped `appsettings.json` in the same folder; it is gitignored and absent from the repo, so
 `dotnet publish` never overwrites it.
 
+⚠️ **"A deploy cannot overwrite it" was only ever true of `dotnet publish`.** Until `98b5cfa`
+(2026-09-10) `install-service.ps1 -FromZip` **wiped the entire install directory** —
+`Get-ChildItem $InstallDir | Remove-Item -Recurse -Force` — before copying the release payload in,
+so an upgrade deleted `appsettings.local.json` *and* `appsettings.json` and left the shipped
+defaults behind, with no backup and no warning. The advice above was correct-sounding and did not
+hold on the path people actually upgrade with. See issue #45.
+
+Since `98b5cfa` both files are copied out before that wipe and copied back **byte for byte**
+afterwards, the host's `appsettings.json` wins over the shipped one, and a timestamped copy is kept
+in `C:\ProgramData\MultiSeat\config-backups\`. Settings a release adds that the host's file lacks
+are listed during the install rather than silently applied — keeping the host's file is right, but
+hiding a new option forever is not. ⛔ Anyone still on `0.6.3` or earlier has the destructive
+installer; this protects the upgrade *after* the one that carries it.
+
 ```jsonc
 { "MultiSeat": { "AudioMode": "PerSession" } }
 ```
@@ -256,7 +270,8 @@ Restart the service, re-provision, then set it back - verbose is noisy.
 - ⚠️ **`debug` does NOT work.** Apollo maps `verbose`=0, `debug`=1, `info`=2, and anything >= 1
   silences FFmpeg. Only `verbose` lifts it.
 - ⛔ **Never hand-edit a seat's `sunshine.conf`** - `ApolloConfigBuilder` regenerates it on every
-  provision, so the change is lost. `appsettings.local.json` survives deploys.
+  provision, so the change is lost. `appsettings.local.json` survives deploys — ⚠️ but only since
+  `98b5cfa`; a `-FromZip` upgrade before that deleted it too. See "Host-local config" above.
 
 `SessionHealthCheck` now prints this hint by itself when a seat's Apollo exits within 30s of
 starting (`IsStartupFailure`), so the failure is signposted rather than silent.
