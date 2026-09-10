@@ -543,6 +543,46 @@ if ($FromZip) {
             throw "This zip is not self-contained (no hostfxr.dll), so it would need a .NET runtime on this host. Refusing to install it."
         }
 
+        # ⛔ Preserve host-local configuration BEFORE the wipe below.
+        #
+        # That wipe deletes everything in the install directory, so an upgrade used to destroy
+        # appsettings.json AND appsettings.local.json and then drop the shipped defaults in their
+        # place. Nothing was backed up and nothing said so. The API survived only by accident,
+        # because ResolveApiKey falls back to a file in ProgramData that this never touches;
+        # every setting without such a fallback was simply gone. See issue #45.
+        #
+        # ⚠️ appsettings.local.json is the documented place for host-local settings precisely
+        # because a deploy cannot overwrite it — true of `dotnet publish`, and NOT true here
+        # until now. Read that advice as conditional on this block existing.
+        # ⭐ Preserve the FILES, byte for byte — never their text.
+        #
+        # Round-tripping through Get-Content/Set-Content rewrites the file: Set-Content appends a
+        # trailing newline and can change the encoding, so a "preserved" file came back two bytes
+        # different from the one the user wrote. Harmless for JSON today, wrong in principle for a
+        # step whose entire job is to leave the user's file alone, and a trap the moment anything
+        # here is not JSON.
+        $preserveNames = @('appsettings.json', 'appsettings.local.json')
+        $preserved = @{}
+        $backupDir = $null
+        foreach ($name in $preserveNames) {
+            $existing = Join-Path $InstallDir $name
+            if (Test-Path $existing) {
+                if (-not $backupDir) {
+                    $backupDir = Join-Path $env:ProgramData ("MultiSeat\config-backups\" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+                    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+                }
+                # The backup doubles as the staging copy: one byte-exact copy, used for both.
+                # It lives outside the install directory because the wipe below is the very thing
+                # being protected against.
+                $kept = Join-Path $backupDir $name
+                Copy-Item $existing $kept -Force
+                $preserved[$name] = $kept
+            }
+        }
+        if ($preserved.Count -gt 0) {
+            Write-Host "  Backed up $($preserved.Count) config file(s) to $backupDir" -ForegroundColor DarkGray
+        }
+
         if (Test-Path $InstallDir) {
             Get-ChildItem $InstallDir -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
         } else {
@@ -557,6 +597,43 @@ if ($FromZip) {
         Get-ChildItem $stage -Force |
             Where-Object { $skip -notcontains $_.Name } |
             ForEach-Object { Copy-Item $_.FullName $InstallDir -Recurse -Force }
+
+        # -- Put host configuration back over the shipped defaults --------------
+        #
+        # An upgrade must not silently change how this host is configured. The shipped
+        # appsettings.json is what a FIRST install needs; on an upgrade the host's own copy wins.
+        if ($preserved.ContainsKey('appsettings.local.json')) {
+            Copy-Item $preserved['appsettings.local.json'] `
+                      (Join-Path $InstallDir 'appsettings.local.json') -Force
+            Write-Host "  Restored appsettings.local.json" -ForegroundColor DarkGray
+        }
+
+        if ($preserved.ContainsKey('appsettings.json')) {
+            $shippedPath = Join-Path $InstallDir 'appsettings.json'
+
+            # Report settings this release added that the host's file does not carry. Keeping the
+            # host's file is right, but doing it silently would hide a new option forever — the
+            # one real cost of preserving over replacing, so it is surfaced rather than ignored.
+            try {
+                $shippedKeys  = ((Get-Content $shippedPath -Raw | ConvertFrom-Json).MultiSeat |
+                                 Get-Member -MemberType NoteProperty).Name
+                $hostKeys     = ((Get-Content $preserved['appsettings.json'] -Raw | ConvertFrom-Json).MultiSeat |
+                                 Get-Member -MemberType NoteProperty).Name
+                $newKeys      = @($shippedKeys | Where-Object { $hostKeys -notcontains $_ })
+                if ($newKeys.Count -gt 0) {
+                    Write-Host ""
+                    Write-Host "  This release adds $($newKeys.Count) setting(s) your appsettings.json does not have:" -ForegroundColor Yellow
+                    $newKeys | ForEach-Object { Write-Host "      MultiSeat:$_" -ForegroundColor Yellow }
+                    Write-Host "  Your file was kept as-is, so these run at their built-in defaults." -ForegroundColor Yellow
+                    Write-Host ""
+                }
+            } catch {
+                Write-Host "  NOTE: could not compare settings against the shipped file ($_)" -ForegroundColor Yellow
+            }
+
+            Copy-Item $preserved['appsettings.json'] $shippedPath -Force
+            Write-Host "  Kept your existing appsettings.json (shipped defaults not applied)" -ForegroundColor DarkGray
+        }
 
         $ver = "unknown"
         try {
