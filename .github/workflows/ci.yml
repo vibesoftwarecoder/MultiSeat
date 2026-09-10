@@ -47,6 +47,47 @@ jobs:
           path: test-results/
           if-no-files-found: warn
 
+  dashboard:
+    name: Dashboard build + audit
+    runs-on: ubuntu-latest    # pure Node work; nothing here needs Windows
+
+    # Nothing in CI touched the dashboard until now, and the cost of that was concrete too:
+    # 11 advisories (8 high) accumulated in package-lock.json unnoticed, and it took an
+    # outside scanner opening issues #34 and #35 for anyone to look. The dashboard also had
+    # no build check at all, so a TypeScript error would only surface during an install on a
+    # user's machine.
+    defaults:
+      run:
+        working-directory: src/MultiSeat.Dashboard
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: src/MultiSeat.Dashboard/package-lock.json
+
+      # npm ci, not npm install: it installs exactly what the lockfile pins and fails if the
+      # lockfile and package.json disagree. install-service.ps1 runs npm install on the user's
+      # machine, so a lockfile that cannot resolve breaks the install, not the build.
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # This FAILS the job on a high advisory, deliberately. A warning that does not fail is
+      # what we already had -- nothing was watching, and 8 highs is what nothing-watching
+      # produces. The tradeoff is real: an advisory published upstream can break CI on an
+      # unrelated PR. That is the intended behaviour, not a bug. When it happens, fix it with
+      # `npm audit fix` (which cleared all 11 here without touching package.json), and if a
+      # finding genuinely does not apply, record why with `npm audit --json` in the PR rather
+      # than lowering this threshold.
+      - name: Audit
+        run: npm audit --audit-level=high
+
   lint-scripts:
     name: Script lint (PowerShell 5.1 + 7)
     runs-on: windows-latest
