@@ -195,7 +195,64 @@ public sealed partial class HostApolloMonitor
         info.Reachable = true;
         info.HostName = server.HostName;
         info.AppVersion = server.AppVersion;
-        info.Streaming = server.Streaming;
+
+        // ⛔ serverinfo ALONE gets this wrong, and wrong in the common direction.
+        //
+        // Its `state` and `currentgame` describe a launched APPLICATION, not a client session.
+        // Someone streaming the plain desktop — which is what a console Apollo is usually for —
+        // leaves currentgame at 0 and state at SUNSHINE_SERVER_FREE for the whole session.
+        //
+        // Measured 2026-09-11: the standalone Apollo encoding steadily at ~15.8% for 26 minutes,
+        // with an encoder created in its log and never torn down, still answered
+        // `state = SUNSHINE_SERVER_FREE, currentgame = 0`. Anything built on this flag alone is
+        // silently dead for desktop streaming.
+        //
+        // Per-process GPU video encode is the signal that actually tracks a client, and is the
+        // rule this project already follows operationally. serverinfo is kept as an OR because it
+        // still catches a launched game whose client is momentarily not encoding.
+        info.Streaming = IsProcessVideoEncoding(info.ProcessId) || server.Streaming;
+    }
+
+    /// <summary>
+    /// Is this specific process feeding the GPU's video encoder right now?
+    ///
+    /// Uses the same WMI GPU engine counters <see cref="GpuMonitor"/> reads, filtered to one PID
+    /// and to the video-encode engine. The instance name looks like
+    /// <c>pid_10988_luid_0x00000000_0x0001132D_phys_0_eng_6_engtype_videoencode</c>.
+    ///
+    /// ⚠️ Per PROCESS, never the GPU total. RustDesk and any other remote-desktop tool encode too,
+    /// so a machine-wide reading says "something is encoding", which is not the question.
+    /// </summary>
+    private bool IsProcessVideoEncoding(int pid)
+    {
+        if (pid <= 0) return false;
+
+        try
+        {
+            using var searcher = new System.Management.ManagementObjectSearcher(
+                "SELECT Name, UtilizationPercentage FROM " +
+                "Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine");
+
+            var marker = $"pid_{pid}_";
+            foreach (var obj in searcher.Get())
+            {
+                var name = obj["Name"]?.ToString() ?? string.Empty;
+                if (!name.StartsWith(marker, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!name.Contains("engtype_videoencode", StringComparison.OrdinalIgnoreCase)) continue;
+
+                // A live stream sits well above this; an idle process reads 0. The threshold only
+                // has to separate "encoding" from "not", not measure anything.
+                if (Convert.ToDouble(obj["UtilizationPercentage"] ?? 0) > 1.0) return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            // Counters unavailable — report not-encoding rather than guessing. Callers treat this
+            // as advisory, so a false negative costs a warning, not correctness.
+            _logger.LogDebug(ex, "Could not read GPU encode counters for PID {Pid}", pid);
+        }
+
+        return false;
     }
 
     /// <summary>ApolloService state, or null when the service is not installed.</summary>

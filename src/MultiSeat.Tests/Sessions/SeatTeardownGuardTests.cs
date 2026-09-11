@@ -114,6 +114,10 @@ public class SeatTeardownGuardTests
         apolloManager: null!, configBuilder: null!, portAllocator: null!, firewall: null!,
         audioRouter: null!, controllerManager: null!, inputRouter: null!, inputHookManager: null!,
         hidHide: null!, onConnectApps: null!, serverQuery: null!,
+        // Null on purpose. Teardown consults this only to warn about disturbing a standalone
+        // Apollo's stream, and that check must never fail a teardown — so the timeout path below
+        // exercises exactly that: the warning blows up internally and teardown proceeds regardless.
+        hostApollo: null!,
         emulatorSeeders: Array.Empty<IEmulatorConfigSeeder>(),
         lifecycleGate: gate);
 

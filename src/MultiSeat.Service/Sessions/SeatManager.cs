@@ -50,6 +50,12 @@ public sealed class SeatManager
     private readonly HidHideConfigurator _hidHide;
     private readonly OnConnectAppLauncher _onConnectApps;
     private readonly Monitoring.ApolloServerQuery _serverQuery;
+
+    /// <summary>
+    /// Used only to warn when a seat teardown is about to disturb a standalone Apollo's stream.
+    /// See <see cref="WarnIfStandaloneApolloStreamingAsync"/> and issue #23.
+    /// </summary>
+    private readonly Monitoring.HostApolloMonitor _hostApollo;
     private readonly IEnumerable<IEmulatorConfigSeeder> _emulatorSeeders;
     private readonly SeatLifecycleGate _lifecycleGate;
 
@@ -71,6 +77,7 @@ public sealed class SeatManager
         HidHideConfigurator hidHide,
         OnConnectAppLauncher onConnectApps,
         Monitoring.ApolloServerQuery serverQuery,
+        Monitoring.HostApolloMonitor hostApollo,
         IEnumerable<IEmulatorConfigSeeder> emulatorSeeders,
         SeatLifecycleGate lifecycleGate)
     {
@@ -91,6 +98,7 @@ public sealed class SeatManager
         _hidHide = hidHide;
         _onConnectApps = onConnectApps;
         _serverQuery = serverQuery;
+        _hostApollo = hostApollo;
         _emulatorSeeders = emulatorSeeders;
         _lifecycleGate = lifecycleGate;
     }
@@ -583,6 +591,11 @@ public sealed class SeatManager
         if (GetSeat(seatId) is null)
             return;
 
+        // Say so BEFORE the stall happens, not after, and before the gate is taken — this is
+        // advisory, and holding the lifecycle gate across a network query would slow every
+        // teardown to buy nothing.
+        await WarnIfStandaloneApolloStreamingAsync(seatId, ct);
+
         // ⛔ Acquire the gate BEFORE removing the seat from _seats, not after.
         //
         // The reverse order looks harmless and is not: AcquireAsync throws TimeoutException after
@@ -609,6 +622,43 @@ public sealed class SeatManager
 
         await TeardownSeatInternalAsync(seat, ct);
         _logger.LogInformation("Seat {Id}: torn down", seat.Id);
+    }
+
+    /// <summary>
+    /// Warn when tearing this seat down is about to interrupt someone else's stream.
+    ///
+    /// A seat IS an RDP session, and that session's display appearing and disappearing is a
+    /// desktop topology change. Any Apollo on the host sees it and rebuilds its capture pipeline —
+    /// measured at roughly 690 ms, self-recovering, on the standalone console Apollo (#23).
+    ///
+    /// ⛔ This does NOT prevent the stall, and is not trying to. The trigger is the RDP session
+    /// ending, which is exactly what tearing a seat down means; it was decomposed and the seat's
+    /// own Apollo stopping turned out not to be the cause at all. What was wrong was that it
+    /// happened INVISIBLY — the operator interrupted someone and had no way to know.
+    ///
+    /// ⚠️ Never blocks or fails the teardown. A seat that will not tear down because a status
+    /// query timed out would be a far worse bug than the one this reports.
+    /// </summary>
+    private async Task WarnIfStandaloneApolloStreamingAsync(Guid seatId, CancellationToken ct)
+    {
+        try
+        {
+            var host = await _hostApollo.CollectAsync(ct);
+            if (host.Detected && host.Streaming)
+            {
+                _logger.LogWarning(
+                    "Seat {Id}: tearing down while the standalone Apollo (PID {Pid}, {Name}) is " +
+                    "streaming. Ending this seat's RDP session changes the desktop topology, so " +
+                    "that stream will stall for about a second while its encoder rebuilds. It " +
+                    "recovers on its own. See issue #23.",
+                    seatId, host.ProcessId, host.HostName ?? "unnamed");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Advisory only. Losing the warning is acceptable; losing the teardown is not.
+            _logger.LogDebug(ex, "Seat {Id}: could not check the standalone Apollo before teardown", seatId);
+        }
     }
 
     /// <summary>
