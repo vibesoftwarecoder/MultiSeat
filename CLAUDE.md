@@ -342,9 +342,15 @@ MultiSeat is self-contained and **non-destructive**: it works out of the box whe
 2. **Own port range.** Default `PortBase = 48100`, above a stock Apollo's block — no runtime port conflict.
 3. **Never kills a non-MultiSeat Apollo.** On startup `MultiSeatWorker.KillOrphanedApolloProcesses` reaps **only** Apollo processes MultiSeat launched, identified via WMI (`GetManagedApolloPids`) by executable path (under the ApolloVibe dir) or a MultiSeat per-seat config path on the command line. It no longer stops/disables `ApolloService`, and `install-service.ps1` leaves that service alone. (WMI failure → empty set → cleanup is skipped rather than risk killing an unrelated Apollo.)
 
-⚠️ **"Non-destructive" has one exception, and it is not fixable here: tearing a seat down stalls a
-standalone Apollo's stream for about 690 ms** while it rebuilds its encoder. Self-recovering, and
-it does not compound with seat count — seat-to-seat interference was measured and does not exist.
+⚠️ **"Non-destructive" has one exception, and it is not fixable here: tearing a seat down makes a
+standalone Apollo rebuild its encoder.** Self-recovering, and it does not compound with seat count —
+seat-to-seat interference was measured and does not exist.
+
+⭐ **It is smaller than it sounds.** 690 ms on 2026-09-04, **266 ms on 2026-09-11**, and on
+2026-09-11 the person actually streaming **did not notice it at all**. Do not describe this as a
+freeze or a second-long stall; that came from one early measurement and overstates it. ⚠️ One
+user's perception on one LAN is not proof it is always imperceptible — but "a few hundred
+milliseconds, usually unnoticed" is what the evidence supports.
 
 ⛔ **The cause is NOT a second Apollo starting or stopping**, which is the intuitive guess and was
 this issue's original premise. Decomposed step by step (#23): stopping the seat's Apollo produced
