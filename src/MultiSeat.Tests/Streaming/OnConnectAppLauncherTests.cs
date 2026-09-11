@@ -221,4 +221,133 @@ public class OnConnectAppLauncherTests
         }
         finally { File.Delete(path); }
     }
+    // ── #43: a streaming seat must not report Ready ──────────────────────
+    //
+    // ProcessSeat used to open with `if (_options.LaunchOnConnect.Length == 0) return;`, which
+    // switched off the whole watcher — detection included — and that option is empty by default.
+    // So on a normal host nothing ever saw a client connect, and a seat streaming happily still
+    // reported Ready: the dashboard showed it idle, and anything deciding whether a seat was safe
+    // to tear down got the wrong answer.
+    //
+    // These drive the REAL ProcessSeat with LaunchOnConnect EMPTY. That is the whole point: the
+    // tests above only exercise the static log helpers, which is why none of them noticed.
+
+    private sealed class NoopLogger<T> : Microsoft.Extensions.Logging.ILogger<T>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel l) => false;
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel l,
+            Microsoft.Extensions.Logging.EventId e, TState s, Exception? ex,
+            Func<TState, Exception?, string> f) { }
+    }
+
+    private static (OnConnectAppLauncher Launcher, string LogPath, string Root) NewWatcher()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"ms-onconnect-{Guid.NewGuid():N}");
+        var seatDir = Path.Combine(root, "GuestTest");
+        Directory.CreateDirectory(seatDir);
+        var logPath = Path.Combine(seatDir, "apollo.log");
+        File.WriteAllText(logPath, string.Empty,
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+        var options = Microsoft.Extensions.Options.Options.Create(
+            new MultiSeat.Service.Configuration.MultiSeatOptions
+            {
+                ApolloConfigDir = root,
+                LaunchOnConnect = Array.Empty<MultiSeat.Service.Configuration.LaunchOnConnectApp>()
+            });
+
+        var apollo = new ApolloManager(new NoopLogger<ApolloManager>(), options,
+                                       configBuilder: null!, processInjector: null!);
+        var launcher = new OnConnectAppLauncher(new NoopLogger<OnConnectAppLauncher>(), options,
+                                                apollo, injector: null!);
+        return (launcher, logPath, root);
+    }
+
+    private static MultiSeat.Shared.Models.SeatInfo NewSeat(
+        MultiSeat.Shared.Models.SeatStatus status = MultiSeat.Shared.Models.SeatStatus.Ready) => new()
+    {
+        Id = Guid.NewGuid(),
+        AccountName = "GuestTest",
+        SessionId = 2,
+        Status = status
+    };
+
+    [Fact]
+    public void ClientConnect_MovesSeatToStreaming_EvenWithNoAppsConfigured()
+    {
+        var (launcher, logPath, root) = NewWatcher();
+        try
+        {
+            var seat = NewSeat();
+            launcher.ProcessSeat(seat, CancellationToken.None);   // seed at current end
+
+            Append(logPath, Line(Connect));
+            var changed = launcher.ProcessSeat(seat, CancellationToken.None);
+
+            Assert.True(changed);
+            Assert.Equal(MultiSeat.Shared.Models.SeatStatus.Streaming, seat.Status);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public void ClientDisconnect_MovesSeatBackToReady()
+    {
+        var (launcher, logPath, root) = NewWatcher();
+        try
+        {
+            var seat = NewSeat();
+            launcher.ProcessSeat(seat, CancellationToken.None);
+            Append(logPath, Line(Connect));
+            launcher.ProcessSeat(seat, CancellationToken.None);
+            Assert.Equal(MultiSeat.Shared.Models.SeatStatus.Streaming, seat.Status);
+
+            Append(logPath, Line(Disconnect));
+            var changed = launcher.ProcessSeat(seat, CancellationToken.None);
+
+            Assert.True(changed);
+            Assert.Equal(MultiSeat.Shared.Models.SeatStatus.Ready, seat.Status);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public void NoEdge_ReportsNoChange()
+    {
+        // A quiet log must not be reported as a change every tick, or the health check would
+        // broadcast a seat update forever.
+        var (launcher, logPath, root) = NewWatcher();
+        try
+        {
+            var seat = NewSeat();
+            launcher.ProcessSeat(seat, CancellationToken.None);
+            Append(logPath, "[2026-08-29 10:26:20.078]: Info: Client dynamicRange: 0\n");
+
+            Assert.False(launcher.ProcessSeat(seat, CancellationToken.None));
+            Assert.Equal(MultiSeat.Shared.Models.SeatStatus.Ready, seat.Status);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Theory]
+    [InlineData(MultiSeat.Shared.Models.SeatStatus.Provisioning)]
+    [InlineData(MultiSeat.Shared.Models.SeatStatus.TearingDown)]
+    [InlineData(MultiSeat.Shared.Models.SeatStatus.Error)]
+    public void ASeatMidLifecycle_IsLeftAlone(MultiSeat.Shared.Models.SeatStatus status)
+    {
+        // A client edge is less important than what the seat is already doing, and stamping
+        // Streaming over TearingDown would both lose that and trip the transition table.
+        var (launcher, logPath, root) = NewWatcher();
+        try
+        {
+            var seat = NewSeat(status);
+            launcher.ProcessSeat(seat, CancellationToken.None);
+            Append(logPath, Line(Connect));
+
+            Assert.False(launcher.ProcessSeat(seat, CancellationToken.None));
+            Assert.Equal(status, seat.Status);
+        }
+        finally { Directory.Delete(root, true); }
+    }
 }
