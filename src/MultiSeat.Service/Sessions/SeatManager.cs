@@ -649,8 +649,8 @@ public sealed class SeatManager
                 _logger.LogWarning(
                     "Seat {Id}: tearing down while the standalone Apollo (PID {Pid}, {Name}) is " +
                     "streaming. Ending this seat's RDP session changes the desktop topology, so " +
-                    "that stream will stall for about a second while its encoder rebuilds. It " +
-                    "recovers on its own. See issue #23.",
+                    "that stream will hitch for a few hundred milliseconds while its encoder " +
+                    "rebuilds. It recovers on its own. See issue #23.",
                     seatId, host.ProcessId, host.HostName ?? "unnamed");
             }
         }
