@@ -342,6 +342,23 @@ MultiSeat is self-contained and **non-destructive**: it works out of the box whe
 2. **Own port range.** Default `PortBase = 48100`, above a stock Apollo's block — no runtime port conflict.
 3. **Never kills a non-MultiSeat Apollo.** On startup `MultiSeatWorker.KillOrphanedApolloProcesses` reaps **only** Apollo processes MultiSeat launched, identified via WMI (`GetManagedApolloPids`) by executable path (under the ApolloVibe dir) or a MultiSeat per-seat config path on the command line. It no longer stops/disables `ApolloService`, and `install-service.ps1` leaves that service alone. (WMI failure → empty set → cleanup is skipped rather than risk killing an unrelated Apollo.)
 
+⚠️ **"Non-destructive" has one exception, and it is not fixable here: tearing a seat down stalls a
+standalone Apollo's stream for about 690 ms** while it rebuilds its encoder. Self-recovering, and
+it does not compound with seat count — seat-to-seat interference was measured and does not exist.
+
+⛔ **The cause is NOT a second Apollo starting or stopping**, which is the intuitive guess and was
+this issue's original premise. Decomposed step by step (#23): stopping the seat's Apollo produced
+*no reaction at all*; killing mstsc and logging the session off each produced the rebuild. **A seat
+IS an RDP session, and that session's display appearing and disappearing is a desktop topology
+change** — which invalidates any DXGI duplication on the host, including one MultiSeat has nothing
+to do with. It connects directly to #15: because seats stream the RDP surface rather than a virtual
+display, seat churn *is* display churn.
+
+There is no VDD detach to defer or reorder, so the stall stays. What `SeatManager` does now is
+**say so**: `WarnIfStandaloneApolloStreamingAsync` logs a warning before teardown when the
+standalone Apollo reports it is streaming. ⚠️ It never blocks or fails a teardown — a seat that
+would not tear down because a status query timed out is a far worse bug than the one it reports.
+
 ## Shared game library & emulator netplay
 
 Because each seat is its own Windows account, games/ROMs would otherwise be siloed per account and seats couldn't easily netplay. Two provisioning helpers address this (config in `MultiSeatOptions` / `appsettings.json`):
