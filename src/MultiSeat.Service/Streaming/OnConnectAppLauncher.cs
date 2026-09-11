@@ -58,16 +58,27 @@ public sealed class OnConnectAppLauncher
     }
 
     /// <summary>
-    /// Inspect a seat's Apollo log for new connect/disconnect events and act on edges.
-    /// Cheap and safe to call every health-check tick. No-op when the feature is off.
+    /// Inspect a seat's Apollo log for new connect/disconnect events and act on edges: move the
+    /// seat between Ready and Streaming, and launch or kill the configured apps.
+    ///
+    /// Returns true when the seat's status changed, so the caller can broadcast it.
+    ///
+    /// ⭐ Detection is NOT gated on MultiSeat:LaunchOnConnect. It used to be — this method opened
+    /// with <c>if (_options.LaunchOnConnect.Length == 0) return;</c>, which disabled the whole
+    /// watcher including the connect/disconnect reading. Since that option is empty by default,
+    /// nothing on a default host ever observed a client connecting, and a seat streaming happily
+    /// still reported Ready: the dashboard showed it idle, and anything deciding whether a seat
+    /// was safe to tear down got the wrong answer. See issue #43.
+    ///
+    /// Launching apps stays gated; only the observation is unconditional. Cheap either way — it
+    /// reads just the bytes appended since the previous tick.
     /// </summary>
-    public void ProcessSeat(SeatInfo seat, CancellationToken ct)
+    public bool ProcessSeat(SeatInfo seat, CancellationToken ct)
     {
-        if (_options.LaunchOnConnect.Length == 0) return; // feature disabled
-        if (seat.SessionId < 0) return;
+        if (seat.SessionId < 0) return false;
 
         var logPath = _apollo.GetLogPath(seat.AccountName, _options.ApolloConfigDir);
-        if (!File.Exists(logPath)) return;
+        if (!File.Exists(logPath)) return false;
 
         var state = _states.GetOrAdd(seat.Id, _ => SeedState(logPath));
 
@@ -87,18 +98,54 @@ public sealed class OnConnectAppLauncher
         }
 
         bool? connectedNow = ReadLatestState(logPath, state);
-        if (connectedNow is null) return; // no new connect/disconnect lines since last tick
+        if (connectedNow is null) return false; // no new connect/disconnect lines since last tick
 
         lock (state.Gate)
         {
-            if (connectedNow.Value == state.Connected) return; // no edge
+            if (connectedNow.Value == state.Connected) return false; // no edge
             state.Connected = connectedNow.Value;
 
-            if (connectedNow.Value)
-                OnConnect(seat, state, ct);
-            else
-                OnDisconnect(seat, state);
+            // Status first, and independently of the app feature. A client is attached or it is
+            // not; whether anyone configured an app to launch has nothing to do with it.
+            var statusChanged = ApplyStreamingStatus(seat, connectedNow.Value);
+
+            if (_options.LaunchOnConnect.Length > 0)
+            {
+                if (connectedNow.Value)
+                    OnConnect(seat, state, ct);
+                else
+                    OnDisconnect(seat, state);
+            }
+
+            return statusChanged;
         }
+    }
+
+    /// <summary>
+    /// Move the seat between Ready and Streaming to match whether a client is attached.
+    ///
+    /// ⚠️ Only those two statuses are touched. A seat that is Provisioning, TearingDown or Error
+    /// is mid-something that matters more than a client edge, and stamping Streaming over it would
+    /// both lose that information and trip the transition table.
+    /// </summary>
+    private bool ApplyStreamingStatus(SeatInfo seat, bool clientConnected)
+    {
+        var target = clientConnected ? SeatStatus.Streaming : SeatStatus.Ready;
+
+        if (seat.Status == target) return false;
+        if (seat.Status is not (SeatStatus.Ready or SeatStatus.Streaming))
+        {
+            _logger.LogDebug(
+                "Seat {Id}: client {Edge} while {Status} — leaving the status alone",
+                seat.Id, clientConnected ? "connected" : "disconnected", seat.Status);
+            return false;
+        }
+
+        seat.TransitionTo(target, _logger);
+        _logger.LogInformation(
+            "Seat {Id}: client {Edge} — now {Status}",
+            seat.Id, clientConnected ? "connected" : "disconnected", target);
+        return true;
     }
 
     /// <summary>Drop tracked state for a seat that has been torn down.</summary>

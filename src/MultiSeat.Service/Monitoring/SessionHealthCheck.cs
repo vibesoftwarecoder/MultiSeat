@@ -296,11 +296,16 @@ public sealed class SessionHealthCheck
             // In the future, we could track the game PID for auto-restart.
         }
 
-        // ── Launch-on-connect: tail Apollo's log for client connect/disconnect ──
-        // and launch (or kill) the configured per-seat apps on the edges. No-op when
-        // MultiSeat:LaunchOnConnect is empty. Cheap: reads only the bytes appended
-        // since the previous tick. Does not change seat state here.
-        _onConnectApps.ProcessSeat(seat, ct);
+        // ── Client connect/disconnect: tail Apollo's log for the edges ──────────
+        // Moves the seat between Ready and Streaming, and launches (or kills) the configured
+        // per-seat apps. Cheap: reads only the bytes appended since the previous tick.
+        //
+        // ⚠️ This DOES change seat state now. It used to be skipped entirely unless
+        // MultiSeat:LaunchOnConnect was configured, which is empty by default — so on a normal
+        // host nothing ever noticed a client connecting and a streaming seat reported Ready
+        // forever (#43). The app launching is still gated; the observation is not.
+        if (_onConnectApps.ProcessSeat(seat, ct))
+            return true; // Ready <-> Streaming changed — worth broadcasting
 
         // ── Follow the client's requested resolution ──────────────
         // Apollo cannot apply it itself inside an RDP seat, so resize by reconnecting the
