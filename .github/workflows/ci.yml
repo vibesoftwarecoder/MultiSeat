@@ -85,8 +85,41 @@ jobs:
       # `npm audit fix` (which cleared all 11 here without touching package.json), and if a
       # finding genuinely does not apply, record why with `npm audit --json` in the PR rather
       # than lowering this threshold.
+      #
+      # ⛔ But "found vulnerabilities" and "could not check" are NOT the same thing, and npm
+      # exits 1 for both. On 2026-09-11 master went red on:
+      #
+      #     npm warn audit 400 Bad Request - POST .../security/audits/quick
+      #     message: 'Invalid package tree, run npm install to rebuild your package-lock.json'
+      #     npm error audit endpoint returned an error
+      #
+      # The same commit had passed this job on its PR 45 minutes earlier and passed locally
+      # afterwards, so that was the registry, not the lockfile. Failing the build on it makes
+      # CI hostage to npmjs.org availability and turns this into exactly the intermittently
+      # red check that teaches people to ignore CI -- the thing build.yml was deleted for in
+      # MoonlightVibe.
+      #
+      # So: retry a transport error, and warn rather than fail if it persists. A real finding
+      # still fails on the first attempt.
       - name: Audit
-        run: npm audit --audit-level=high
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if out=$(npm audit --audit-level=high 2>&1); then
+              echo "$out"
+              exit 0
+            fi
+            echo "$out"
+            if echo "$out" | grep -qiE "audit endpoint returned an error|Bad Request|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket hang up"; then
+              echo "::notice::npm audit could not reach the registry (attempt ${attempt}/3) — retrying"
+              sleep $((attempt * 10))
+              continue
+            fi
+            # Not a transport problem: npm found something at or above the threshold.
+            echo "::error::npm audit reported vulnerabilities at high severity or above"
+            exit 1
+          done
+          echo "::warning::npm audit could not reach the registry after 3 attempts. Dependencies were NOT audited in this run — check manually before relying on it."
 
   lint-scripts:
     name: Script lint (PowerShell 5.1 + 7)
