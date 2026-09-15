@@ -245,7 +245,21 @@ outranks both.
 Two different causes produce "the seat log explains nothing", and they need opposite fixes. Tell
 them apart by **whether the Apollo process is still alive**, never by whether a log exists.
 
-### It EXITS seconds after starting -> an encoder failed to open, and the reason was discarded
+### It EXITS soon after starting -> read how the log ends; timing alone does not say why
+
+An Apollo that exits within seconds did not necessarily fail on its encoder. The health check flags
+any exit within 30 seconds of launch (`IsEarlyExit`), and several different failures fit that
+window. The last lines of the seat log tell them apart:
+
+| the seat log ends with | what happened |
+|---|---|
+| `HTTP interface failed to initialize` (Fatal) | `http::init` failed — for example, while creating its TLS files. On Windows Apollo then sleeps 10 seconds before exiting (`main.cpp`), so an exit about 10 seconds after launch fits this. |
+| `Creating encoder [...]`, then nothing | an encoder failed to open, and the reason was discarded — see below |
+| anything else | configuration, a crash, or a cause not listed here — read the whole log |
+
+A missing shared web-login credential file alone is allowed and does not explain an exit.
+
+#### The encoder case: the reason is discarded unless the log level is `verbose`
 
 `h264_amf`, the QSV encoders and the software encoders are all **FFmpeg** encoders. Apollo sets
 FFmpeg to `AV_LOG_QUIET` unless its log level is exactly `verbose` (`logging.cpp`: the test is
@@ -278,12 +292,6 @@ whose `uniqueid` matches the seat's saved identity. The launched process must st
 Until then, a PID alone is not reported as API readiness. An early exit or timeout stops the
 launched process and reports the seat log path. Automatic restarts retain their three-attempt
 limit. The success message names the Moonlight base port, not the web UI's base-plus-one port.
-
-`SessionHealthCheck` supplies extra diagnostics when it observes Apollo stopped within 30 seconds
-of launch (`IsEarlyExit`). Timing does not establish the cause: HTTP/TLS initialization,
-configuration, encoder failures and crashes must be distinguished using Apollo's log. In
-particular, Apollo waits ten seconds before exiting after `http::init` fails. A missing shared
-web-login credential file alone is allowed and does not explain that exit.
 
 ### It KEEPS RUNNING and serves, but writes nothing -> it cannot open its log file
 
