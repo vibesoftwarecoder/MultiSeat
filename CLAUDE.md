@@ -273,8 +273,17 @@ Restart the service, re-provision, then set it back - verbose is noisy.
   provision, so the change is lost. `appsettings.local.json` survives deploys — ⚠️ but only since
   `98b5cfa`; a `-FromZip` upgrade before that deleted it too. See "Host-local config" above.
 
-`SessionHealthCheck` now prints this hint by itself when a seat's Apollo exits within 30s of
-starting (`IsStartupFailure`), so the failure is signposted rather than silent.
+Apollo startup and restart now wait up to 30 seconds for a successful `/serverinfo` response
+whose `uniqueid` matches the seat's saved identity. The launched process must still be alive.
+Until then, a PID alone is not reported as API readiness. An early exit or timeout stops the
+launched process and reports the seat log path. Automatic restarts retain their three-attempt
+limit. The success message names the Moonlight base port, not the web UI's base-plus-one port.
+
+`SessionHealthCheck` supplies extra diagnostics when it observes Apollo stopped within 30 seconds
+of launch (`IsEarlyExit`). Timing does not establish the cause: HTTP/TLS initialization,
+configuration, encoder failures and crashes must be distinguished using Apollo's log. In
+particular, Apollo waits ten seconds before exiting after `http::init` fails. A missing shared
+web-login credential file alone is allowed and does not explain that exit.
 
 ### It KEEPS RUNNING and serves, but writes nothing -> it cannot open its log file
 

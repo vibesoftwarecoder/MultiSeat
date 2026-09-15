@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using MultiSeat.Service.Configuration;
 using MultiSeat.Service.Sessions;
@@ -76,6 +77,8 @@ public sealed class ApolloManager
     /// </summary>
     public async Task<int> StartAsync(SeatInfo seat, CancellationToken ct)
     {
+        if (IsAlive(seat.Id))
+            throw new ResourceConflictException("Apollo is already running; use restart instead.");
         if (seat.SessionId < 0)
             throw new InvalidOperationException(
                 $"Seat {seat.Id} has no active session (SessionId={seat.SessionId}). " +
@@ -87,7 +90,7 @@ public sealed class ApolloManager
                 "Apollo not found at {Path} — streaming will not work. " +
                 "Install Apollo from https://github.com/ClassicOldSong/Apollo",
                 _options.ApolloExePath);
-            return -1;
+            throw new InvalidOperationException($"Apollo executable not found at {_options.ApolloExePath}.");
         }
 
         // Generate per-seat configuration file
@@ -107,7 +110,7 @@ public sealed class ApolloManager
         if (pid <= 0)
         {
             _logger.LogError("Seat {Id}: Apollo failed to start (PID={Pid})", seat.Id, pid);
-            return pid;
+            throw new InvalidOperationException($"Apollo process could not be launched (PID={pid}).");
         }
 
         // Capture the OS start time NOW, while the process we just launched still owns the PID.
@@ -140,10 +143,13 @@ public sealed class ApolloManager
         // still very much alive — and that is precisely when a kill would otherwise have nothing
         // but a bare PID to go on.
         seat.ApolloIdentity = instance.Identity;
+        seat.ApolloProcessId = pid;
+
+        await WaitForReadinessAsync(seat, instance, ct);
 
         _logger.LogInformation(
-            "Seat {Id}: Apollo started (PID {Pid}) — Moonlight can connect on port {Port}",
-            seat.Id, pid, seat.PortBase + 1);
+            "Seat {Id}: Apollo API ready (PID {Pid}) — Moonlight port {Port}",
+            seat.Id, pid, seat.PortBase);
 
         return pid;
     }
@@ -247,7 +253,7 @@ public sealed class ApolloManager
         if (prev.RestartCount >= MaxRestartAttempts)
         {
             _logger.LogError(
-                "Seat {Id}: Apollo has crashed {Count} times — giving up. " +
+                "Seat {Id}: Apollo exhausted {Count} restart attempts — giving up. " +
                 "Check {LogPath} for errors.",
                 seat.Id, prev.RestartCount,
                 ResolveLogPath(Path.GetDirectoryName(prev.ConfigPath)!));
@@ -299,11 +305,56 @@ public sealed class ApolloManager
 
             seat.ApolloProcessId = pid;
             seat.ApolloIdentity = identity;
+            try
+            {
+                await WaitForReadinessAsync(seat, _instances[seat.Id], ct);
+            }
+            catch (InvalidOperationException ex)
+            {
+                _logger.LogWarning("Seat {Id}: {Reason}", seat.Id, ex.Message);
+                // Preserve the retry budget after readiness cleanup removed the process record.
+                _instances[seat.Id] = prev with
+                {
+                    ProcessId = 0, Identity = null, RestartCount = prev.RestartCount + 1
+                };
+                return await RestartAsync(seat, ct);
+            }
             _logger.LogInformation(
-                "Seat {Id}: Apollo restarted (PID {Pid})", seat.Id, pid);
+                "Seat {Id}: Apollo restarted and its API is ready (PID {Pid})", seat.Id, pid);
         }
 
         return pid;
+    }
+
+    internal async Task WaitForReadinessAsync(SeatInfo seat, ApolloInstance instance, CancellationToken ct)
+    {
+        var recovering = seat.Status is SeatStatus.Ready or SeatStatus.Streaming or SeatStatus.Error or SeatStatus.Connecting;
+        if (recovering) seat.TransitionTo(SeatStatus.Connecting, _logger);
+        try
+        {
+            var statePath = Path.Combine(Path.GetDirectoryName(instance.ConfigPath)!, "config", "sunshine_state.json");
+            using var state = JsonDocument.Parse(await File.ReadAllTextAsync(statePath, ct));
+            var expectedId = Guid.Parse(state.RootElement.GetProperty("root").GetProperty("uniqueid").GetString()!);
+            await ApolloReadiness.WaitAsync(new Uri($"http://127.0.0.1:{seat.PortBase}/serverinfo"),
+                expectedId, () => instance.IsAlive, ct);
+            seat.ErrorMessage = null;
+            if (recovering) seat.TransitionTo(SeatStatus.Ready, _logger);
+        }
+        catch (Exception ex)
+        {
+            // Record before stopping: callers may not yet have received the PID. Stop uses
+            // the captured process identity, so a recycled PID cannot kill another process.
+            Stop(seat);
+            seat.ApolloProcessId = 0;
+            seat.ApolloIdentity = null;
+            if (recovering) seat.TransitionTo(SeatStatus.Error, _logger);
+            if (ex is OperationCanceledException) throw;
+            var message = $"{ex.Message} Check {ResolveLogPath(Path.GetDirectoryName(instance.ConfigPath)!)}. "
+                + "The cause is not established; inspect Apollo's log for HTTP/TLS, configuration or encoder errors. "
+                + "If it is inconclusive, set MultiSeat:ApolloLogLevel to verbose (not debug) and reproduce.";
+            seat.ErrorMessage = message;
+            throw new InvalidOperationException(message, ex);
+        }
     }
 
     /// <summary>
@@ -345,8 +396,7 @@ public sealed class ApolloManager
     /// How long this seat's Apollo has been running, or null if we have no record of it.
     /// </summary>
     /// <remarks>
-    /// Used to tell a crash apart from a failure to start. An Apollo that dies seconds after launch
-    /// did not crash mid-stream — it failed to initialise, and the encoder is the usual reason.
+    /// Elapsed time when the health check observes an exit, not a diagnosis or exact exit time.
     /// </remarks>
     public TimeSpan? GetUptime(Guid seatId)
     {

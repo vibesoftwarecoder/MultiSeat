@@ -37,7 +37,7 @@ public static class SeatState
         // Error -> Ready is POST /api/seats/{id}/session-reconnect handing a repaired seat back to
         // the health check. Without it the seat keeps a live session that nothing ever checks,
         // which is the bug PR #22 fixed.
-        [SeatStatus.Error] = [SeatStatus.Ready, SeatStatus.Provisioning, SeatStatus.TearingDown],
+        [SeatStatus.Error] = [SeatStatus.Ready, SeatStatus.Connecting, SeatStatus.Provisioning, SeatStatus.TearingDown],
     };
 
     /// <summary>
