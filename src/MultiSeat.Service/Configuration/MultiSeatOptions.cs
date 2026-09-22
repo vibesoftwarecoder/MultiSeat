@@ -204,6 +204,43 @@ public sealed class MultiSeatOptions
     public bool AutoAssignControllers { get; set; } = true;
 
     // ── Display ──────────────────────────────────────────────────────
+    // DWM composition interval, in milliseconds, for every RDP session on this host. Written to
+    // HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations at service startup; DWM
+    // reads it when a session's compositor starts, so it takes effect on the NEXT session, not on
+    // sessions already running.
+    //
+    // A seat streams its RDP session surface (issue #15), so this interval is the ceiling on how
+    // often a seat can produce a NEW frame. At the Windows default a 60fps stream is sending
+    // roughly every second frame twice.
+    //
+    // ⛔ Values below 2 are rejected. This shipped as 1 from the initial release until 2026-09-22,
+    // on the theory that 1ms meant "as fast as possible". It does not — Windows treats 1 as out of
+    // range and silently falls back to the default, so the setting did nothing at all for months
+    // while the code logged that it had been applied.
+    //
+    // Measured on the reference host (Win11 26100, one fresh RDP session per value, composition
+    // rate sampled by pacing off DwmFlush):
+    //
+    //     value     adapter reports     measured
+    //     absent    32 Hz               32.0 fps   <- Windows default
+    //     1         32 Hz               31.9 fps   <- what we used to ship: identical to absent
+    //     8         125 Hz              125.2 fps  <- the default below
+    //     4         250 Hz              246.1 fps
+    //     2         500 Hz              464.7 fps
+    //
+    // The rate is 1000/interval. 8 gives 125 Hz, which clears a 120fps client with headroom and
+    // is the most a seat is likely to need. Going lower buys composition the stream cannot carry
+    // and costs CPU in TermService and DWM — unmeasured, which is the reason not to reach for it.
+    // Raise this only with a measurement in hand: scripts\probe-dwm-rate.ps1 takes one.
+    public int DwmFrameIntervalMs { get; set; } = 8;
+
+    /// <summary>
+    /// Smallest interval Windows actually honours. Below this it ignores the value and composes at
+    /// its own default, without reporting anything — measured, not inferred: 1 and "value absent"
+    /// produced the same 32fps, while 2 produced 465fps.
+    /// </summary>
+    public const int MinimumHonouredDwmFrameIntervalMs = 2;
+
     // Resize a seat to whatever resolution its Moonlight client asks for.
     //
     // Apollo's own dd_resolution_option = auto cannot do this: a seat streams its RDP session
