@@ -8,14 +8,17 @@ namespace MultiSeat.Tests.Configuration;
 /// Guards a setting that failed in the worst available way: it reported success and did nothing.
 ///
 /// A seat streams its RDP session surface, so the session's DWM composition rate is the ceiling on
-/// how often that seat can produce a new frame. MultiSeat raises it by writing DWMFRAMEINTERVAL.
-/// From the initial release until 2026-09-22 it wrote 1, on the theory that 1ms meant "as fast as
-/// possible". Windows treats anything below 2 as out of range and quietly composes at its own
-/// default, so seats sat at ~32fps for months while the service logged that the value was applied.
+/// how often that seat can produce a new frame, and the interval also sets the refresh rate the
+/// seat's display advertises. MultiSeat wrote 1 from the initial release, which is where the seat's
+/// documented 1000 Hz display came from: the advertised rate is 1000/interval.
+///
+/// On Win11 26100.9444 an interval below 2 is out of range. Windows falls back to its own default
+/// and says nothing, so seats dropped from 1000 Hz to ~32fps with nothing logged and nothing
+/// failing, and reading the value back still returns the 1 that was written.
 ///
 /// Measured on the reference host, one fresh RDP session per value, rate sampled by pacing off
-/// DwmFlush: absent = 32.0fps, 1 = 31.9fps, 8 = 125.2fps, 4 = 246.1fps, 2 = 464.7fps.
-/// The rate is 1000/interval, and 1 is the single input that silently does nothing.
+/// DwmFlush, refresh read from both GDI and CCD (which agree): absent = 32.0fps, 1 = 31.9fps,
+/// 16 = 62.1fps, 8 = 125.2fps, 4 = 246.1fps, 2 = 464.7fps.
 ///
 /// Nothing here can reach a registry or a compositor. These assert the two things that were wrong
 /// and are cheap to get wrong again: the value we ship is one Windows honours, and the C# default
