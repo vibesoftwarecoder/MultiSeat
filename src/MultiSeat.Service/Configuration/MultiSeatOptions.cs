@@ -204,6 +204,68 @@ public sealed class MultiSeatOptions
     public bool AutoAssignControllers { get; set; } = true;
 
     // ── Display ──────────────────────────────────────────────────────
+    // DWM composition interval, in milliseconds, for every RDP session on this host. Written to
+    // HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations at service startup; DWM
+    // reads it when a session's compositor starts, so it takes effect on the NEXT session, not on
+    // sessions already running.
+    //
+    // A seat streams its RDP session surface (issue #15), so this interval is the ceiling on how
+    // often a seat can produce a NEW frame. At the Windows default a 60fps stream is sending
+    // roughly every second frame twice.
+    //
+    // ⭐ This also sets the refresh rate the seat's display ADVERTISES, not just how often frames
+    // are delivered. Measured on the reference host (Win11 26100.9444), one fresh RDP session per
+    // value. GDI (EnumDisplaySettings), CCD (QueryDisplayConfig targetInfo.refreshRate and the
+    // target mode's vSyncFreq) and the measured composition rate all agree:
+    //
+    //     value     display advertises     composition measured
+    //     absent    32 Hz                  32.0 fps    <- Windows default
+    //     1         32 Hz                  31.9 fps    <- ignored; same as absent
+    //     2         500 Hz                 464.7 fps
+    //     4         250 Hz                 246.1 fps
+    //     8         125 Hz                 125.2 fps
+    //     16        62 Hz                  62.1 fps    <- the default below
+    //     33        30 Hz                  30.0 fps
+    //
+    // So the advertised rate is 1000/interval, truncated to a whole number. Exact 60 Hz is not
+    // reachable (1000/60 is not an integer); 16 gives 62 Hz, which is the closest above it.
+    //
+    // ⛔ Values below 2 are rejected, and this is the reason the setting needs a floor at all.
+    // MultiSeat shipped 1 from the initial release, which is where the seat's well-documented
+    // 1000 Hz display came from — 1000/1. That was real and it worked. On this Windows build 1 is
+    // out of range and Windows silently falls back to its own default, so seats dropped from
+    // 1000 Hz to 32 Hz with nothing logged and nothing failing. Writing a value below 2 reports
+    // success and changes nothing, so it is refused instead.
+    //
+    // ⚠️ The June 2026 RdpIdd research concluded the seat display was locked to a single
+    // 1920x1080@1000 mode and that a GDI refresh change was hollow because DXGI kept reporting
+    // 1000 Hz. That held on termsrv 8521. It does not hold here: GDI and CCD now agree, and both
+    // follow this interval. Re-measure before relying on either account.
+    //
+    // ⛔ This key is machine-wide (HKLM, all WinStations), so every seat on a host shares one
+    // value. A per-seat refresh rate is not reachable through it.
+    //
+    // 16 gives 62 Hz, which covers the 60fps a seat is provisioned at by default and looks like an
+    // ordinary monitor — unlike 1000 Hz, which is what broke old titles. Pick the interval for the
+    // fastest client the host serves, since every seat shares it:
+    //
+    //     30fps -> 33    60fps -> 16    120fps -> 8    144fps -> 6
+    //
+    // Exact 60 and 144 are not reachable: 1000/60 and 1000/144 are not whole milliseconds. 7 would
+    // advertise 142 Hz, just under a 144 Hz client, so 6 is the one that covers it.
+    //
+    // Going lower than the client needs buys composition the stream cannot carry and costs CPU in
+    // TermService and DWM, which is unmeasured and the reason not to reach for it. Change this only
+    // with a measurement in hand: scripts\probe-dwm-rate.ps1 takes one.
+    public int DwmFrameIntervalMs { get; set; } = 16;
+
+    /// <summary>
+    /// Smallest interval Windows actually honours. Below this it ignores the value and composes at
+    /// its own default, without reporting anything — measured, not inferred: 1 and "value absent"
+    /// produced the same 32fps, while 2 produced 465fps.
+    /// </summary>
+    public const int MinimumHonouredDwmFrameIntervalMs = 2;
+
     // Resize a seat to whatever resolution its Moonlight client asks for.
     //
     // Apollo's own dd_resolution_option = auto cannot do this: a seat streams its RDP session

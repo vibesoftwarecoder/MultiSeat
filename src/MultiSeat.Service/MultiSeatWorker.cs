@@ -87,9 +87,10 @@ public sealed class MultiSeatWorker : BackgroundService
         _accounts.NormalizeManagedAccountPrivileges();
 
         // ── Step 0b: Set DWM frame interval for RDP sessions ────────
-        // The Microsoft Remote Display Adapter's DWM composition rate defaults
-        // to ~33ms (~30fps), causing the 32Hz cap Apollo sees. Lower the interval
-        // so RDP sessions compose at the requested frame rate.
+        // The Microsoft Remote Display Adapter's DWM composition rate defaults to ~32fps, which
+        // is the ceiling on how often a seat can produce a new frame. Lowering the interval
+        // raises it — measured 125fps at the default 8ms. Applies to sessions created after this
+        // point, so seats provisioned later in this service's life get it.
         SetDwmFrameInterval();
 
         // ── Step 1: Verify multi-session is available ────────────────
@@ -297,19 +298,32 @@ public sealed class MultiSeatWorker : BackgroundService
     }
 
     /// <summary>
-    /// Set DWMFRAMEINTERVAL in the Terminal Server WinStations registry key.
-    /// This controls the DWM composition interval for RDP sessions.
-    /// Default is ~33ms (~30fps). We set it to 1ms to allow DWM to compose
-    /// at the maximum rate the display/encoder can handle.
-    /// Requires service restart + new RDP sessions to take effect.
+    /// Set DWMFRAMEINTERVAL in the Terminal Server WinStations registry key, which controls the
+    /// DWM composition interval for RDP sessions — and therefore how often a seat can produce a
+    /// new frame. The composition rate is 1000/interval; the Windows default is ~32fps.
+    /// Takes effect on the next RDP session, not on sessions already running.
+    /// See MultiSeatOptions.DwmFrameIntervalMs for the measurements behind the default.
     /// </summary>
     private void SetDwmFrameInterval()
     {
         const string keyPath = @"SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations";
         const string valueName = "DWMFRAMEINTERVAL";
-        // 1ms = let DWM run as fast as possible; the actual rate is capped by
-        // the display's refresh rate and encoder throughput.
-        const int intervalMs = 1;
+
+        var intervalMs = _options.DwmFrameIntervalMs;
+
+        // Windows treats an interval below 2 as out of range and silently uses the default, so
+        // writing one would report success and change nothing — which is exactly how the old
+        // hardcoded 1 went unnoticed. Refuse it and say why rather than write a value we have
+        // measured to be inert.
+        if (intervalMs < MultiSeatOptions.MinimumHonouredDwmFrameIntervalMs)
+        {
+            _logger.LogWarning(
+                "DwmFrameIntervalMs is {Ms}, which Windows ignores — RDP sessions would compose " +
+                "at the ~32fps default. Not writing it. Use 8 (125Hz) unless you have measured " +
+                "a reason for another value",
+                intervalMs);
+            return;
+        }
 
         try
         {
@@ -331,14 +345,14 @@ public sealed class MultiSeatWorker : BackgroundService
 
             key.SetValue(valueName, intervalMs, RegistryValueKind.DWord);
             _logger.LogInformation(
-                "Set DWMFRAMEINTERVAL to {Ms}ms (was {Old}) — " +
-                "new RDP sessions will use high-framerate DWM composition",
-                intervalMs, current ?? "unset");
+                "Set DWMFRAMEINTERVAL to {Ms}ms (was {Old}) — RDP sessions created from now on " +
+                "compose at ~{Hz}fps instead of the ~32fps default",
+                intervalMs, current ?? "unset", 1000 / intervalMs);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
-                "Failed to set DWMFRAMEINTERVAL — RDP sessions may be capped at ~30fps");
+                "Failed to set DWMFRAMEINTERVAL — RDP sessions stay capped at the ~32fps default");
         }
     }
 
