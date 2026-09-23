@@ -293,6 +293,56 @@ public class StreamingTests
     }
 
     [Fact]
+    public void ApolloConfigBuilder_AppsFile_IsWhereTheConfigSaysItIs()
+    {
+        // Issue #63. apps.json was seeded into the seat's config dir but file_apps was never
+        // written, so Apollo resolved apps.json to {exe_dir}/config/ inside Program Files. Where
+        // that file did not already exist, Apollo tried to CREATE it there as a standard user,
+        // failed, and exited before logging::init - so the seat failed to provision with no
+        // apollo.log at all. Seeding a file Apollo is not told to read is the bug this guards.
+        var tempDir = Path.Combine(Path.GetTempPath(), $"multiseat-test-{Guid.NewGuid():N}");
+        try
+        {
+            var builder = new ApolloConfigBuilder(
+                new TestLogger<ApolloConfigBuilder>(), Options.Create(new MultiSeatOptions()));
+            var seat = new SeatInfo { AccountName = "MultiSeatSeat01", PortBase = 47984 };
+
+            var content = File.ReadAllText(builder.BuildConfig(seat, tempDir));
+
+            var line = content.Split('\n').FirstOrDefault(l => l.StartsWith("file_apps = ", StringComparison.Ordinal));
+            Assert.True(line is not null,
+                "sunshine.conf has no file_apps - Apollo will fall back to the Program Files copy");
+
+            var declared = line!["file_apps = ".Length..].Trim().Replace('/', Path.DirectorySeparatorChar);
+
+            Assert.True(File.Exists(declared), $"config points file_apps at {declared}, which does not exist");
+            Assert.StartsWith(tempDir, declared, StringComparison.OrdinalIgnoreCase);
+        }
+        finally { DeleteTestDir(tempDir); }
+    }
+
+    [Fact]
+    public void ApolloConfigBuilder_AppsFile_IsNotInTheApolloInstallDir()
+    {
+        // The seat account has ReadAndExecute on Program Files, so any apps.json path under the
+        // Apollo install dir is unwritable by the seat and reintroduces #63.
+        var tempDir = Path.Combine(Path.GetTempPath(), $"multiseat-test-{Guid.NewGuid():N}");
+        try
+        {
+            var builder = new ApolloConfigBuilder(
+                new TestLogger<ApolloConfigBuilder>(), Options.Create(new MultiSeatOptions()));
+            var seat = new SeatInfo { AccountName = "MultiSeatSeat01", PortBase = 47984 };
+
+            var content = File.ReadAllText(builder.BuildConfig(seat, tempDir));
+            var line = content.Split('\n').First(l => l.StartsWith("file_apps = ", StringComparison.Ordinal));
+            var declared = line["file_apps = ".Length..].Trim();
+
+            Assert.DoesNotContain("Program Files", declared, StringComparison.OrdinalIgnoreCase);
+        }
+        finally { DeleteTestDir(tempDir); }
+    }
+
+    [Fact]
     public void ApolloConfigBuilder_UnresolvableAccount_StillProducesAConfig()
     {
         // The write grants resolve the seat account to a SID. On a host where that account has
