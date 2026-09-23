@@ -232,6 +232,18 @@ public static class ApiServer
         if (!string.IsNullOrWhiteSpace(configured))
             return configured;
 
+        return EnsurePersistedKey(log);
+    }
+
+    /// <summary>
+    /// Return the key held in <c>C:\ProgramData\MultiSeat\api-key.txt</c>, generating and
+    /// hardening one if the file is absent or empty. Always returns a usable key.
+    ///
+    /// Split out of <see cref="ResolveApiKey"/> so that turning authentication ON at runtime can
+    /// obtain a key the same way startup does, instead of enabling against an empty one (#61).
+    /// </summary>
+    internal static string EnsurePersistedKey(ILogger log)
+    {
         var keyFile = Path.Combine(@"C:\ProgramData\MultiSeat", "api-key.txt");
 
         if (File.Exists(keyFile))
