@@ -68,6 +68,7 @@ public sealed class ApolloConfigBuilder
         // through ApolloManager.ResolveLogPath.
         var logPath = Path.Combine(seatDir, "apollo.log").Replace('\\', '/');
         var statePath = Path.Combine(seatDir, "config", "sunshine_state.json").Replace('\\', '/');
+        var appsPath = Path.Combine(seatDir, "config", "apps.json").Replace('\\', '/');
         // All seats share one credentials file so web UI login persists across re-provisioning.
         // The file is created by MultiSeat on first run (from Apollo's default config) and survives seat teardown.
         var credPath = Path.Combine(configDir, "shared_credentials.json").Replace('\\', '/');
@@ -288,6 +289,20 @@ public sealed class ApolloConfigBuilder
         sb.AppendLine("# Security");
         sb.AppendLine($"file_state = {statePath}");
         sb.AppendLine($"credentials_file = {credPath}");
+        // file_apps needs the same treatment, and not having it was a seat-killing bug (#63).
+        // Left at its default, Apollo resolves apps.json to {exe_dir}/config/apps.json — inside
+        // Program Files — and if that file is absent it tries to CREATE it there by copying
+        // assets/apps.json. A seat is a standard user with ReadAndExecute on that directory, so
+        // the copy fails and Apollo exits before logging::init. The seat then fails provisioning
+        // with no apollo.log at all, and the error points at a log file that was never written.
+        //
+        // The install-dir file exists on any host where Apollo has been run elevated once, which
+        // is why this never reproduced here and did reproduce on a clean install.
+        //
+        // EnsureSeatAppsJson already seeds a per-seat copy and grants the seat Modify on it. This
+        // is the line that makes Apollo actually read it, so each seat also gets its own app list
+        // rather than sharing one in Program Files.
+        sb.AppendLine($"file_apps = {appsPath}");
         // The same reasoning covers the TLS material. Left at its default Apollo
         // looks for cakey.pem under {exe_dir}/config/credentials/, inside Program
         // Files — which a seat account cannot write, so it cannot even generate
@@ -384,10 +399,15 @@ public sealed class ApolloConfigBuilder
     /// and seed the TLS cert/key from Apollo's install dir.
     ///
     /// Apollo resolves config files from {exe_dir}/config/ by default.
-    /// We override file_state and credentials_file to absolute per-seat paths in the conf:
+    /// We override file_state, file_apps and credentials_file to absolute per-seat paths in the conf:
     ///   sunshine_state.json — unique UUID per seat (Moonlight server identity)
-    ///   apps.json           — game/app list (no override; always copied fresh each provision)
+    ///   apps.json           — game/app list, copied fresh each provision
     ///   credentials/        — TLS cert + key for HTTPS pairing
+    ///
+    /// ⛔ apps.json used to be seeded WITHOUT the file_apps override, which is issue #63: Apollo
+    /// then read {exe_dir}/config/apps.json, and on a host where that file did not exist it tried
+    /// to create it inside Program Files as a standard user and exited before logging started.
+    /// Seeding a file is not enough — Apollo has to be told to read it.
     ///
     /// ProcessInjector sets workingDir = seatDir. BUILTIN\Users only has Write
     /// (create files), not Modify (create subdirectories), on ProgramData dirs.
