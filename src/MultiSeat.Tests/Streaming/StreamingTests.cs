@@ -303,8 +303,16 @@ public class StreamingTests
         var tempDir = Path.Combine(Path.GetTempPath(), $"multiseat-test-{Guid.NewGuid():N}");
         try
         {
+            // Stand up a fake Apollo install so there is something to seed FROM. Without this the
+            // test only passes on a machine where ApolloVibe happens to be installed - which is the
+            // very mistake that let #63 ship, so it must not be repeated in the test for it.
+            var fakeApollo = Path.Combine(tempDir, "FakeApollo");
+            Directory.CreateDirectory(Path.Combine(fakeApollo, "config"));
+            File.WriteAllText(Path.Combine(fakeApollo, "config", "apps.json"), """{"apps":[]}""");
+
+            var options = new MultiSeatOptions { ApolloExePath = Path.Combine(fakeApollo, "sunshine.exe") };
             var builder = new ApolloConfigBuilder(
-                new TestLogger<ApolloConfigBuilder>(), Options.Create(new MultiSeatOptions()));
+                new TestLogger<ApolloConfigBuilder>(), Options.Create(options));
             var seat = new SeatInfo { AccountName = "MultiSeatSeat01", PortBase = 47984 };
 
             var content = File.ReadAllText(builder.BuildConfig(seat, tempDir));
