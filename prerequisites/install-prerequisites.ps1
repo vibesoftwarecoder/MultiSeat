@@ -1154,6 +1154,33 @@ if ($apolloComplete) {
     }
 }
 
+# Seed config\apps.json the way Apollo does on its first elevated run (MultiSeat issue #63).
+# Apollo creates config\ and copies assets\apps.json into it BEFORE it reads a seat's
+# file_apps override, and a seat runs as a standard user that cannot write here, so on a
+# clean install every seat's Apollo exited with "Failed to apply config". The release zip
+# ships no config\ folder. Runs on the "Already installed" path too, so an existing host is
+# fixed by re-running this script. The service does the same before every seat launch.
+# Never overwrite: an existing file is the console install's app list.
+if ((Test-Path $apolloPath) -and (Test-Path $apolloAssetsSeed)) {
+    $apolloConfigDir = "$apolloInstallDir\config"
+    $apolloAppsJson  = "$apolloConfigDir\apps.json"
+    try {
+        if (-not (Test-Path $apolloConfigDir -PathType Container)) {
+            New-Item -ItemType Directory -Path $apolloConfigDir | Out-Null
+            Write-OK "Created $apolloConfigDir"
+        }
+        if (Test-Path $apolloAppsJson) {
+            Write-OK "config\apps.json already present (left as is)"
+        } else {
+            Copy-Item -Path $apolloAssetsSeed -Destination $apolloAppsJson
+            Write-OK "Seeded config\apps.json from assets\apps.json"
+        }
+    } catch {
+        Write-Host "  WARNING: could not seed $apolloAppsJson -- $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "  The MultiSeat service retries this before every seat launch." -ForegroundColor Yellow
+    }
+}
+
 # ----------------------------------------------------------------
 # 6. Persistent Virtual Display Driver (VirtualDrivers/Virtual-Display-Driver,
 #    aka MttVDD / itsmikethetech VDD)
