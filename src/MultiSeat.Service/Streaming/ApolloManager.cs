@@ -71,6 +71,20 @@ public sealed class ApolloManager
     public int RunningInstanceCount => _instances.Count(i => i.Value.IsAlive);
 
     /// <summary>
+    /// Make sure the Apollo install holds config\apps.json before a seat's Apollo starts, since
+    /// the seat cannot create it there itself (#63). See <see cref="ApolloInstallSeed"/>.
+    /// Skipped when Apollo is not installed, so nothing is created under a missing install.
+    /// </summary>
+    private void EnsureInstallAppsJson()
+    {
+        var apolloRoot = Path.GetDirectoryName(_options.ApolloExePath);
+        if (string.IsNullOrEmpty(apolloRoot) || !IsApolloInstalled)
+            return;
+
+        ApolloInstallSeed.EnsureInstallAppsJson(apolloRoot, _logger);
+    }
+
+    /// <summary>
     /// Start an Apollo instance for the given seat.
     /// Generates per-seat config and launches Apollo inside the seat's Windows session.
     /// Returns the Apollo process ID.
@@ -92,6 +106,11 @@ public sealed class ApolloManager
                 _options.ApolloExePath);
             throw new InvalidOperationException($"Apollo executable not found at {_options.ApolloExePath}.");
         }
+
+        // Before the config, not after: BuildConfig seeds the seat's own apps.json from the
+        // install's config\apps.json, so on a clean install this is also what gives the seat an
+        // app list on its first provision.
+        EnsureInstallAppsJson();
 
         // Generate per-seat configuration file
         var configPath = _configBuilder.BuildConfig(seat, _options.ApolloConfigDir);
@@ -263,6 +282,9 @@ public sealed class ApolloManager
         _logger.LogWarning(
             "Seat {Id}: restarting Apollo (attempt {N}/{Max})",
             seat.Id, prev.RestartCount + 1, MaxRestartAttempts);
+
+        // Same precondition as a first start. Cheap when the file is already there.
+        EnsureInstallAppsJson();
 
         // Re-use existing config — restart in the seat's own session (same as initial start)
         var pid = await _processInjector.LaunchApolloInSessionAsync(

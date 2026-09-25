@@ -302,6 +302,11 @@ public sealed class ApolloConfigBuilder
         // EnsureSeatAppsJson already seeds a per-seat copy and grants the seat Modify on it. This
         // is the line that makes Apollo actually read it, so each seat also gets its own app list
         // rather than sharing one in Program Files.
+        //
+        // ⚠️ CORRECTION: this line alone did not fix #63. Apollo creates {exe_dir}/config/ and
+        // copies assets/apps.json to the DEFAULT path before it reads file_apps, so a clean
+        // install still failed the same way. ApolloManager now seeds that install-dir copy as
+        // SYSTEM before every launch — see ApolloInstallSeed.
         sb.AppendLine($"file_apps = {appsPath}");
         // The same reasoning covers the TLS material. Left at its default Apollo
         // looks for cakey.pem under {exe_dir}/config/credentials/, inside Program
@@ -407,7 +412,9 @@ public sealed class ApolloConfigBuilder
     /// ⛔ apps.json used to be seeded WITHOUT the file_apps override, which is issue #63: Apollo
     /// then read {exe_dir}/config/apps.json, and on a host where that file did not exist it tried
     /// to create it inside Program Files as a standard user and exited before logging started.
-    /// Seeding a file is not enough — Apollo has to be told to read it.
+    /// Seeding a file is not enough — Apollo has to be told to read it. Telling it was not enough
+    /// either: Apollo still touches the install-dir copy before reading file_apps, which
+    /// <see cref="ApolloInstallSeed"/> covers.
     ///
     /// ProcessInjector sets workingDir = seatDir. BUILTIN\Users only has Write
     /// (create files), not Modify (create subdirectories), on ProgramData dirs.
