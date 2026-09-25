@@ -28,13 +28,17 @@ internal static class ApolloInstallSeed
         Seeded,
         /// <summary>There is no assets\apps.json to copy from. Apollo will fail to start.</summary>
         NoSource,
+        /// <summary>The install directory itself does not exist. Nothing was created.</summary>
+        RootMissing,
         /// <summary>Creating the folder or copying the file failed. Logged; the launch goes ahead.</summary>
         Failed,
     }
 
     /// <summary>
     /// Ensure {apolloRoot}\config\ exists and holds an apps.json, copying assets\apps.json when it
-    /// does not. Never throws: a failure here is logged as a warning and the launch carries on,
+    /// does not. The install directory itself is never created: without it there is no install to
+    /// seed. The copy goes to a temp file beside the target and is moved into place without
+    /// overwrite, so a concurrent launch never sees a half-written file. Never throws: a failure here is logged as a warning and the launch carries on,
     /// because Apollo may still start (for example if the file appears by other means), and the
     /// readiness check reports it if it does not.
     /// </summary>
@@ -43,9 +47,18 @@ internal static class ApolloInstallSeed
         var configDir = Path.Combine(apolloRoot, "config");
         var dest = Path.Combine(configDir, "apps.json");
         var source = Path.Combine(apolloRoot, "assets", "apps.json");
+        var tmp = Path.Combine(configDir, "apps.json." + Guid.NewGuid().ToString("N") + ".tmp");
 
         try
         {
+            if (!Directory.Exists(apolloRoot))
+            {
+                logger.LogWarning(
+                    "Apollo install directory {Root} does not exist, so there is nothing to seed. " +
+                    "Apollo will not start until ApolloVibe is installed", apolloRoot);
+                return Outcome.RootMissing;
+            }
+
             if (!Directory.Exists(configDir))
             {
                 Directory.CreateDirectory(configDir);
@@ -69,8 +82,10 @@ internal static class ApolloInstallSeed
                 return Outcome.NoSource;
             }
 
-            // overwrite: false, so a file that appeared since the check above is kept, not replaced.
-            File.Copy(source, dest, overwrite: false);
+            // File.Copy is not atomic, so copy beside the target and move the finished file in.
+            // overwrite: false on the move, so a file that appeared since the check above is kept.
+            File.Copy(source, tmp, overwrite: false);
+            File.Move(tmp, dest, overwrite: false);
             logger.LogInformation(
                 "Seeded Apollo's {Dest} from {Source} — a seat's Apollo cannot create it " +
                 "under the install directory itself (#63)", dest, source);
@@ -88,6 +103,10 @@ internal static class ApolloInstallSeed
                 "Could not seed Apollo's {Dest} — on an install where it is missing, a seat's " +
                 "Apollo will exit at startup with \"Failed to apply config\"", dest);
             return Outcome.Failed;
+        }
+        finally
+        {
+            try { File.Delete(tmp); } catch { /* best effort */ }
         }
     }
 }

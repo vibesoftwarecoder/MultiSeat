@@ -53,6 +53,9 @@ public class ApolloInstallSeedTests
             // A reporter's Event Log only carries Information and above, so what was done must be
             // visible there.
             Assert.Contains(logger.Entries, e => e.Level == LogLevel.Information && e.Message.Contains("Seeded"));
+            // The temp file the copy goes through must be gone once the move has happened.
+            Assert.Empty(Directory.GetFiles(Path.Combine(root, "config"), "*.tmp"));
+            Assert.Single(Directory.GetFiles(Path.Combine(root, "config")));
         }
         finally { DeleteFakeInstall(root); }
     }
@@ -69,11 +72,18 @@ public class ApolloInstallSeedTests
             Directory.CreateDirectory(Path.Combine(root, "config"));
             var dest = Path.Combine(root, "config", "apps.json");
             File.WriteAllText(dest, curated);
+            var stamp = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(dest, stamp);
 
-            var outcome = ApolloInstallSeed.EnsureInstallAppsJson(root, new RecordingLogger());
+            var first = ApolloInstallSeed.EnsureInstallAppsJson(root, new RecordingLogger());
+            var second = ApolloInstallSeed.EnsureInstallAppsJson(root, new RecordingLogger());
 
-            Assert.Equal(ApolloInstallSeed.Outcome.AlreadyPresent, outcome);
+            Assert.Equal(ApolloInstallSeed.Outcome.AlreadyPresent, first);
+            Assert.Equal(ApolloInstallSeed.Outcome.AlreadyPresent, second);
             Assert.Equal(curated, File.ReadAllText(dest));
+            // A replace-with-identical-content would keep the text but bump the timestamp.
+            Assert.Equal(stamp, File.GetLastWriteTimeUtc(dest));
+            Assert.Empty(Directory.GetFiles(Path.Combine(root, "config"), "*.tmp"));
         }
         finally { DeleteFakeInstall(root); }
     }
@@ -116,6 +126,26 @@ public class ApolloInstallSeedTests
             Assert.Equal(ApolloInstallSeed.Outcome.Failed, outcome);
             Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Exception is not null);
             Assert.Equal("not a folder", File.ReadAllText(blocker));
+            Assert.Empty(Directory.GetFiles(root, "*.tmp", SearchOption.AllDirectories));
+        }
+        finally { DeleteFakeInstall(root); }
+    }
+
+    [Fact]
+    public void CreatesNothing_WhenTheInstallDirectoryIsMissing()
+    {
+        // No install means nothing to seed. Creating the root would make a phantom ApolloVibe
+        // folder under Program Files that the readiness check then mistakes for an install.
+        var root = Path.Combine(Path.GetTempPath(), $"multiseat-apollo-{Guid.NewGuid():N}");
+        try
+        {
+            var logger = new RecordingLogger();
+
+            var outcome = ApolloInstallSeed.EnsureInstallAppsJson(root, logger);
+
+            Assert.Equal(ApolloInstallSeed.Outcome.RootMissing, outcome);
+            Assert.False(Directory.Exists(root), "the install root was created");
+            Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning);
         }
         finally { DeleteFakeInstall(root); }
     }
