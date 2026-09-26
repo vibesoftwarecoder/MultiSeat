@@ -99,6 +99,121 @@ public sealed class SessionHealthCheck
         status is not (SeatStatus.Idle or SeatStatus.Provisioning
                        or SeatStatus.TearingDown or SeatStatus.Error);
 
+    /// <summary>
+    /// Relaunch the seat session's anchor if it has exited.
+    ///
+    /// Runs only once the session is known Active, which is how the anchor is launched at
+    /// provision time. The exit is reported once by the launcher whatever happens here, so a
+    /// failed relaunch costs one log line, not one every 5 seconds.
+    ///
+    /// The relaunch takes the lifecycle gate so it cannot interleave with a teardown, which
+    /// removes and kills the anchor under the same gate. After waiting for it, the seat is
+    /// checked again: if it was torn down or its session changed meanwhile, nothing is launched.
+    /// The ordering itself is in <see cref="RelaunchExitedAnchorAsync"/>.
+    /// </summary>
+    private async Task EnsureSessionAnchorAsync(SeatInfo seat, CancellationToken ct)
+    {
+        var sessionId = seat.SessionId;
+        try
+        {
+            var outcome = await RelaunchExitedAnchorAsync(
+                hasExitedAnchor: () => _sessionLauncher.HasExitedSessionAnchor(sessionId),
+                acquireGate: c => _lifecycleGate.AcquireAsync(seat.Id, c),
+                takeExitedAnchor: () => _sessionLauncher.TakeExitedSessionAnchor(sessionId),
+                seatStillHoldsSession: () => IsWorthChecking(seat.Status)
+                    && seat.SessionId == sessionId
+                    && _sessionLauncher.IsSessionActive(sessionId),
+                relaunch: c => _sessionLauncher.RelaunchSessionAnchorAsync(sessionId, seat.AccountName, c),
+                ct);
+
+            if (outcome == AnchorRelaunchOutcome.SeatChanged)
+            {
+                _logger.LogInformation(
+                    "Seat {Id}: not relaunching the anchor for session {Sid}; the seat or its " +
+                    "session changed while waiting", seat.Id, sessionId);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Shutdown.
+        }
+        catch (TimeoutException)
+        {
+            // The gate is held by a reconnect, a resolution change or a teardown. Nothing has
+            // been taken, so the exited anchor is still tracked and the next check tries again.
+            _logger.LogInformation(
+                "Seat {Id}: lifecycle gate busy; will retry relaunching the session anchor for " +
+                "session {Sid} on the next check", seat.Id, sessionId);
+        }
+        catch (Exception ex)
+        {
+            // Never let the anchor affect the seat's health verdict. The session is held Active
+            // by the console-side mstsc without it.
+            _logger.LogWarning(ex,
+                "Seat {Id}: could not relaunch the session anchor for session {Sid}; the session " +
+                "is still held by the console-side mstsc", seat.Id, sessionId);
+        }
+    }
+
+    /// <summary>What <see cref="RelaunchExitedAnchorAsync"/> did.</summary>
+    internal enum AnchorRelaunchOutcome
+    {
+        /// <summary>The anchor is running, or none is tracked. The gate was not touched.</summary>
+        NoExitedAnchor,
+
+        /// <summary>By the time the gate was held, the anchor had gone, e.g. teardown removed it.</summary>
+        AlreadyGone,
+
+        /// <summary>Taken and reported, but it died too young to be relaunched.</summary>
+        NotRelaunched,
+
+        /// <summary>Taken and reported, but the seat or its session changed while waiting.</summary>
+        SeatChanged,
+
+        /// <summary>Taken, reported, and the relaunch was started.</summary>
+        Relaunched,
+    }
+
+    /// <summary>
+    /// The order the anchor relaunch runs in, separated from the launcher so it can be tested.
+    ///
+    /// 1. Look without taking. A running anchor costs nothing, and the gate is not touched.
+    /// 2. Wait for the seat's lifecycle gate. This can time out (a reconnect or a resolution
+    ///    change holds it for 15-30 s); the exception propagates, and because nothing was taken
+    ///    the anchor is still tracked, so the next 5-second check tries again.
+    /// 3. Under the gate, take the anchor. The take is what reports the exit, and it removes the
+    ///    entry, so the exit is reported once however the rest goes.
+    /// 4. Check the seat again, then relaunch.
+    ///
+    /// Taking before the gate, as this used to, lost the anchor for good on a gate timeout: the
+    /// entry was gone, so no later check found anything to relaunch.
+    /// </summary>
+    internal static async Task<AnchorRelaunchOutcome> RelaunchExitedAnchorAsync(
+        Func<bool> hasExitedAnchor,
+        Func<CancellationToken, Task<SeatLifecycleGate.ILease>> acquireGate,
+        Func<ExitedSessionAnchor?> takeExitedAnchor,
+        Func<bool> seatStillHoldsSession,
+        Func<CancellationToken, Task> relaunch,
+        CancellationToken ct)
+    {
+        if (!hasExitedAnchor())
+            return AnchorRelaunchOutcome.NoExitedAnchor;
+
+        using var lease = await acquireGate(ct);
+
+        if (takeExitedAnchor() is not { } exited)
+            return AnchorRelaunchOutcome.AlreadyGone;
+
+        if (!exited.ShouldRelaunch)
+            return AnchorRelaunchOutcome.NotRelaunched;
+
+        if (!seatStillHoldsSession())
+            return AnchorRelaunchOutcome.SeatChanged;
+
+        await relaunch(ct);
+        return AnchorRelaunchOutcome.Relaunched;
+    }
+
     private async Task<bool> CheckSeatAsync(SeatInfo seat, CancellationToken ct)
     {
         // ── Check 1: Is the Windows session still alive? ──────────
@@ -233,6 +348,11 @@ public sealed class SessionHealthCheck
             }
             return true;
         }
+
+        // ── Check 1c: Is the session anchor still running? ────────
+        // It expires on its own after 27.8 hours (timeout.exe's cap). The session does not
+        // depend on it, so this never changes the seat's state; it only puts the anchor back.
+        await EnsureSessionAnchorAsync(seat, ct);
 
         // ── Check 2: Is Apollo still running? ─────────────────────
         var apolloAlive = IsProcessAlive(seat.ApolloProcessId);

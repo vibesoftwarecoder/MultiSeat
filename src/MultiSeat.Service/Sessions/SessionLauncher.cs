@@ -42,10 +42,9 @@ public sealed class SessionLauncher
     private readonly MultiSeatOptions _options;
     private readonly AccountManager _accounts;
 
-    // Track session-anchor process handles per session to prevent premature cleanup.
-    // Concurrent because provisioning, teardown, and the health-check loop can all
-    // touch it from different threads.
-    private readonly ConcurrentDictionary<int, SessionAnchorInfo> _sessionAnchors = new();
+    // Track session-anchor process handles per session to prevent premature cleanup, and so the
+    // health check can replace an anchor that has expired (see SessionAnchorTracker).
+    private readonly SessionAnchorTracker _sessionAnchors = new();
 
     // Track the mstsc process that is keeping a session Active.
     // DisconnectSession() kills mstsc, sending the session back to Disconnected.
@@ -432,22 +431,7 @@ public sealed class SessionLauncher
         DisconnectSession(sessionId);
 
         // Kill the session anchor first
-        if (_sessionAnchors.TryRemove(sessionId, out var anchor))
-        {
-            try
-            {
-                if (!anchor.Process.HasExited)
-                {
-                    anchor.Process.Kill();
-                    anchor.Process.WaitForExit(3000);
-                }
-            }
-            catch { /* best effort */ }
-            finally
-            {
-                anchor.Process.Dispose();
-            }
-        }
+        _sessionAnchors.RemoveAndKill(sessionId);
 
         if (!WtsApi.WTSLogoffSession(WtsApi.WTS_CURRENT_SERVER_HANDLE, sessionId, true))
         {
@@ -467,22 +451,78 @@ public sealed class SessionLauncher
     public bool IsSessionAlive(int sessionId)
     {
         // Always check WTS state as the authoritative source
-        var wtsAlive = FindSessionState(sessionId) is WtsApi.WtsConnectState.Active
+        // An exited session anchor does not make the session dead: the console-side mstsc keeps
+        // it Active. The anchor is looked after separately, by TakeExitedSessionAnchor and
+        // RelaunchSessionAnchorAsync. This used to log a Warning here instead, on every 5-second
+        // check for as long as the session lived.
+        return FindSessionState(sessionId) is WtsApi.WtsConnectState.Active
             or WtsApi.WtsConnectState.Disconnected;
+    }
 
-        if (!wtsAlive)
-            return false;
+    /// <summary>
+    /// Whether this session's anchor has exited, without taking it or logging anything. The
+    /// health check asks this before it waits for the seat's lifecycle gate, so that a wait that
+    /// times out leaves the anchor tracked for the next check.
+    /// </summary>
+    internal bool HasExitedSessionAnchor(int sessionId) => _sessionAnchors.HasExitedAnchor(sessionId);
 
-        // If the session anchor process died but the WTS session is still active,
-        // the session is alive — log a warning but don't kill the seat.
-        if (_sessionAnchors.TryGetValue(sessionId, out var anchor) && anchor.Process.HasExited)
+    /// <summary>
+    /// If this session's anchor has exited, stop tracking it, log that once, and say whether it
+    /// should be relaunched. Returns null when the anchor is still running or none is tracked.
+    ///
+    /// The anchor exits on its own 27.8 hours after launch (timeout.exe's 99999-second cap), so
+    /// for any seat that lives longer than a day this is routine, not a fault. Reported at
+    /// Information for that case. An anchor that died much sooner is reported at Warning and not
+    /// relaunched; see <see cref="SessionAnchorTracker.MinLifetimeForRelaunch"/>.
+    ///
+    /// Because the entry is removed as it is reported, this cannot repeat for the same anchor
+    /// whatever the caller does next. Call it only while holding the seat's lifecycle gate; use
+    /// <see cref="HasExitedSessionAnchor"/> to decide whether the gate is worth waiting for.
+    /// </summary>
+    internal ExitedSessionAnchor? TakeExitedSessionAnchor(int sessionId)
+    {
+        var exited = _sessionAnchors.TakeIfExited(sessionId, DateTime.UtcNow);
+        if (exited is not { } e)
+            return null;
+
+        if (e.ShouldRelaunch)
+        {
+            // Whether it is actually relaunched is logged by RelaunchSessionAnchorAsync, or by
+            // the health check when the seat changed first.
+            _logger.LogInformation(
+                "Session anchor for session {Sid} exited after {Lifetime} (exit code {Code}); " +
+                "timeout.exe caps its wait at 99999 s (27.8 h), so this is expected",
+                sessionId, e.Lifetime, e.ExitCode);
+        }
+        else
         {
             _logger.LogWarning(
-                "Session anchor for session {Sid} exited, but WTS session is still active",
-                sessionId);
+                "Session anchor for session {Sid} exited after only {Lifetime} (exit code {Code}), " +
+                "so something is ending it. Not relaunching. The session is still held Active by " +
+                "the console-side mstsc; reprovision the seat to restore the anchor",
+                sessionId, e.Lifetime, e.ExitCode);
         }
 
-        return true;
+        return e;
+    }
+
+    /// <summary>
+    /// Start a new anchor in an existing seat session, after <see cref="TakeExitedSessionAnchor"/>
+    /// said so. Same launch as at provision time. The seat's stored credential is only needed if
+    /// WTSQueryUserToken fails; when there is none, that fallback is skipped and the failure is
+    /// logged once.
+    /// </summary>
+    internal Task RelaunchSessionAnchorAsync(int sessionId, string accountName, CancellationToken ct)
+    {
+        if (_sessionAnchors.IsTracked(sessionId))
+        {
+            _logger.LogInformation(
+                "Session {Sid} already has a tracked anchor; not relaunching another", sessionId);
+            return Task.CompletedTask;
+        }
+
+        _logger.LogInformation("Relaunching the session anchor for session {Sid}", sessionId);
+        return LaunchSessionAnchorAsync(sessionId, accountName, _accounts.GetCredential(accountName), ct);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1208,12 +1248,23 @@ public sealed class SessionLauncher
     /// Without a running process, Windows may garbage-collect the session.
     /// </summary>
     private async Task LaunchSessionAnchorAsync(
-        int sessionId, string accountName, string password, CancellationToken ct)
+        int sessionId, string accountName, string? password, CancellationToken ct)
     {
         // Use WTSQueryUserToken to get the session's actual token, which has
         // proper access to the session's window station and desktop.
         // A LogonUser token does NOT have this access and causes
         // STATUS_DLL_INIT_FAILED (0xC0000142) when launching console processes.
+        //
+        // password is null only on a relaunch for a seat with no stored credential; the
+        // provision-time launch always has one. With none, the LogonUser fallback is skipped.
+        SafeTokenHandle LogonFallback()
+        {
+            if (password is null)
+                throw new InvalidOperationException(
+                    $"No stored credential for '{accountName}' to fall back to LogonUser with");
+            return LogonAndCreatePrimaryToken(accountName, password, sessionId);
+        }
+
         SafeTokenHandle token;
         if (WtsApi.WTSQueryUserToken((uint)sessionId, out var rawToken))
         {
@@ -1234,14 +1285,14 @@ public sealed class SessionLauncher
             {
                 _logger.LogWarning("DuplicateTokenEx failed for session token, falling back to LogonUser");
                 Kernel32.CloseHandle(rawToken);
-                token = LogonAndCreatePrimaryToken(accountName, password, sessionId);
+                token = LogonFallback();
             }
         }
         else
         {
             _logger.LogWarning("WTSQueryUserToken failed for session {Sid}: {Err}, falling back to LogonUser",
                 sessionId, Marshal.GetLastWin32Error());
-            token = LogonAndCreatePrimaryToken(accountName, password, sessionId);
+            token = LogonFallback();
         }
 
         if (!UserEnv.CreateEnvironmentBlock(out var envBlock, token, false))
@@ -1302,7 +1353,7 @@ public sealed class SessionLauncher
             try
             {
                 var process = Process.GetProcessById(pi.dwProcessId);
-                _sessionAnchors[sessionId] = new SessionAnchorInfo(process, pi.hProcess);
+                _sessionAnchors.Track(sessionId, new SessionAnchorInfo(process, pi.hProcess, DateTime.UtcNow));
             }
             catch (ArgumentException)
             {
@@ -1747,13 +1798,15 @@ public sealed class SessionLauncher
     /// </summary>
     internal static string BuildSessionAnchorCommand()
     {
-        // Use "waitfor" with a signal name that will never arrive.
-        // Unlike "cmd.exe /c pause", waitfor does NOT depend on console input
-        // (ReadConsoleInput), so it survives RDP disconnection reliably.
-        // It uses a named event internally and blocks without any I/O.
+        // timeout.exe with /nobreak blocks without console input, so unlike
+        // "cmd.exe /c pause" it survives RDP disconnection.
         //
-        // The /t 999999 sets a ~11.5 day timeout. If it ever expires,
-        // the session health check will detect and handle it.
+        // ⚠️ It EXPIRES. 99999 seconds is the largest /t that timeout.exe accepts, and that is
+        // 27.8 hours, not the "~11.5 days" this comment used to claim (that figure belonged to an
+        // earlier "waitfor /t 999999" design, rejected below). So every anchor exits on its own a
+        // little over a day after launch. The session health check notices, reports it once, and
+        // relaunches it (SessionLauncher.TakeExitedSessionAnchor / RelaunchSessionAnchorAsync).
+        // Until that existed, it logged a Warning every 5 seconds and never relaunched.
         //
         // Alternatives rejected:
         //   - "cmd.exe /c pause": pause uses ReadConsoleInput which fails
@@ -1895,8 +1948,26 @@ public sealed class SessionLauncher
 
     // ═══════════════════════════════════════════════════════════════════
 
-    private sealed record SessionAnchorInfo(Process Process, IntPtr NativeHandle) : IDisposable
+    private sealed record SessionAnchorInfo(Process Process, IntPtr NativeHandle, DateTime LaunchedUtc)
+        : ISessionAnchor
     {
+        public bool HasExited => Process.HasExited;
+
+        public int? ExitCode
+        {
+            get
+            {
+                try { return Process.ExitCode; }
+                catch { return null; }
+            }
+        }
+
+        public void Kill()
+        {
+            Process.Kill();
+            Process.WaitForExit(3000);
+        }
+
         public void Dispose()
         {
             Process.Dispose();

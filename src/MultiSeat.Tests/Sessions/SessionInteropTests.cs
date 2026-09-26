@@ -127,7 +127,8 @@ public class SessionInteropTests
         // /nobreak, or a stray Ctrl+C ends the session.
         Assert.Contains("/nobreak", cmd);
 
-        // A timeout long enough that the session health check, not expiry, is what ends it.
+        // A long timeout. It still expires (99999 s is timeout.exe's cap, 27.8 h), and the health
+        // check relaunches it then - see SessionAnchorTrackerTests - but a short one would churn.
         var match = System.Text.RegularExpressions.Regex.Match(cmd, @"/t\s+(\d+)");
         Assert.True(match.Success, $"the anchor command must set a timeout: {cmd}");
         Assert.True(int.Parse(match.Groups[1].Value) >= 86_400,
