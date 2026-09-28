@@ -34,6 +34,23 @@ public sealed class SeatRequest
 
     public string? LaunchApp { get; init; }
     public NvencQualityPreset NvencPreset { get; init; } = NvencQualityPreset.Balanced;
+
+    /// <summary>
+    /// Optional DPI scale for the seat's desktop, in percent. Null uses the host default, or the
+    /// width heuristic when there is none. Deliberately NOT clamped like the fields above: a
+    /// scale RDP does not accept is rejected with an error, because rounding it to a neighbour
+    /// would give the user a size they did not ask for without saying so.
+    /// </summary>
+    public int? ScaleFactor { get; init; }
+}
+
+/// <summary>
+/// A new DPI scale for a live seat. Null clears the seat's override, so the host default or the
+/// width heuristic applies again.
+/// </summary>
+public sealed class ScaleFactorRequest
+{
+    public int? ScaleFactor { get; init; }
 }
 
 public sealed class NvencPresetRequest

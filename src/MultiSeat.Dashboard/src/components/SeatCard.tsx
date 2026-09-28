@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import type { SeatInfo, SeatServices, NvencQualityPreset } from "../api/types";
+import type { SeatInfo, SeatServices, NvencQualityPreset, ScaleFactorSource } from "../api/types";
 import { seats as seatsApi } from "../api/client";
 import { StatusBadge } from "./StatusBadge";
 
@@ -201,6 +201,12 @@ export function SeatCard({ seat, onUpdate }: Props) {
 
         {moonlightPort && isActive && (
           <MoonlightAddress host={window.location.hostname} port={moonlightPort} />
+        )}
+
+        {seat.scaleFactor > 0 && (
+          <div className="text-muted" style={{ fontSize: 12, marginTop: 8 }}>
+            Scale: {seat.scaleFactor}% ({scaleSourceLabel(seat.scaleFactorSource)})
+          </div>
         )}
 
         {seat.launchApp && (
@@ -596,4 +602,15 @@ function formatDuration(since: Date): string {
   if (mins < 60) return `${mins}m ${secs % 60}s`;
   const hrs = Math.floor(mins / 60);
   return `${hrs}h ${mins % 60}m`;
+}
+
+function scaleSourceLabel(source: ScaleFactorSource): string {
+  switch (source) {
+    case "Seat":
+      return "seat override";
+    case "HostDefault":
+      return "host default";
+    default:
+      return "from width";
+  }
 }

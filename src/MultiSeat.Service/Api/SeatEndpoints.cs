@@ -21,20 +21,7 @@ public static class SeatEndpoints
             return seat is null ? Results.NotFound() : Results.Ok(seat);
         });
 
-        group.MapPost("/", async (SeatRequest request, SeatManager mgr, CancellationToken ct) =>
-        {
-            if (!ApiInputValidation.IsValidAccountName(request.AccountName))
-                return ApiInputValidation.AccountNameError();
-            try
-            {
-                var seat = await mgr.ProvisionSeatAsync(request, ct);
-                return Results.Created($"/api/seats/{seat.Id}", seat);
-            }
-            catch (InvalidOperationException ex)
-            {
-                return ApiErrors.ToResult(ex);
-            }
-        });
+        group.MapPost("/", CreateSeatAsync);
 
         group.MapPost("/{id:guid}/launch",
             async (Guid id, LaunchAppRequest request, SeatManager mgr, CancellationToken ct) =>
@@ -180,17 +167,7 @@ public static class SeatEndpoints
                 seat.AutoStart = req.Enabled;
 
                 if (req.Enabled)
-                {
-                    presets.Upsert(new SeatPreset
-                    {
-                        AccountName = seat.AccountName,
-                        Width = seat.Width,
-                        Height = seat.Height,
-                        Fps = seat.Fps,
-                        AutoStart = true,
-                        NvencPreset = seat.NvencPreset,
-                    });
-                }
+                    presets.Upsert(SeatPreset.ForAutoStart(seat));
                 else
                 {
                     presets.DeleteByAccount(seat.AccountName);
@@ -218,7 +195,7 @@ public static class SeatEndpoints
                 // keep aiming at the session that just went away — apollo/start fails with
                 // 500 and the seat can never come back.
                 seat.SessionId = await sessionLauncher.LaunchSessionAsync(
-                    seat.AccountName, ct, RdpGeometry.ForClient(seat.Width, seat.Height));
+                    seat.AccountName, ct, mgr.GeometryFor(seat));
 
                 // The health check parks a seat in Error when its session dies, and nothing
                 // ever takes it out again. Leave it there and the checks that would restart
@@ -250,6 +227,7 @@ public static class SeatEndpoints
                     {
                         width = seat?.Width,
                         height = seat?.Height,
+                        scaleFactor = seat?.ScaleFactor,
                         sessionId = seat?.SessionId,
                     });
                 }
@@ -264,6 +242,12 @@ public static class SeatEndpoints
                     return ApiErrors.ToResult(ex);
                 }
             });
+
+        // Set or clear a live seat's DPI scale override (issue #70). The scale is baked into the
+        // same Default.rdp as the desktop size, so this reconnects the session the way a
+        // resolution change does. Body: { "scaleFactor": 200 }, or { "scaleFactor": null } to go
+        // back to the host default or the width heuristic.
+        group.MapPost("/{id:guid}/scale", SetScaleAsync);
 
         // Diagnostic: what advanced colour (HDR) does this seat's session advertise, and what is
         // actually active? Answers whether the RdpIdd target inside a seat is HDR-capable at all
@@ -349,5 +333,66 @@ public static class SeatEndpoints
                     return ApiErrors.ToResult(ex);
                 }
             });
+    }
+
+    /// <summary>
+    /// POST /api/seats. A method rather than a lambda so tests can call the real handler.
+    /// </summary>
+    internal static async Task<IResult> CreateSeatAsync(
+        SeatRequest request, SeatManager mgr, CancellationToken ct)
+    {
+        if (!ApiInputValidation.IsValidAccountName(request.AccountName))
+            return ApiInputValidation.AccountNameError();
+
+        // Checked before the seat manager is touched, so a scale RDP would ignore never starts
+        // a provision and never reaches Default.rdp.
+        if (ApiInputValidation.ScaleFactorError(request.ScaleFactor) is { } scaleError)
+            return scaleError;
+
+        try
+        {
+            var seat = await mgr.ProvisionSeatAsync(request, ct);
+            return Results.Created($"/api/seats/{seat.Id}", seat);
+        }
+        // No ArgumentException catch on purpose: the scale is validated above, and a broad catch
+        // here would also turn an unrelated ArgumentNullException deep in provisioning into a 400
+        // that blames the caller.
+        catch (InvalidOperationException ex)
+        {
+            return ApiErrors.ToResult(ex);
+        }
+    }
+
+    /// <summary>
+    /// POST /api/seats/{id}/scale. A method rather than a lambda so tests can call the real
+    /// handler.
+    /// </summary>
+    internal static async Task<IResult> SetScaleAsync(
+        Guid id, ScaleFactorRequest req, SeatManager mgr,
+        SeatPresetStore presets, CancellationToken ct)
+    {
+        // Before the seat lookup: a value mstsc would ignore is a bad request whatever the seat.
+        if (ApiInputValidation.ScaleFactorError(req.ScaleFactor) is { } scaleError)
+            return scaleError;
+
+        if (mgr.GetSeat(id) is null)
+            return Results.NotFound();
+        try
+        {
+            await mgr.SetScaleFactorAsync(id, req.ScaleFactor, presets, ct);
+            var seat = mgr.GetSeat(id);
+            return Results.Ok(new
+            {
+                scaleFactor = seat?.ScaleFactor,
+                scaleFactorSource = seat?.ScaleFactorSource,
+                scaleFactorOverride = seat?.ScaleFactorOverride,
+                sessionId = seat?.SessionId,
+            });
+        }
+        // As in CreateSeatAsync, the scale was validated above; no broad ArgumentException catch.
+        catch (InvalidOperationException ex)
+        {
+            return ApiErrors.ToResult(ex);
+        }
     }
 }

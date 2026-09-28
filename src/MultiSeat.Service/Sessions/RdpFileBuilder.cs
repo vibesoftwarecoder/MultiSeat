@@ -1,4 +1,5 @@
 using MultiSeat.Service.Configuration;
+using MultiSeat.Shared.Models;
 
 namespace MultiSeat.Service.Sessions;
 
@@ -19,13 +20,64 @@ namespace MultiSeat.Service.Sessions;
 /// <param name="Width">Desktop width in physical pixels.</param>
 /// <param name="Height">Desktop height in physical pixels.</param>
 /// <param name="ScaleFactor">DPI scaling percentage — one of the values RDP accepts.</param>
-public sealed record RdpGeometry(int Width, int Height, int ScaleFactor)
+/// <param name="ScaleSource">Where <paramref name="ScaleFactor"/> came from.</param>
+public sealed record RdpGeometry(
+    int Width, int Height, int ScaleFactor,
+    ScaleFactorSource ScaleSource = ScaleFactorSource.Derived)
 {
     /// <summary>Values <c>desktopscalefactor</c> accepts; anything else is ignored by mstsc.</summary>
     private static readonly int[] AllowedScaleFactors = [100, 125, 150, 175, 200, 250, 300, 400, 500];
 
+    /// <summary>The scale factors a seat or the host default may be set to.</summary>
+    public static IReadOnlyList<int> AllowedScales => AllowedScaleFactors;
+
+    /// <summary>True when mstsc would honour this <c>desktopscalefactor</c>.</summary>
+    public static bool IsAllowedScaleFactor(int scale) => AllowedScaleFactors.Contains(scale);
+
+    /// <summary>
+    /// The error text for a scale factor outside the allowed set. One wording for the API, the
+    /// seat manager and the config check, so a caller always learns which values would work.
+    /// </summary>
+    public static string ScaleFactorError(int scale) =>
+        $"Scale factor {scale} is not one RDP accepts. Use one of: " +
+        $"{string.Join(", ", AllowedScaleFactors)} (percent).";
+
     public static RdpGeometry ForClient(int width, int height) =>
         new(width, height, DeriveScaleFactor(width));
+
+    /// <summary>
+    /// The geometry for a seat, with its scale picked in this order:
+    ///
+    ///   1. the seat's own override, when it has one;
+    ///   2. the host-wide default (<c>MultiSeat:DefaultScaleFactor</c>), when that is set;
+    ///   3. otherwise the width heuristic, <see cref="DeriveScaleFactor"/>.
+    ///
+    /// The overrides exist because the heuristic only knows the desktop's width in pixels, not
+    /// how big the client's screen is. A tablet such as an iPad Pro renders its own UI at about
+    /// 200%, so a 1920-wide seat derived at 100% looks tiny there (issue #70). Moonlight never
+    /// reports the screen's physical size, so the user has to be able to say it.
+    ///
+    /// A value outside the allowed set is NOT clamped or rounded here — it throws. Callers
+    /// validate first and report the problem; reaching this with a bad value is a bug.
+    /// </summary>
+    public static RdpGeometry ForSeat(int width, int height, int? seatScale, int? defaultScale)
+    {
+        if (seatScale is { } seat)
+        {
+            if (!IsAllowedScaleFactor(seat))
+                throw new ArgumentException(ScaleFactorError(seat), nameof(seatScale));
+            return new(width, height, seat, ScaleFactorSource.Seat);
+        }
+
+        if (defaultScale is { } host)
+        {
+            if (!IsAllowedScaleFactor(host))
+                throw new ArgumentException(ScaleFactorError(host), nameof(defaultScale));
+            return new(width, height, host, ScaleFactorSource.HostDefault);
+        }
+
+        return new(width, height, DeriveScaleFactor(width), ScaleFactorSource.Derived);
+    }
 
     /// <summary>
     /// Pick a DPI scale for a desktop of this width.

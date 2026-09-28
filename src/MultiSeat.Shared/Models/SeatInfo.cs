@@ -18,6 +18,19 @@ public enum SeatStatus
     Error
 }
 
+/// <summary>Where a seat's DPI scale factor came from.</summary>
+public enum ScaleFactorSource
+{
+    /// <summary>Derived from the desktop's width — no override was set.</summary>
+    Derived,
+
+    /// <summary>The host-wide default, <c>MultiSeat:DefaultScaleFactor</c>.</summary>
+    HostDefault,
+
+    /// <summary>The seat's own override.</summary>
+    Seat,
+}
+
 public sealed class SeatInfo
 {
     public Guid Id { get; init; } = Guid.NewGuid();
@@ -38,6 +51,21 @@ public sealed class SeatInfo
     /// — the seat is silently capped below it (issue #70). Null when there is no mismatch.
     /// </summary>
     public string? EffectiveRefreshRateWarning { get; set; }
+
+    /// <summary>
+    /// The seat's own DPI scale override, in percent, or null to use the host default or the
+    /// width heuristic. This is what persists in the seat's preset (issue #70).
+    /// </summary>
+    public int? ScaleFactorOverride { get; set; }
+
+    /// <summary>
+    /// The DPI scale this seat's session was last connected with — what is actually in effect,
+    /// whatever its source. Set by SeatManager each time it resolves the seat's geometry.
+    /// </summary>
+    public int ScaleFactor { get; set; } = 100;
+
+    /// <summary>Where <see cref="ScaleFactor"/> came from.</summary>
+    public ScaleFactorSource ScaleFactorSource { get; set; } = ScaleFactorSource.Derived;
 
     // Networking
     public int PortBase { get; set; }

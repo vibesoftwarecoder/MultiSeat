@@ -275,12 +275,13 @@ public sealed class SessionHealthCheck
 
                 // Pass the geometry: if the stale session has to be logged off and recreated,
                 // the replacement must come back at the seat's own size rather than inheriting
-                // the console desktop's.
+                // the console desktop's — and at its own scale, or an override set through the
+                // API would be lost on every sleep (issue #70).
                 //
                 // Keep the id it answers with: that path returns a NEW session, and the
                 // Apollo restart and display isolation just below both act on SessionId.
                 seat.SessionId = await _sessionLauncher.LaunchSessionAsync(
-                    seat.AccountName, ct, RdpGeometry.ForClient(seat.Width, seat.Height));
+                    seat.AccountName, ct, _seatManager.GeometryFor(seat));
 
                 // Do not start Apollo against a session that is not ACTIVE yet. Apollo calls
                 // QueryDisplayConfig at startup, and a Disconnected session answers
