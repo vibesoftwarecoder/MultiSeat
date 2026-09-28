@@ -88,7 +88,9 @@ export function TipsPage() {
 
         <TipCard title="Resolution & FPS">
           <p>
-            Each seat's resolution and FPS are set at provision time in the <strong>New Seat</strong> form.
+            Each seat's resolution and FPS are set at provision time in the <strong>New Seat</strong> form,
+            which offers presets and a custom size. <strong>Resize</strong> on the seat card changes the
+            resolution of a running seat; its session reconnects, so a live stream pauses for a few seconds.
             The NVENC quality preset (Latency / Balanced / Quality) can be changed live from the seat card
             without reprovisioning.
           </p>
