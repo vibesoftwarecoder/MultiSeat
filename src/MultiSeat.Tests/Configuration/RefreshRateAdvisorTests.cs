@@ -64,6 +64,27 @@ public class RefreshRateAdvisorTests
     }
 
     [Fact]
+    public void BelowTheHonouredFloor_UsesWindowsMeasuredDefault_InsteadOfDividingByIt()
+    {
+        // MultiSeatWorker never writes an interval below MinimumHonouredDwmFrameIntervalMs (2),
+        // so Windows stays at its own measured ~32fps default rather than whatever the interval
+        // was asked to be. 1000/interval would say something else entirely, and 1000/0 throws.
+        Assert.Equal(32, RefreshRateAdvisor.EffectiveRefreshRateHz(1));
+        Assert.Equal(32, RefreshRateAdvisor.EffectiveRefreshRateHz(0));
+    }
+
+    [Fact]
+    public void ZeroInterval_DoesNotThrow_AndStillWarnsCorrectly()
+    {
+        // The bug this guards: 1000/0 is a DivideByZeroException, which would fail every
+        // provision on a host misconfigured with DwmFrameIntervalMs = 0, not just this check.
+        var warning = RefreshRateAdvisor.CheckFpsAgainstEffectiveRefreshRate(requestedFps: 60, dwmFrameIntervalMs: 0);
+
+        Assert.NotNull(warning);
+        Assert.Contains("32", warning);
+    }
+
+    [Fact]
     public void IfThisCheckIsRemoved_TheseTestsStopCompiling()
     {
         // A regression marker in the spirit of DwmFrameIntervalTests.TheValueWeUsedToShip_

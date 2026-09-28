@@ -14,11 +14,25 @@ namespace MultiSeat.Service.Configuration;
 public static class RefreshRateAdvisor
 {
     /// <summary>
+    /// Windows' own composition rate when <see cref="MultiSeatOptions.DwmFrameIntervalMs"/> is
+    /// below <see cref="MultiSeatOptions.MinimumHonouredDwmFrameIntervalMs"/> and so goes
+    /// unwritten — measured, not derived, in that constant's doc comment.
+    /// </summary>
+    private const int WindowsDefaultComposedFps = 32;
+
+    /// <summary>
     /// The refresh rate DWM actually composes seats at, truncated to a whole number — the same
     /// arithmetic <see cref="MultiSeatOptions.DwmFrameIntervalMs"/>'s doc comment uses for what
-    /// the interval advertises (16ms -> 62Hz, not the unreachable exact 60).
+    /// the interval advertises (16ms -> 62Hz, not the unreachable exact 60). Below
+    /// <see cref="MultiSeatOptions.MinimumHonouredDwmFrameIntervalMs"/> the value is never
+    /// written (see <c>MultiSeatWorker.SetDwmFrameInterval</c>), so Windows stays at its own
+    /// default rather than whatever the arithmetic on the unwritten value would suggest —
+    /// dividing by an interval that could be zero would also throw.
     /// </summary>
-    public static int EffectiveRefreshRateHz(int dwmFrameIntervalMs) => 1000 / dwmFrameIntervalMs;
+    public static int EffectiveRefreshRateHz(int dwmFrameIntervalMs) =>
+        dwmFrameIntervalMs < MultiSeatOptions.MinimumHonouredDwmFrameIntervalMs
+            ? WindowsDefaultComposedFps
+            : 1000 / dwmFrameIntervalMs;
 
     /// <summary>
     /// Null when <paramref name="requestedFps"/> is within what the host can actually compose.
