@@ -31,6 +31,14 @@ public sealed class SeatInfo
     public int Fps { get; set; } = 60;
     public string? DisplayDevicePath { get; set; }
 
+    /// <summary>
+    /// Set at provisioning when <see cref="Fps"/> exceeds the effective refresh rate DWM
+    /// composes RDP sessions at host-wide (<c>MultiSeatOptions.DwmFrameIntervalMs</c>, one value
+    /// shared by every seat). Apollo still advertises the requested fps to the client regardless
+    /// — the seat is silently capped below it (issue #70). Null when there is no mismatch.
+    /// </summary>
+    public string? EffectiveRefreshRateWarning { get; set; }
+
     // Networking
     public int PortBase { get; set; }
     public int ApolloProcessId { get; set; }
