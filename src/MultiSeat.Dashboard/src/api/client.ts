@@ -116,6 +116,14 @@ export const seats = {
       body: JSON.stringify({ preset }),
     }),
 
+  // Reconnects the seat's session at the new size and restarts its Apollo. The Windows session
+  // survives, but a live stream drops for a few seconds; the request returns once it is done.
+  setResolution: (id: string, width: number, height: number) =>
+    request<{ width: number | null; height: number | null; sessionId: number | null }>(`/seats/${id}/resolution`, {
+      method: "POST",
+      body: JSON.stringify({ width, height }),
+    }),
+
   clients: (id: string) =>
     request<string[]>(`/seats/${id}/clients`),
 

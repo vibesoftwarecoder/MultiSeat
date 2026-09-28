@@ -1,42 +1,36 @@
 import { useState } from "react";
 import type { AccountInfo, NvencQualityPreset } from "../api/types";
 import { seats as seatsApi } from "../api/client";
+import { parseDimension, validateResolution } from "./resolution";
+import { FollowClientHint, ResolutionPicker } from "./ResolutionPicker";
 
 interface Props {
   accounts: AccountInfo[];
   onCreated: () => void;
 }
 
-const RESOLUTIONS = [
-  { label: "720p", w: 1280, h: 720 },
-  { label: "1080p", w: 1920, h: 1080 },
-  { label: "1440p", w: 2560, h: 1440 },
-  { label: "4K", w: 3840, h: 2160 },
-  { label: "Ally X", w: 1920, h: 1200 },
-  { label: "Deck", w: 1280, h: 800 },
-];
-
 export function CreateSeatForm({ accounts, onCreated }: Props) {
   const [accountName, setAccountName] = useState("");
-  const [resolution, setResolution] = useState("1080p");
+  const [width, setWidth] = useState("1920");
+  const [height, setHeight] = useState("1080");
   const [fps, setFps] = useState(60);
   const [nvencPreset, setNvencPreset] = useState<NvencQualityPreset>("Balanced");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const resolutionError = validateResolution(width, height);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!accountName) return;
-
-    const res = RESOLUTIONS.find((r) => r.label === resolution) ?? RESOLUTIONS[1];
+    if (!accountName || resolutionError) return;
 
     setCreating(true);
     setError(null);
     try {
       await seatsApi.create({
         accountName,
-        width: res.w,
-        height: res.h,
+        width: parseDimension(width),
+        height: parseDimension(height),
         fps,
         nvencPreset,
       });
@@ -65,16 +59,19 @@ export function CreateSeatForm({ accounts, onCreated }: Props) {
         </select>
       </label>
 
-      <label>
+      <div className="form-field">
         Resolution
-        <select value={resolution} onChange={(e) => setResolution(e.target.value)}>
-          {RESOLUTIONS.map((r) => (
-            <option key={r.label} value={r.label}>
-              {r.label} ({r.w}x{r.h})
-            </option>
-          ))}
-        </select>
-      </label>
+        <ResolutionPicker
+          width={width}
+          height={height}
+          onChange={(w, h) => {
+            setWidth(w);
+            setHeight(h);
+          }}
+          disabled={creating}
+        />
+        <FollowClientHint />
+      </div>
 
       <label>
         FPS
@@ -107,7 +104,7 @@ export function CreateSeatForm({ accounts, onCreated }: Props) {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <button type="submit" disabled={creating || !accountName}>
+      <button type="submit" disabled={creating || !accountName || resolutionError !== null}>
         {creating ? "Provisioning..." : "Provision Seat"}
       </button>
     </form>

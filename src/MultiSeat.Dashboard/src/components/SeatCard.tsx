@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import type { SeatInfo, SeatServices, NvencQualityPreset, ScaleFactorSource } from "../api/types";
 import { seats as seatsApi } from "../api/client";
 import { StatusBadge } from "./StatusBadge";
+import { ResizeControl } from "./ResizeControl";
 
 const PROVISION_STEPS: { key: string; label: string }[] = [
   { key: "Session",       label: "Session"    },
@@ -261,6 +262,9 @@ export function SeatCard({ seat, onUpdate }: Props) {
             </div>
           </div>
         )}
+
+        {/* Live resize: only once the seat has a working session to reconnect (issue #70) */}
+        {isActive && <ResizeControl seat={seat} onUpdate={onUpdate} />}
 
         {/* Service Management Panel */}
         {showControls && (
