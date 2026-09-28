@@ -33,7 +33,15 @@ export interface SeatInfo {
   autoStart: boolean;
   nvencPreset: NvencQualityPreset;
   provisioningStep: string | null;
+  /** DPI scale in effect, in percent. */
+  scaleFactor: number;
+  /** Where scaleFactor came from: the seat's override, the host default, or the width. */
+  scaleFactorSource: ScaleFactorSource;
+  /** The seat's own override, or null when it has none. */
+  scaleFactorOverride: number | null;
 }
+
+export type ScaleFactorSource = "Derived" | "HostDefault" | "Seat";
 
 export interface SeatPreset {
   id: string;
