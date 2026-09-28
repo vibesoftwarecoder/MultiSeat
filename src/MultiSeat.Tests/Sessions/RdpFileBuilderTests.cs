@@ -1,5 +1,6 @@
 using MultiSeat.Service.Configuration;
 using MultiSeat.Service.Sessions;
+using MultiSeat.Shared.Models;
 using Xunit;
 
 namespace MultiSeat.Tests.Sessions;
@@ -70,6 +71,102 @@ public class RdpFileBuilderTests
     {
         Assert.Equal(expectedScale, RdpGeometry.DeriveScaleFactor(width));
         Assert.Contains($"desktopscalefactor:i:{expectedScale}", BuildWith(width, 1080));
+    }
+
+    // ── Scale overrides (issue #70) ────────────────────────────────────
+    //
+    // The heuristic only knows the width. A tablet renders its own UI at about 200%, so the
+    // user has to be able to say what the seat should use.
+
+    [Theory]
+    [InlineData(1280)]
+    [InlineData(1920)]   // derives 100 — the iPad case from #70
+    [InlineData(3840)]   // derives 200 — the override must win even when it is SMALLER
+    public void SeatOverride_IsUsedWhateverTheWidth(int width)
+    {
+        var geometry = RdpGeometry.ForSeat(width, 1080, seatScale: 175, defaultScale: null);
+
+        Assert.Equal(175, geometry.ScaleFactor);
+        Assert.Equal(ScaleFactorSource.Seat, geometry.ScaleSource);
+        Assert.Contains("desktopscalefactor:i:175", RdpFileBuilder.Build(AudioMode.SharedHost, geometry));
+    }
+
+    [Fact]
+    public void SeatOverride_BeatsTheHostDefault()
+    {
+        var geometry = RdpGeometry.ForSeat(1920, 1080, seatScale: 250, defaultScale: 150);
+
+        Assert.Equal(250, geometry.ScaleFactor);
+        Assert.Equal(ScaleFactorSource.Seat, geometry.ScaleSource);
+    }
+
+    [Theory]
+    [InlineData(1280)]
+    [InlineData(1920)]
+    [InlineData(3840)]
+    public void HostDefault_IsUsedWhenTheSeatHasNoOverride(int width)
+    {
+        var geometry = RdpGeometry.ForSeat(width, 1080, seatScale: null, defaultScale: 300);
+
+        Assert.Equal(300, geometry.ScaleFactor);
+        Assert.Equal(ScaleFactorSource.HostDefault, geometry.ScaleSource);
+        Assert.Contains("desktopscalefactor:i:300", RdpFileBuilder.Build(AudioMode.SharedHost, geometry));
+    }
+
+    // With neither override the result must be exactly what it was before #70. These are the
+    // same width/scale pairs DerivesScaleFromWidth pins, plus each threshold's edge, so a change
+    // to the heuristic's path through ForSeat shows up here and not only in production.
+    [Theory]
+    [InlineData(1280, 100)]
+    [InlineData(1920, 100)]
+    [InlineData(1921, 125)]
+    [InlineData(2560, 125)]
+    [InlineData(2561, 150)]
+    [InlineData(3024, 150)]
+    [InlineData(3200, 150)]
+    [InlineData(3201, 200)]
+    [InlineData(3840, 200)]
+    public void NoOverride_FallsBackToTheWidthHeuristic(int width, int expectedScale)
+    {
+        var geometry = RdpGeometry.ForSeat(width, 1080, seatScale: null, defaultScale: null);
+
+        Assert.Equal(expectedScale, geometry.ScaleFactor);
+        Assert.Equal(ScaleFactorSource.Derived, geometry.ScaleSource);
+        Assert.Equal(RdpGeometry.ForClient(width, 1080), geometry);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(99)]
+    [InlineData(110)]    // between two allowed values: refused, not rounded to 100 or 125
+    [InlineData(600)]
+    [InlineData(-200)]
+    public void ScalesRdpWouldIgnore_AreRefusedNotClamped(int scale)
+    {
+        Assert.False(RdpGeometry.IsAllowedScaleFactor(scale));
+        Assert.Throws<ArgumentException>(() => RdpGeometry.ForSeat(1920, 1080, scale, null));
+        Assert.Throws<ArgumentException>(() => RdpGeometry.ForSeat(1920, 1080, null, scale));
+    }
+
+    [Fact]
+    public void EveryAllowedScale_ReachesTheFile()
+    {
+        foreach (var scale in RdpGeometry.AllowedScales)
+        {
+            var rdp = RdpFileBuilder.Build(AudioMode.SharedHost, RdpGeometry.ForSeat(1920, 1080, scale, null));
+            Assert.Contains($"desktopscalefactor:i:{scale}", rdp);
+        }
+
+        Assert.Equal(new[] { 100, 125, 150, 175, 200, 250, 300, 400, 500 }, RdpGeometry.AllowedScales);
+    }
+
+    [Fact]
+    public void TheErrorNamesTheValuesThatWouldWork()
+    {
+        var message = RdpGeometry.ScaleFactorError(110);
+
+        Assert.Contains("110", message);
+        Assert.Contains("100, 125, 150, 175, 200, 250, 300, 400, 500", message);
     }
 
     // ── Audio mode must keep working alongside the new keys ───────────

@@ -203,6 +203,12 @@ public sealed class SeatManager
     /// </summary>
     public async Task<SeatInfo> ProvisionSeatAsync(SeatRequest request, CancellationToken ct)
     {
+        // A scale mstsc would ignore is refused before anything is allocated, and never rounded
+        // to a neighbour. The API checks this first and answers 400; this is the backstop for
+        // callers that skip it, such as autostart from a hand-edited presets file.
+        if (request.ScaleFactor is { } requestedScale && !RdpGeometry.IsAllowedScaleFactor(requestedScale))
+            throw new ArgumentException(RdpGeometry.ScaleFactorError(requestedScale));
+
         // Count only live seats — Error/Idle entries hold no resources (their ports and
         // sessions were already released on failure) and must not block new provisioning.
         if (ActiveSeatCount >= _options.MaxSeats)
@@ -224,9 +230,13 @@ public sealed class SeatManager
             Fps = request.Fps,
             LaunchApp = request.LaunchApp,
             NvencPreset = request.NvencPreset,
+            ScaleFactorOverride = request.ScaleFactor,
             Status = SeatStatus.Provisioning,
             ProvisioningStep = "Session"
         };
+
+        // Record the effective scale now, so the first broadcast already reports it.
+        GeometryFor(seat);
 
         // Register the seat under the account-ownership lock so the "already provisioned?"
         // check and the dictionary insert are one atomic step. At most one live/provisioning
@@ -272,8 +282,9 @@ public sealed class SeatManager
             // this is what makes the dashboard resolution actually take effect; without it the
             // session inherits whatever size mstsc picks, which tracks the console desktop.
             seat.SessionId = await _sessionLauncher.LaunchSessionAsync(
-                seat.AccountName, ct, RdpGeometry.ForClient(seat.Width, seat.Height));
-            _logger.LogInformation("Seat {Id}: Windows session {Sid}", seat.Id, seat.SessionId);
+                seat.AccountName, ct, GeometryFor(seat));
+            _logger.LogInformation("Seat {Id}: Windows session {Sid} at {Scale}% scale ({Source})",
+                seat.Id, seat.SessionId, seat.ScaleFactor, seat.ScaleFactorSource);
 
             seat.TransitionTo(SeatStatus.Configuring, _logger);
             seat.ProvisioningStep = "Display";
@@ -1045,17 +1056,7 @@ public sealed class SeatManager
         seat.ApolloProcessId = await _apolloManager.StartAsync(seat, ct);
 
         if (seat.AutoStart)
-        {
-            presetStore.Upsert(new SeatPreset
-            {
-                AccountName = seat.AccountName,
-                Width = seat.Width,
-                Height = seat.Height,
-                Fps = seat.Fps,
-                AutoStart = true,
-                NvencPreset = preset,
-            });
-        }
+            presetStore.Upsert(SeatPreset.ForAutoStart(seat));
 
         _ = BroadcastState(seat);
         _logger.LogInformation(
@@ -1090,7 +1091,9 @@ public sealed class SeatManager
         var seat = LiveSeatAfterGate(seatId, "resolution change");
         if (seat is null) return;
 
-        var geometry = RdpGeometry.ForClient(width, height);
+        // The seat's own scale override and the host default carry across a resize. Without an
+        // override the derived scale follows the new width, exactly as before.
+        var geometry = ResolveGeometry(width, height, seat.ScaleFactorOverride);
         if (!geometry.IsValid)
             throw new ArgumentException(
                 $"{width}x{height} is not a usable desktop size — mstsc would ignore it.");
@@ -1108,34 +1111,115 @@ public sealed class SeatManager
         seat.Width = width;
         seat.Height = height;
 
-        // Take the session down and bring it back at the new size. Apollo is stopped first so it
-        // is not capturing a desktop that is about to change under it.
+        await ReconnectAtGeometryAsync(seat, geometry, ct);
+
+        if (seat.AutoStart)
+            presetStore.Upsert(SeatPreset.ForAutoStart(seat));
+
+        _ = BroadcastState(seat);
+        _logger.LogInformation(
+            "Seat {Id}: resolution now {W}x{H} at {Scale}% scale on session {Sid} (Apollo PID {Pid})",
+            seatId, width, height, seat.ScaleFactor, seat.SessionId, seat.ApolloProcessId);
+    }
+
+    /// <summary>
+    /// Set or clear a live seat's DPI scale override (issue #70). Null clears it, so the host
+    /// default or the width heuristic applies again.
+    ///
+    /// The scale lives in the same <c>Default.rdp</c> as the desktop size and is applied by
+    /// mstsc at connect, so this takes exactly the path a resolution change takes: stop Apollo,
+    /// disconnect, reconnect with the new geometry, start Apollo. The Windows session id is
+    /// preserved, as it is for a resize.
+    ///
+    /// ⚠️ Whether Windows applies a new <c>desktopscalefactor</c> to a session it RECONNECTS to,
+    /// rather than one it creates, has not been measured on a live seat. A resize over the same
+    /// path was verified; a rescale was not. If it does not take, a teardown and re-provision
+    /// (which creates a new session) will.
+    /// </summary>
+    public async Task SetScaleFactorAsync(Guid seatId, int? scaleFactor,
+        SeatPresetStore presetStore, CancellationToken ct)
+    {
+        // Refused before the gate and before any lookup, so a bad value can never reach
+        // Default.rdp and never waits behind another operation just to be told no.
+        if (scaleFactor is { } requested && !RdpGeometry.IsAllowedScaleFactor(requested))
+            throw new ArgumentException(RdpGeometry.ScaleFactorError(requested));
+
+        if (GetSeat(seatId) is null)
+            throw new SeatNotFoundException();
+
+        // Per-seat lifecycle gate: rebuilds the session, as a resolution change does.
+        using var lease = await _lifecycleGate.AcquireAsync(seatId, ct);
+
+        var seat = LiveSeatAfterGate(seatId, "scale change");
+        if (seat is null) return;
+
+        var geometry = ResolveGeometry(seat.Width, seat.Height, scaleFactor);
+        var effectiveUnchanged = geometry.ScaleFactor == seat.ScaleFactor;
+
+        _logger.LogInformation(
+            "Seat {Id}: scale override {Old} -> {New}; effective {OldScale}% -> {Scale}% ({Source})",
+            seatId,
+            seat.ScaleFactorOverride?.ToString() ?? "none",
+            scaleFactor?.ToString() ?? "none",
+            seat.ScaleFactor, geometry.ScaleFactor, geometry.ScaleSource);
+
+        seat.ScaleFactorOverride = scaleFactor;
+
+        // Only reconnect when the scale in effect actually changes. Setting an override equal to
+        // what the seat already runs at is a real change of intent — it stops the scale moving
+        // with a later resize — but costs the player nothing now.
+        if (effectiveUnchanged)
+            RecordScale(seat, geometry);
+        else
+            await ReconnectAtGeometryAsync(seat, geometry, ct);
+
+        if (seat.AutoStart)
+            presetStore.Upsert(SeatPreset.ForAutoStart(seat));
+
+        _ = BroadcastState(seat);
+    }
+
+    /// <summary>
+    /// The geometry this seat's session should be connected with, recorded on the seat so the
+    /// API reports the scale actually in use. Every place that (re)connects a seat's session
+    /// uses this, so an override is never lost on a reconnect — the health check rebuilds a
+    /// dropped session on its own, and a copy of the old width-only call there would quietly
+    /// put the seat back on the heuristic after every sleep.
+    /// </summary>
+    public RdpGeometry GeometryFor(SeatInfo seat)
+    {
+        var geometry = ResolveGeometry(seat.Width, seat.Height, seat.ScaleFactorOverride);
+        RecordScale(seat, geometry);
+        return geometry;
+    }
+
+    private RdpGeometry ResolveGeometry(int width, int height, int? seatScale) =>
+        RdpGeometry.ForSeat(width, height, seatScale, _options.UsableDefaultScaleFactor);
+
+    private static void RecordScale(SeatInfo seat, RdpGeometry geometry)
+    {
+        seat.ScaleFactor = geometry.ScaleFactor;
+        seat.ScaleFactorSource = geometry.ScaleSource;
+    }
+
+    /// <summary>
+    /// Give a live seat a session at new geometry. The caller holds the seat's lifecycle gate.
+    /// </summary>
+    private async Task ReconnectAtGeometryAsync(SeatInfo seat, RdpGeometry geometry, CancellationToken ct)
+    {
+        // Take the session down and bring it back at the new geometry. Apollo is stopped first
+        // so it is not capturing a desktop that is about to change under it. The disconnect is
+        // not optional: LaunchSessionAsync returns early for a session that is already Active,
+        // so without it the new Default.rdp would never be read.
         _apolloManager.KillForReconnect(seat);
         _sessionLauncher.DisconnectSession(seat.SessionId);
 
         seat.SessionId = await _sessionLauncher.LaunchSessionAsync(seat.AccountName, ct, geometry);
+        RecordScale(seat, geometry);
 
         // Apollo advertises the seat's resolution in its config, so regenerate before starting.
         _configBuilder.BuildConfig(seat, _options.ApolloConfigDir);
         seat.ApolloProcessId = await _apolloManager.StartAsync(seat, ct);
-
-        if (seat.AutoStart)
-        {
-            presetStore.Upsert(new SeatPreset
-            {
-                AccountName = seat.AccountName,
-                Width = width,
-                Height = height,
-                Fps = seat.Fps,
-                AutoStart = true,
-                NvencPreset = seat.NvencPreset,
-            });
-        }
-
-        _ = BroadcastState(seat);
-        _logger.LogInformation(
-            "Seat {Id}: resolution now {W}x{H} on session {Sid} (Apollo PID {Pid})",
-            seatId, width, height, seat.SessionId, seat.ApolloProcessId);
     }
 
     /// <summary>Recreate the virtual display for a seat.</summary>

@@ -25,4 +25,14 @@ internal static class ApiInputValidation
         {
             error = "Invalid account name. Use 1–20 alphanumeric characters, dots, underscores, or hyphens. Must start with a letter or digit."
         });
+
+    /// <summary>
+    /// A 400 naming the allowed values when <paramref name="scale"/> is set and is not a scale
+    /// factor RDP accepts; null when it is absent or allowed. An absent scale is valid — it
+    /// means "no override".
+    /// </summary>
+    public static IResult? ScaleFactorError(int? scale) =>
+        scale is { } value && !Sessions.RdpGeometry.IsAllowedScaleFactor(value)
+            ? Results.BadRequest(new { error = Sessions.RdpGeometry.ScaleFactorError(value) })
+            : null;
 }

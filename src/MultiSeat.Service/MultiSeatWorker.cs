@@ -93,6 +93,17 @@ public sealed class MultiSeatWorker : BackgroundService
         // point, so seats provisioned later in this service's life get it.
         SetDwmFrameInterval();
 
+        // A host-wide scale factor mstsc would ignore is refused rather than rounded. Say so
+        // once here; seats then fall back to the width heuristic instead of failing to start.
+        if (_options.DefaultScaleFactor is { } defaultScale
+            && !RdpGeometry.IsAllowedScaleFactor(defaultScale))
+        {
+            _logger.LogWarning(
+                "MultiSeat:DefaultScaleFactor is refused and not used: {Error} Seats without " +
+                "their own scale use the width heuristic instead",
+                RdpGeometry.ScaleFactorError(defaultScale));
+        }
+
         // ── Step 1: Verify multi-session is available ────────────────
         if (!_rdpWrapper.EnsureMultiSession())
         {
@@ -185,15 +196,7 @@ public sealed class MultiSeatWorker : BackgroundService
         {
             try
             {
-                var seat = await _seatManager.ProvisionSeatAsync(
-                    new SeatRequest
-                    {
-                        AccountName = preset.AccountName,
-                        Width = preset.Width,
-                        Height = preset.Height,
-                        Fps = preset.Fps,
-                        NvencPreset = preset.NvencPreset,
-                    }, ct);
+                var seat = await _seatManager.ProvisionSeatAsync(RequestFor(preset), ct);
 
                 seat.AutoStart = true;
                 _logger.LogInformation(
@@ -206,6 +209,20 @@ public sealed class MultiSeatWorker : BackgroundService
             }
         }
     }
+
+    /// <summary>
+    /// The provisioning request an autostart preset stands for. A field left out here is lost
+    /// on every service restart, silently, which is why it is tested.
+    /// </summary>
+    internal static SeatRequest RequestFor(SeatPreset preset) => new()
+    {
+        AccountName = preset.AccountName,
+        Width = preset.Width,
+        Height = preset.Height,
+        Fps = preset.Fps,
+        NvencPreset = preset.NvencPreset,
+        ScaleFactor = preset.ScaleFactor,
+    };
 
     private void KillOrphanedApolloProcesses()
     {

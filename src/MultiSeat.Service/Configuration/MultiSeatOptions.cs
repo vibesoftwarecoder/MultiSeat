@@ -280,6 +280,30 @@ public sealed class MultiSeatOptions
     // seat, session id preserved.
     public bool FollowClientResolution { get; set; } = false;
 
+    // DPI scale, in percent, for every seat that does not set its own (issue #70). Unset (null)
+    // keeps the width heuristic in RdpGeometry.DeriveScaleFactor: up to 1920 wide -> 100, up to
+    // 2560 -> 125, up to 3200 -> 150, wider -> 200.
+    //
+    // The heuristic is tuned for monitors. It knows the desktop's width in pixels and nothing
+    // about the client's screen, which Moonlight never reports. A tablet renders its own UI at
+    // about 200%, so a 1920-wide seat derived at 100% is tiny there. A seat's own override
+    // (POST /api/seats/{id}/scale, or scaleFactor when creating it) wins over this value.
+    //
+    // Must be one of 100, 125, 150, 175, 200, 250, 300, 400, 500 — the values mstsc accepts for
+    // desktopscalefactor. Anything else is refused with a warning at startup and NOT used; it is
+    // never rounded to a neighbour, because that would hand every seat a size nobody asked for.
+    public int? DefaultScaleFactor { get; set; }
+
+    /// <summary>
+    /// <see cref="DefaultScaleFactor"/> when it is usable, otherwise null. A value mstsc would
+    /// ignore is treated as unset here, so seats keep provisioning; the startup check is what
+    /// reports it.
+    /// </summary>
+    public int? UsableDefaultScaleFactor =>
+        DefaultScaleFactor is { } scale && Sessions.RdpGeometry.IsAllowedScaleFactor(scale)
+            ? scale
+            : null;
+
     // Enable Windows Advanced Color (HDR) on virtual displays at seat creation.
     // Requires SudoVDA driver v0.5+ with HDR EDID support.
     // When enabled, Apollo will stream in HDR if the Moonlight client also supports it.
