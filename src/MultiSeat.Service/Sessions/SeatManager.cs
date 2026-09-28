@@ -228,6 +228,15 @@ public sealed class SeatManager
             ProvisioningStep = "Session"
         };
 
+        // Warn when the requested fps cannot actually be reached: a seat streams its RDP
+        // session surface, so DwmFrameIntervalMs's effective refresh rate — one value, shared
+        // by every seat on the host — is the ceiling. Apollo still advertises the requested fps
+        // to the client regardless (issue #70).
+        seat.EffectiveRefreshRateWarning =
+            RefreshRateAdvisor.CheckFpsAgainstEffectiveRefreshRate(seat.Fps, _options.DwmFrameIntervalMs);
+        if (seat.EffectiveRefreshRateWarning is not null)
+            _logger.LogWarning("Seat {Id}: {Warning}", seat.Id, seat.EffectiveRefreshRateWarning);
+
         // Register the seat under the account-ownership lock so the "already provisioned?"
         // check and the dictionary insert are one atomic step. At most one live/provisioning
         // seat may exist per AccountName: the per-account Apollo config directory, log, and
