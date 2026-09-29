@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { system, input } from "../api/client";
 import { usePolling } from "../hooks/usePolling";
 import type { HookStatus, TopProcess, DiskInfo } from "../api/types";
+import { RefreshRateControl } from "../components/RefreshRateControl";
 
 export function SystemPage() {
   const [rebuilding, setRebuilding] = useState(false);
@@ -285,6 +286,9 @@ export function SystemPage() {
             </div>
           </div>
         )}
+
+        {/* Host-wide refresh rate (issue #74) */}
+        <RefreshRateControl />
       </div>
 
       {/* Disk usage */}

@@ -200,6 +200,17 @@ export function SeatCard({ seat, onUpdate }: Props) {
           />
         </div>
 
+        {/* Set at provision when the seat's fps is above what the host composes (issue #70). */}
+        {seat.effectiveRefreshRateWarning && (
+          <div
+            className="text-muted"
+            style={{ fontSize: 12, marginTop: 8, color: "var(--warning)" }}
+            title="Change the host's refresh rate on the System page. It applies to a seat's next session."
+          >
+            {seat.effectiveRefreshRateWarning}
+          </div>
+        )}
+
         {moonlightPort && isActive && (
           <MoonlightAddress host={window.location.hostname} port={moonlightPort} />
         )}

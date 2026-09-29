@@ -7,6 +7,8 @@ import type {
   AccountCreateRequest,
   SystemStatus,
   ApiAuthStatus,
+  RefreshRateStatus,
+  RefreshRateChange,
   ControllerInfo,
   ControllerAssignments,
   HookStatus,
@@ -165,6 +167,12 @@ export const system = {
     request<ApiAuthStatus>("/system/auth", {
       method: "POST",
       body: JSON.stringify({ enabled }),
+    }),
+  getRefreshRate: () => request<RefreshRateStatus>("/system/refresh-rate"),
+  setRefreshRate: (intervalMs: number) =>
+    request<RefreshRateChange>("/system/refresh-rate", {
+      method: "POST",
+      body: JSON.stringify({ intervalMs }),
     }),
 };
 

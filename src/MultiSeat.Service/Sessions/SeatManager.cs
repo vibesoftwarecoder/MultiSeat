@@ -59,6 +59,13 @@ public sealed class SeatManager
     private readonly IEnumerable<IEmulatorConfigSeeder> _emulatorSeeders;
     private readonly SeatLifecycleGate _lifecycleGate;
 
+    /// <summary>
+    /// The host-wide DWM interval in effect now. Read at provision time rather than taken from
+    /// <see cref="_options"/>, because the dashboard can change it while the service runs
+    /// (issue #74) and the options instance never changes after startup.
+    /// </summary>
+    private readonly DwmFrameIntervalSetting _dwmFrameInterval;
+
     public SeatManager(
         ILogger<SeatManager> logger,
         IOptions<MultiSeatOptions> options,
@@ -79,7 +86,8 @@ public sealed class SeatManager
         Monitoring.ApolloServerQuery serverQuery,
         Monitoring.HostApolloMonitor hostApollo,
         IEnumerable<IEmulatorConfigSeeder> emulatorSeeders,
-        SeatLifecycleGate lifecycleGate)
+        SeatLifecycleGate lifecycleGate,
+        DwmFrameIntervalSetting? dwmFrameInterval = null)
     {
         _logger = logger;
         _options = options.Value;
@@ -101,7 +109,19 @@ public sealed class SeatManager
         _hostApollo = hostApollo;
         _emulatorSeeders = emulatorSeeders;
         _lifecycleGate = lifecycleGate;
+
+        // Optional so tests that never provision can leave it out. The service registers one
+        // shared instance, and the settings API writes to that same instance.
+        _dwmFrameInterval = dwmFrameInterval ?? new DwmFrameIntervalSetting(_options.DwmFrameIntervalMs);
     }
+
+    /// <summary>
+    /// The warning a seat asking for <paramref name="requestedFps"/> gets when it is provisioned
+    /// now, or null when the host can compose that rate. Uses the interval in effect NOW, so a
+    /// change made through the settings API is what the next provision is checked against.
+    /// </summary>
+    internal string? RefreshRateWarningFor(int requestedFps) =>
+        RefreshRateAdvisor.CheckFpsAgainstEffectiveRefreshRate(requestedFps, _dwmFrameInterval.IntervalMs);
 
     // Guards the account-ownership critical section in ProvisionSeatAsync (dedup check +
     // seat registration). It is held only for that short check-and-insert — never across the
@@ -239,8 +259,7 @@ public sealed class SeatManager
         // session surface, so DwmFrameIntervalMs's effective refresh rate — one value, shared
         // by every seat on the host — is the ceiling. Apollo still advertises the requested fps
         // to the client regardless (issue #70).
-        seat.EffectiveRefreshRateWarning =
-            RefreshRateAdvisor.CheckFpsAgainstEffectiveRefreshRate(seat.Fps, _options.DwmFrameIntervalMs);
+        seat.EffectiveRefreshRateWarning = RefreshRateWarningFor(seat.Fps);
         if (seat.EffectiveRefreshRateWarning is not null)
             _logger.LogWarning("Seat {Id}: {Warning}", seat.Id, seat.EffectiveRefreshRateWarning);
 

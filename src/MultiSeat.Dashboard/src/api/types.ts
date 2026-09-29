@@ -39,6 +39,11 @@ export interface SeatInfo {
   scaleFactorSource: ScaleFactorSource;
   /** The seat's own override, or null when it has none. */
   scaleFactorOverride: number | null;
+  /**
+   * Set when the seat's fps is above what the host's refresh rate can compose, checked when the
+   * seat was provisioned (issue #70). Null when there is no mismatch.
+   */
+  effectiveRefreshRateWarning: string | null;
 }
 
 export type ScaleFactorSource = "Derived" | "HostDefault" | "Seat";
@@ -172,6 +177,27 @@ export interface InputMode {
 
 export interface ApiAuthStatus {
   authEnabled: boolean;
+}
+
+/** GET /api/system/refresh-rate (issue #74). */
+export interface RefreshRateStatus {
+  intervalMs: number;
+  refreshRateHz: number;
+  /** What Windows holds now; null when absent or unreadable. */
+  registryIntervalMs: number | null;
+  defaultIntervalMs: number;
+  allowedIntervalsMs: number[];
+  appliesTo: string;
+}
+
+/** POST /api/system/refresh-rate. */
+export interface RefreshRateChange {
+  intervalMs: number;
+  refreshRateHz: number;
+  previousIntervalMs: number;
+  appliesTo: string;
+  persistedTo: string | null;
+  persistError: string | null;
 }
 
 // ── Per-seat service status ───────────────────────────────────────

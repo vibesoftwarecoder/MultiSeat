@@ -38,6 +38,24 @@ public class DwmFrameIntervalTests
     }
 
     [Fact]
+    public void DefaultInterval_IsEight_AsMeasuredInIssue74()
+    {
+        // Issue #74 measured the cost under a real game-like load: 8 composes and delivers 125 Hz
+        // for about 15% more of one core per busy seat than 16 did, and it gives a 120fps client
+        // its full rate. 16 (62 Hz) capped every such client at 62. Change this only with a new
+        // measurement.
+        Assert.Equal(8, new MultiSeatOptions().DwmFrameIntervalMs);
+    }
+
+    [Fact]
+    public void DefaultInterval_IsOneTheDashboardOffers()
+    {
+        // The dashboard's dropdown lists only the measured-safe values. A default outside them
+        // would show up there as an unknown value on every fresh install.
+        Assert.True(DwmFrameIntervalSetting.IsAllowedInterval(new MultiSeatOptions().DwmFrameIntervalMs));
+    }
+
+    [Fact]
     public void TheValueWeUsedToShip_IsBelowTheFloor()
     {
         // The regression marker. If this ever fails, the floor moved and the measurements above

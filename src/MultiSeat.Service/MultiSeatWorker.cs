@@ -89,7 +89,7 @@ public sealed class MultiSeatWorker : BackgroundService
         // ── Step 0b: Set DWM frame interval for RDP sessions ────────
         // The Microsoft Remote Display Adapter's DWM composition rate defaults to ~32fps, which
         // is the ceiling on how often a seat can produce a new frame. Lowering the interval
-        // raises it — measured 125fps at the default 8ms. Applies to sessions created after this
+        // raises it — measured 125fps at the default 8ms (issue #74). Applies to sessions created after this
         // point, so seats provisioned later in this service's life get it.
         SetDwmFrameInterval();
 
@@ -320,58 +320,12 @@ public sealed class MultiSeatWorker : BackgroundService
     /// new frame. The composition rate is 1000/interval; the Windows default is ~32fps.
     /// Takes effect on the next RDP session, not on sessions already running.
     /// See MultiSeatOptions.DwmFrameIntervalMs for the measurements behind the default.
+    ///
+    /// The write itself lives in DwmFrameIntervalRegistry so the settings API can apply a new
+    /// interval on demand, without a service restart (issue #74).
     /// </summary>
-    private void SetDwmFrameInterval()
-    {
-        const string keyPath = @"SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations";
-        const string valueName = "DWMFRAMEINTERVAL";
-
-        var intervalMs = _options.DwmFrameIntervalMs;
-
-        // Windows treats an interval below 2 as out of range and silently uses the default, so
-        // writing one would report success and change nothing — which is exactly how the old
-        // hardcoded 1 went unnoticed. Refuse it and say why rather than write a value we have
-        // measured to be inert.
-        if (intervalMs < MultiSeatOptions.MinimumHonouredDwmFrameIntervalMs)
-        {
-            _logger.LogWarning(
-                "DwmFrameIntervalMs is {Ms}, which Windows ignores — RDP sessions would compose " +
-                "at the ~32fps default. Not writing it. Use 8 (125Hz) unless you have measured " +
-                "a reason for another value",
-                intervalMs);
-            return;
-        }
-
-        try
-        {
-            using var key = Registry.LocalMachine.OpenSubKey(keyPath, writable: true);
-            if (key is null)
-            {
-                _logger.LogWarning(
-                    "Registry key HKLM\\{Path} not found — cannot set DWM frame interval",
-                    keyPath);
-                return;
-            }
-
-            var current = key.GetValue(valueName);
-            if (current is int currentVal && currentVal == intervalMs)
-            {
-                _logger.LogDebug("DWMFRAMEINTERVAL already set to {Ms}ms", intervalMs);
-                return;
-            }
-
-            key.SetValue(valueName, intervalMs, RegistryValueKind.DWord);
-            _logger.LogInformation(
-                "Set DWMFRAMEINTERVAL to {Ms}ms (was {Old}) — RDP sessions created from now on " +
-                "compose at ~{Hz}fps instead of the ~32fps default",
-                intervalMs, current ?? "unset", 1000 / intervalMs);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Failed to set DWMFRAMEINTERVAL — RDP sessions stay capped at the ~32fps default");
-        }
-    }
+    private void SetDwmFrameInterval() =>
+        DwmFrameIntervalRegistry.Write(_options.DwmFrameIntervalMs, _logger);
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {

@@ -39,6 +39,9 @@ public static class ApiServer
         builder.Services.AddSingleton(hostServices.GetRequiredService<Monitoring.HostApolloMonitor>());
         builder.Services.AddSingleton(hostServices.GetRequiredService<Display.VirtualDisplayManager>());
         builder.Services.AddSingleton(hostServices.GetRequiredService<Configuration.SeatPresetStore>());
+        // The SAME instance the seat manager reads, so a change made through the API is what the
+        // next provision sees. A second instance here would change nothing but this container.
+        builder.Services.AddSingleton(hostServices.GetRequiredService<Configuration.DwmFrameIntervalSetting>());
 
         builder.WebHost.ConfigureKestrel(kestrel =>
         {

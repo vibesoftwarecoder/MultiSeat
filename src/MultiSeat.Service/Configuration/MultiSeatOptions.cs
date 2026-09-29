@@ -223,8 +223,8 @@ public sealed class MultiSeatOptions
     //     1         32 Hz                  31.9 fps    <- ignored; same as absent
     //     2         500 Hz                 464.7 fps
     //     4         250 Hz                 246.1 fps
-    //     8         125 Hz                 125.2 fps
-    //     16        62 Hz                  62.1 fps    <- the default below
+    //     8         125 Hz                 125.2 fps   <- the default below (issue #74)
+    //     16        62 Hz                  62.1 fps    <- the default before issue #74
     //     33        30 Hz                  30.0 fps
     //
     // So the advertised rate is 1000/interval, truncated to a whole number. Exact 60 Hz is not
@@ -245,19 +245,35 @@ public sealed class MultiSeatOptions
     // ⛔ This key is machine-wide (HKLM, all WinStations), so every seat on a host shares one
     // value. A per-seat refresh rate is not reachable through it.
     //
-    // 16 gives 62 Hz, which covers the 60fps a seat is provisioned at by default and looks like an
-    // ordinary monitor — unlike 1000 Hz, which is what broke old titles. Pick the interval for the
-    // fastest client the host serves, since every seat shares it:
+    // Pick the interval for the fastest client the host serves, since every seat shares it:
     //
     //     30fps -> 33    60fps -> 16    120fps -> 8    144fps -> 6
     //
     // Exact 60 and 144 are not reachable: 1000/60 and 1000/144 are not whole milliseconds. 7 would
     // advertise 142 Hz, just under a 144 Hz client, so 6 is the one that covers it.
     //
-    // Going lower than the client needs buys composition the stream cannot carry and costs CPU in
-    // TermService and DWM, which is unmeasured and the reason not to reach for it. Change this only
-    // with a measurement in hand: scripts\probe-dwm-rate.ps1 takes one.
-    public int DwmFrameIntervalMs { get; set; } = 16;
+    // ⭐ The default is 8 (125 Hz) since issue #74, which measured the cost this comment used to
+    // call unmeasured. On the reference host, one seat under a real D3D11 game-like load, CPU
+    // summed over TermService, the keepalive mstsc and dwm:
+    //
+    //     interval   composed and delivered   CPU (one core)
+    //     16         62 Hz                    87.7%   (32.8 TermService + 31.1 mstsc + 23.8 dwm)
+    //     8          125 Hz                   101.3%  (+15% over 16)
+    //     6          166 Hz                   118.1%  (+35% over 16)
+    //
+    // So 8 gives a 120fps client its full rate for about 15% of one core per busy seat, roughly
+    // 0.6% of a 24-core host. RDP really delivers the higher rate; frames are not composed and then
+    // dropped. 16 (62 Hz) was the default before, and it capped every 120fps client at 62. It still
+    // looks like an ordinary monitor — unlike 1000 Hz, which is what broke old titles.
+    //
+    // ⛔ 4 and 2 compose fine idle but were never measured under load, so the dashboard does not
+    // offer them (DwmFrameIntervalSetting.AllowedIntervalsMs). Set them here by hand only with a
+    // measurement in hand: scripts\probe-dwm-rate.ps1 takes one.
+    //
+    // The dashboard's System page changes this at runtime (POST /api/system/refresh-rate): it
+    // writes the registry at once and persists the choice to appsettings.local.json. Either way the
+    // value applies to each seat's NEXT session only.
+    public int DwmFrameIntervalMs { get; set; } = 8;
 
     /// <summary>
     /// Smallest interval Windows actually honours. Below this it ignores the value and composes at

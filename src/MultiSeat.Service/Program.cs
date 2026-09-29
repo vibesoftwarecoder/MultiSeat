@@ -286,6 +286,11 @@ builder.Services.AddSingleton<MultiSeat.Service.Monitoring.ApolloServerQuery>();
 builder.Services.AddSingleton<MultiSeat.Service.Monitoring.HostApolloMonitor>();
 builder.Services.AddSingleton<PortAllocator>();
 builder.Services.AddSingleton<SeatLifecycleGate>();
+// The DWM interval in effect now. Seeded from configuration once; after that the settings API
+// changes it in place, and the seat manager reads it at every provision (issue #74).
+builder.Services.AddSingleton(sp => new DwmFrameIntervalSetting(
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<MultiSeatOptions>>().Value.DwmFrameIntervalMs,
+    sp.GetRequiredService<ILogger<DwmFrameIntervalSetting>>()));
 builder.Services.AddSingleton<AudioDeviceEnumerator>();
 builder.Services.AddSingleton<AudioRouter>();
 builder.Services.AddSingleton<ControllerManager>();

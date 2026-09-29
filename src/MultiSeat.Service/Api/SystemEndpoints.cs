@@ -159,6 +159,161 @@ public static class SystemEndpoints
                 persistError,
             });
         });
+
+        // GET /api/system/refresh-rate — the host-wide DWM interval in effect and its rate.
+        //
+        // Gated like every other /api route. Only GET /api/system/auth is public, and this reveals
+        // nothing a dashboard without the key needs before it has one.
+        group.MapGet("/refresh-rate", (DwmFrameIntervalSetting setting) =>
+            Results.Ok(RefreshRateStatus(setting, DwmFrameIntervalRegistry.Read())));
+
+        // POST /api/system/refresh-rate — set the host-wide DWM interval (issue #74).
+        //
+        // Follows POST /api/system/auth: takes effect without a service restart and persists so it
+        // survives one. Unlike the auth toggle it cannot change anything already running — Windows
+        // reads the interval only when a new RDP session's compositor starts — so it applies to
+        // each seat's NEXT session, and the response says so.
+        group.MapPost("/refresh-rate", (RefreshRateRequest? body, DwmFrameIntervalSetting setting) =>
+            SetRefreshRateAsync(
+                body,
+                setting,
+                ms => DwmFrameIntervalRegistry.Write(ms, setting.Logger),
+                Path.Combine(AppContext.BaseDirectory, "appsettings.local.json"),
+                setting.Logger));
+    }
+
+    /// <summary>
+    /// What every refresh-rate response says about scope. A change can never reach a session that
+    /// already exists, and a caller who does not know that will think it failed.
+    /// </summary>
+    internal const string RefreshRateAppliesTo =
+        "Applies to each seat's next session. Seats already running keep their current rate " +
+        "until they are stopped and started again; a reconnect or a resize keeps the same " +
+        "session, so it does not pick the change up.";
+
+    internal static object RefreshRateStatus(DwmFrameIntervalSetting setting, int? registryIntervalMs) => new
+    {
+        intervalMs = setting.IntervalMs,
+        refreshRateHz = setting.EffectiveRefreshRateHz,
+        // What Windows will actually read for the next session. Differs from intervalMs only when
+        // the startup write failed or someone edited the registry by hand.
+        registryIntervalMs,
+        defaultIntervalMs = new MultiSeatOptions().DwmFrameIntervalMs,
+        allowedIntervalsMs = DwmFrameIntervalSetting.AllowedIntervalsMs,
+        appliesTo = RefreshRateAppliesTo,
+    };
+
+    // One change at a time: the registry write, the in-memory value and the file must end up
+    // agreeing, and two interleaved requests could leave each holding a different value.
+    private static readonly SemaphoreSlim RefreshRateLock = new(1, 1);
+
+    /// <summary>
+    /// POST /api/system/refresh-rate. A method rather than a lambda so tests can call the real
+    /// handler with a fake registry write and a temporary settings file.
+    ///
+    /// Order matters. The registry is written first because it is the only part Windows reads; if
+    /// that fails nothing else changes, so the dashboard never shows a rate the next session will
+    /// not get. Then the shared in-memory value, which the next provision's fps check reads. Then
+    /// the file, so the choice survives a restart — a failure there is reported, as the auth
+    /// toggle does, rather than hidden.
+    /// </summary>
+    internal static async Task<IResult> SetRefreshRateAsync(
+        RefreshRateRequest? body,
+        DwmFrameIntervalSetting setting,
+        Func<int, string?> writeRegistry,
+        string settingsPath,
+        ILogger log)
+    {
+        if (body?.IntervalMs is not { } intervalMs)
+            return Results.BadRequest(new
+            {
+                error = "intervalMs is required. Use one of: " +
+                        $"{string.Join(", ", DwmFrameIntervalSetting.AllowedIntervalsMs)} (ms).",
+            });
+
+        if (!DwmFrameIntervalSetting.IsAllowedInterval(intervalMs))
+            return Results.BadRequest(new { error = DwmFrameIntervalSetting.IntervalError(intervalMs) });
+
+        await RefreshRateLock.WaitAsync();
+        try
+        {
+            var previous = setting.IntervalMs;
+
+            if (writeRegistry(intervalMs) is { } registryError)
+                return Results.Json(new { error = registryError }, statusCode: StatusCodes.Status500InternalServerError);
+
+            setting.Set(intervalMs);
+
+            var (persistedTo, persistError) = await PersistDwmFrameIntervalAsync(settingsPath, intervalMs);
+            if (persistError is not null)
+                log.LogWarning(
+                    "DWM frame interval set to {Ms}ms but not persisted to {Path}: {Error}. It reverts " +
+                    "to the configured value at the next service restart",
+                    intervalMs, settingsPath, persistError);
+
+            log.LogInformation(
+                "DWM frame interval changed from {Old}ms to {Ms}ms (~{Hz}Hz) via the API; persisted to " +
+                "{Path}. Applies to each seat's next session",
+                previous, intervalMs, setting.EffectiveRefreshRateHz, persistedTo ?? "(nothing — see warning)");
+
+            return Results.Ok(new
+            {
+                intervalMs = setting.IntervalMs,
+                refreshRateHz = setting.EffectiveRefreshRateHz,
+                previousIntervalMs = previous,
+                appliesTo = RefreshRateAppliesTo,
+                persistedTo,
+                persistError,
+            });
+        }
+        finally
+        {
+            RefreshRateLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Write <c>MultiSeat:DwmFrameIntervalMs</c> into <paramref name="settingsPath"/>, creating the
+    /// file when it does not exist and keeping every other setting in it.
+    ///
+    /// Always appsettings.local.json: Program.cs loads it last, so it outranks appsettings.json
+    /// whatever that says. The installer also keeps the host's appsettings.json byte for byte on
+    /// upgrade, so a host installed before this release still has 16 there; writing the local
+    /// file is the only way a dashboard choice is sure to win.
+    ///
+    /// A file that does not parse as strict JSON — one with comments, say — is reported and left
+    /// alone rather than rewritten without them.
+    /// </summary>
+    internal static async Task<(string? PersistedTo, string? PersistError)> PersistDwmFrameIntervalAsync(
+        string settingsPath, int intervalMs)
+    {
+        try
+        {
+            var node = File.Exists(settingsPath)
+                ? JsonNode.Parse(await File.ReadAllTextAsync(settingsPath))
+                : new JsonObject();
+
+            if (node is not JsonObject root)
+                return (null, $"{settingsPath} does not hold a JSON object.");
+
+            if (root["MultiSeat"] is not JsonObject ms)
+            {
+                if (root["MultiSeat"] is not null)
+                    return (null, $"{settingsPath} has a MultiSeat entry that is not an object.");
+                ms = new JsonObject();
+                root["MultiSeat"] = ms;
+            }
+
+            ms["DwmFrameIntervalMs"] = intervalMs;
+
+            await File.WriteAllTextAsync(settingsPath,
+                root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            return (settingsPath, null);
+        }
+        catch (Exception ex)
+        {
+            return (null, ex.Message);
+        }
     }
 
     /// <summary>
@@ -191,4 +346,7 @@ public static class SystemEndpoints
     }
 
     private record AuthToggleRequest(bool Enabled);
+
+    /// <summary>Body of POST /api/system/refresh-rate, e.g. <c>{ "intervalMs": 8 }</c>.</summary>
+    internal record RefreshRateRequest(int? IntervalMs);
 }
