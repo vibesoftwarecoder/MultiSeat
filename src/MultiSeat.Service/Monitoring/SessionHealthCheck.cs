@@ -214,6 +214,130 @@ public sealed class SessionHealthCheck
         return AnchorRelaunchOutcome.Relaunched;
     }
 
+    /// <summary>What <see cref="RescueDisconnectedSessionAsync"/> did.</summary>
+    internal enum SessionRescueOutcome
+    {
+        /// <summary>The seat's session was Active once the gate was held: nothing was touched.</summary>
+        AlreadyRecovered,
+
+        /// <summary>The seat changed state while waiting, e.g. a teardown: nothing was touched.</summary>
+        SeatChanged,
+
+        /// <summary>The session was still down under the gate, so the rescue ran.</summary>
+        Rescued,
+    }
+
+    /// <summary>
+    /// The order the Disconnected-session rescue (Check 1b) runs in, separated from the launcher
+    /// so it can be tested.
+    ///
+    /// 1. Wait for the seat's lifecycle gate.
+    /// 2. Under the gate, look again. The check saw the session Disconnected before waiting, but
+    ///    the gate is held by exactly the operations that disconnect a session on purpose: a
+    ///    resize or rescale kills Apollo, disconnects, relaunches and starts Apollo, all under
+    ///    it. If the seat's session is Active by now, that operation already did the rescue's
+    ///    job, and running it anyway kills the Apollo it just started (issue #70). The session
+    ///    looked at is the seat's CURRENT one, so a session the operation replaced counts too.
+    /// 3. Only if it is still down, rescue, still holding the gate.
+    ///
+    /// Check 2 does the same for a dead Apollo: it looks again after the gate, because a manual
+    /// restart or teardown may have completed while it waited.
+    /// </summary>
+    internal static async Task<SessionRescueOutcome> RescueDisconnectedSessionAsync(
+        Func<CancellationToken, Task<SeatLifecycleGate.ILease>> acquireGate,
+        Func<bool> seatStillOurs,
+        Func<bool> sessionActiveNow,
+        Func<CancellationToken, Task> rescue,
+        CancellationToken ct)
+    {
+        using var lease = await acquireGate(ct);
+
+        if (!seatStillOurs())
+            return SessionRescueOutcome.SeatChanged;
+
+        if (sessionActiveNow())
+            return SessionRescueOutcome.AlreadyRecovered;
+
+        await rescue(ct);
+        return SessionRescueOutcome.Rescued;
+    }
+
+    /// <summary>
+    /// Check 1b's rescue: reconnect the session, then restart Apollo on it. The caller holds the
+    /// seat's lifecycle gate. This rewrites SessionId and restarts Apollo, so it needs the same
+    /// gate as every other lifecycle mutation; otherwise a resolution change or manual reconnect
+    /// arriving mid-recovery interleaves with it and strands the old session's mstsc. Nothing
+    /// called here takes the gate, so there is no reentrancy: the semaphore is not recursive
+    /// and a nested acquire would deadlock the seat until the 30s timeout.
+    /// </summary>
+    private async Task RescueSessionUnderGateAsync(SeatInfo seat, CancellationToken ct)
+    {
+        // Kill the existing Apollo first — it survived sleep but with a broken
+        // display pipeline (DXGI/QueryDisplayConfig fail on Disconnected sessions).
+        // Without this, RestartAsync launches a second Apollo alongside the first,
+        // causing a port conflict. KillForReconnect also resets RestartCount so
+        // sleep cycles don't exhaust the crash-restart limit.
+        _apolloManager.KillForReconnect(seat);
+
+        // Pass the geometry: if the stale session has to be logged off and recreated,
+        // the replacement must come back at the seat's own size rather than inheriting
+        // the console desktop's — and at its own scale, or an override set through the
+        // API would be lost on every sleep (issue #70).
+        //
+        // Keep the id it answers with: that path returns a NEW session, and the
+        // Apollo restart and display isolation just below both act on SessionId.
+        seat.SessionId = await _sessionLauncher.LaunchSessionAsync(
+            seat.AccountName, ct, _seatManager.GeometryFor(seat));
+
+        // Do not start Apollo against a session that is not ACTIVE yet. Apollo calls
+        // QueryDisplayConfig at startup, and a Disconnected session answers
+        // ERROR_ACCESS_DENIED — so it comes up without a display, dies, and the
+        // health check restarts it into the same state. A fixed delay is not enough
+        // on its own: it is a guess about how long the session takes, and losing that
+        // race produces exactly this loop.
+        if (!await WaitForSessionActiveAsync(
+                id => _sessionLauncher.IsSessionActive(id), seat.SessionId, ct))
+        {
+            _logger.LogWarning(
+                "Seat {Id}: session {Sid} did not become ACTIVE within 10s after reconnect — aborting",
+                seat.Id, seat.SessionId);
+            try { _sessionLauncher.DisconnectSession(seat.SessionId); } catch { /* best effort */ }
+            seat.TransitionTo(SeatStatus.Error, _logger);
+            seat.ErrorMessage = "RDP session did not become active after reconnect";
+            return;
+        }
+
+        // Give the display pipeline a moment to reinitialize after the session
+        // transitions back to Active — SudoVDA and DXGI need a beat to be ready.
+        await Task.Delay(2000, ct);
+
+        _logger.LogInformation(
+            "Seat {Id}: session reconnected — restarting Apollo",
+            seat.Id);
+        var newPid = await _apolloManager.RestartAsync(seat, ct);
+        if (newPid > 0)
+        {
+            seat.ApolloProcessId = newPid;
+            _logger.LogInformation(
+                "Seat {Id}: Apollo restarted after reconnect (PID {Pid})",
+                seat.Id, newPid);
+
+            // The session disconnect/reconnect wiped display-isolation state
+            // (SudoVDA is no longer primary; the RDP adapter has come back at
+            // its 1024×768 wake default). Without this, Apollo's mode change
+            // ends up on the wrong display and the stream stays at 1024×768.
+            await _seatManager.ApplyDisplayIsolationAsync(seat, ct);
+
+            // API readiness does not prove that the client resumed streaming.
+            seat.TransitionTo(SeatStatus.Ready, _logger);
+            return;
+        }
+
+        // RestartAsync has exhausted the readiness retry budget.
+        seat.TransitionTo(SeatStatus.Error, _logger);
+        seat.ErrorMessage ??= "Apollo did not become ready after reconnect; check its log.";
+    }
+
     private async Task<bool> CheckSeatAsync(SeatInfo seat, CancellationToken ct)
     {
         // ── Check 1: Is the Windows session still alive? ──────────
@@ -256,80 +380,40 @@ public sealed class SessionHealthCheck
             try { await WebSocketHub.BroadcastSeatUpdateAsync(seat); }
             catch (Exception ex) { _logger.LogDebug(ex, "Seat {Id}: could not broadcast Connecting", seat.Id); }
 
+            var triggeringSessionId = seat.SessionId;
             try
             {
-                // This branch rewrites SessionId and restarts Apollo, so it needs the same gate
-                // as every other lifecycle mutation — otherwise a resolution change or manual
-                // reconnect arriving mid-recovery interleaves with it and strands the old
-                // session's mstsc. Nothing it calls below takes the gate, so there is no
-                // reentrancy: the semaphore is not recursive and a nested acquire would
-                // deadlock the seat until the 30s timeout.
-                using var lease = await _lifecycleGate.AcquireAsync(seat.Id, ct);
+                var outcome = await RescueDisconnectedSessionAsync(
+                    acquireGate: c => _lifecycleGate.AcquireAsync(seat.Id, c),
+                    // Connecting is what this check just set. Anything else means another
+                    // operation (a teardown, say) has taken the seat over while we waited.
+                    seatStillOurs: () => seat.Status == SeatStatus.Connecting,
+                    sessionActiveNow: () => _sessionLauncher.IsSessionActive(seat.SessionId),
+                    rescue: c => RescueSessionUnderGateAsync(seat, c),
+                    ct);
 
-                // Kill the existing Apollo first — it survived sleep but with a broken
-                // display pipeline (DXGI/QueryDisplayConfig fail on Disconnected sessions).
-                // Without this, RestartAsync launches a second Apollo alongside the first,
-                // causing a port conflict. KillForReconnect also resets RestartCount so
-                // sleep cycles don't exhaust the crash-restart limit.
-                _apolloManager.KillForReconnect(seat);
-
-                // Pass the geometry: if the stale session has to be logged off and recreated,
-                // the replacement must come back at the seat's own size rather than inheriting
-                // the console desktop's — and at its own scale, or an override set through the
-                // API would be lost on every sleep (issue #70).
-                //
-                // Keep the id it answers with: that path returns a NEW session, and the
-                // Apollo restart and display isolation just below both act on SessionId.
-                seat.SessionId = await _sessionLauncher.LaunchSessionAsync(
-                    seat.AccountName, ct, _seatManager.GeometryFor(seat));
-
-                // Do not start Apollo against a session that is not ACTIVE yet. Apollo calls
-                // QueryDisplayConfig at startup, and a Disconnected session answers
-                // ERROR_ACCESS_DENIED — so it comes up without a display, dies, and the
-                // health check restarts it into the same state. A fixed delay is not enough
-                // on its own: it is a guess about how long the session takes, and losing that
-                // race produces exactly this loop.
-                if (!await WaitForSessionActiveAsync(
-                        id => _sessionLauncher.IsSessionActive(id), seat.SessionId, ct))
+                switch (outcome)
                 {
-                    _logger.LogWarning(
-                        "Seat {Id}: session {Sid} did not become ACTIVE within 10s after reconnect — aborting",
-                        seat.Id, seat.SessionId);
-                    try { _sessionLauncher.DisconnectSession(seat.SessionId); } catch { /* best effort */ }
-                    seat.TransitionTo(SeatStatus.Error, _logger);
-                    seat.ErrorMessage = "RDP session did not become active after reconnect";
-                    return true;
+                    case SessionRescueOutcome.AlreadyRecovered:
+                        // Typically a resize or rescale: it disconnects the session on purpose,
+                        // this check saw the gap, and by the time the gate was free the resize
+                        // had relaunched the session and started Apollo on it.
+                        _logger.LogInformation(
+                            "Seat {Id}: session {Sid} was Active again once the lifecycle gate was " +
+                            "free (seen Disconnected as session {OldSid}); another operation already " +
+                            "reconnected it, so Apollo is left alone",
+                            seat.Id, seat.SessionId, triggeringSessionId);
+                        seat.TransitionTo(previousStatus, _logger);
+                        return true;
+
+                    case SessionRescueOutcome.SeatChanged:
+                        // The seat's status now belongs to whatever moved it on.
+                        _logger.LogInformation(
+                            "Seat {Id}: not reconnecting session {Sid}; the seat became {Status} " +
+                            "while waiting for the lifecycle gate",
+                            seat.Id, triggeringSessionId, seat.Status);
+                        return false;
                 }
-
-                // Give the display pipeline a moment to reinitialize after the session
-                // transitions back to Active — SudoVDA and DXGI need a beat to be ready.
-                await Task.Delay(2000, ct);
-
-                _logger.LogInformation(
-                    "Seat {Id}: session reconnected — restarting Apollo",
-                    seat.Id);
-                var newPid = await _apolloManager.RestartAsync(seat, ct);
-                if (newPid > 0)
-                {
-                    seat.ApolloProcessId = newPid;
-                    _logger.LogInformation(
-                        "Seat {Id}: Apollo restarted after reconnect (PID {Pid})",
-                        seat.Id, newPid);
-
-                    // The session disconnect/reconnect wiped display-isolation state
-                    // (SudoVDA is no longer primary; the RDP adapter has come back at
-                    // its 1024×768 wake default). Without this, Apollo's mode change
-                    // ends up on the wrong display and the stream stays at 1024×768.
-                    await _seatManager.ApplyDisplayIsolationAsync(seat, ct);
-
-                    // API readiness does not prove that the client resumed streaming.
-                    seat.TransitionTo(SeatStatus.Ready, _logger);
-                    return true;
-                }
-
-                // RestartAsync has exhausted the readiness retry budget.
-                seat.TransitionTo(SeatStatus.Error, _logger);
-                seat.ErrorMessage ??= "Apollo did not become ready after reconnect; check its log.";
                 return true;
             }
             catch (OperationCanceledException)
@@ -361,12 +445,6 @@ public sealed class SessionHealthCheck
         if (!apolloAlive && seat.ApolloProcessId > 0 &&
             seat.Status is SeatStatus.Ready or SeatStatus.Streaming)
         {
-            _logger.LogWarning(
-                "Seat {Id}: Apollo (PID {Pid}) is no longer running — attempting restart",
-                seat.Id, seat.ApolloProcessId);
-
-            WarnIfApolloDiedOnStartup(seat);
-
             // Restarting mutates ApolloProcessId and the ApolloManager instance record, so it
             // must not interleave with a manual restart or a resolution change for the same
             // seat. The dead-session branch above stays outside the gate deliberately: it only
@@ -374,8 +452,17 @@ public sealed class SessionHealthCheck
             using var lease = await _lifecycleGate.AcquireAsync(seat.Id, ct);
 
             // A manual restart or teardown may have completed while we waited for the gate.
+            // Nothing is logged before this point on purpose: a resize kills Apollo and holds
+            // the gate while it starts a new one, so a check landing in that gap used to log
+            // "attempting restart" and an early-exit warning for a restart that never ran.
             if (seat.Status is not (SeatStatus.Ready or SeatStatus.Streaming)
                 || _apolloManager.IsAlive(seat.Id)) return false;
+
+            _logger.LogWarning(
+                "Seat {Id}: Apollo (PID {Pid}) is no longer running — attempting restart",
+                seat.Id, seat.ApolloProcessId);
+
+            WarnIfApolloDiedOnStartup(seat);
 
             seat.TransitionTo(SeatStatus.Connecting, _logger);
 
