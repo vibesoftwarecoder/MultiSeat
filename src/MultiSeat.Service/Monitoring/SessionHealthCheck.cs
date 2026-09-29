@@ -278,6 +278,12 @@ public sealed class SessionHealthCheck
     /// </summary>
     private async Task RescueSessionUnderGateAsync(SeatInfo seat, CancellationToken ct)
     {
+        // The session is still down with the gate held, so no resize or rescale explains it:
+        // this is the unexpected drop the Warning is for.
+        _logger.LogWarning(
+            "Seat {Id}: session {Sid} is still Disconnected (PC may have slept) — reconnecting",
+            seat.Id, seat.SessionId);
+
         // Kill the existing Apollo first — it survived sleep but with a broken
         // display pipeline (DXGI/QueryDisplayConfig fail on Disconnected sessions).
         // Without this, RestartAsync launches a second Apollo alongside the first,
@@ -369,8 +375,13 @@ public sealed class SessionHealthCheck
         // Reconnect via mstsc to restore Active state, then restart Apollo.
         if (!_sessionLauncher.IsSessionActive(seat.SessionId))
         {
-            _logger.LogWarning(
-                "Seat {Id}: session {Sid} is Disconnected (PC may have slept) — reconnecting",
+            // Information, not Warning: at this point the drop may be our own. A resize or rescale
+            // disconnects the session on purpose while holding the lifecycle gate, so every one of
+            // them lands here (issue #70). Which case it was is only known under the gate below;
+            // the Warning is logged there, once the rescue is actually going to run.
+            _logger.LogInformation(
+                "Seat {Id}: session {Sid} is Disconnected — checking under the lifecycle gate " +
+                "whether it needs reconnecting",
                 seat.Id, seat.SessionId);
 
             // Show the repair while it is happening. Recovery takes 15-30s (relaunch, up to 10s
