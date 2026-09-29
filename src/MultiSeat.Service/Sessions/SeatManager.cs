@@ -1219,16 +1219,72 @@ public sealed class SeatManager
         // Take the session down and bring it back at the new geometry. Apollo is stopped first
         // so it is not capturing a desktop that is about to change under it. The disconnect is
         // not optional: LaunchSessionAsync returns early for a session that is already Active,
-        // so without it the new Default.rdp would never be read.
+        // so without it the new Default.rdp would never be read — and the relaunch has to wait
+        // until the disconnect has actually happened, for the same reason.
         _apolloManager.KillForReconnect(seat);
-        _sessionLauncher.DisconnectSession(seat.SessionId);
 
-        seat.SessionId = await _sessionLauncher.LaunchSessionAsync(seat.AccountName, ct, geometry);
+        seat.SessionId = await DisconnectAndRelaunchAsync(
+            seat.SessionId,
+            _sessionLauncher.DisconnectSession,
+            _sessionLauncher.IsSessionActive,
+            token => _sessionLauncher.LaunchSessionAsync(seat.AccountName, token, geometry),
+            _logger, ct);
         RecordScale(seat, geometry);
 
         // Apollo advertises the seat's resolution in its config, so regenerate before starting.
         _configBuilder.BuildConfig(seat, _options.ApolloConfigDir);
         seat.ApolloProcessId = await _apolloManager.StartAsync(seat, ct);
+    }
+
+    /// <summary>
+    /// Disconnect a session, wait for it to actually leave ACTIVE, then relaunch it.
+    /// </summary>
+    /// <remarks>
+    /// Killing mstsc does not make the session Disconnected at once; Windows takes a moment.
+    /// Relaunching inside that moment finds the session still ACTIVE, and LaunchSessionAsync
+    /// returns early for an ACTIVE session — so the new Default.rdp was never written and Apollo
+    /// was started against a session about to drop. Only the health check noticing the drop
+    /// seconds later applied the change, with two extra Apollo restarts (issue #70).
+    ///
+    /// A timeout is logged and the relaunch goes ahead anyway: leaving the seat half torn down
+    /// would be worse, and the health check still reconnects the session if it drops later.
+    ///
+    /// Takes the session operations as delegates so the ordering can be tested without a
+    /// Windows session, as <c>SessionHealthCheck.WaitForSessionActiveAsync</c> does.
+    /// </remarks>
+    /// <returns>The session id the relaunch answers with.</returns>
+    internal static async Task<int> DisconnectAndRelaunchAsync(
+        int sessionId,
+        Action<int> disconnect,
+        Func<int, bool> isSessionActive,
+        Func<CancellationToken, Task<int>> relaunch,
+        ILogger logger,
+        CancellationToken ct,
+        int pollMs = 250,
+        int timeoutMs = 10_000)
+    {
+        disconnect(sessionId);
+
+        ct.ThrowIfCancellationRequested();
+        var waited = Stopwatch.StartNew();
+        var stillActive = isSessionActive(sessionId);
+        while (stillActive && waited.ElapsedMilliseconds < timeoutMs)
+        {
+            await Task.Delay(pollMs, ct);
+            stillActive = isSessionActive(sessionId);
+        }
+
+        if (stillActive)
+            logger.LogWarning(
+                "Session {Sid} was still ACTIVE {Ms}ms after its disconnect — relaunching anyway; " +
+                "the health check will reconnect it if it drops later",
+                sessionId, waited.ElapsedMilliseconds);
+        else
+            logger.LogInformation(
+                "Session {Sid} left ACTIVE {Ms}ms after its disconnect — relaunching at the new geometry",
+                sessionId, waited.ElapsedMilliseconds);
+
+        return await relaunch(ct);
     }
 
     /// <summary>Recreate the virtual display for a seat.</summary>
