@@ -232,13 +232,17 @@ public sealed class SessionHealthCheck
     /// so it can be tested.
     ///
     /// 1. Wait for the seat's lifecycle gate.
-    /// 2. Under the gate, look again. The check saw the session Disconnected before waiting, but
-    ///    the gate is held by exactly the operations that disconnect a session on purpose: a
-    ///    resize or rescale kills Apollo, disconnects, relaunches and starts Apollo, all under
-    ///    it. If the seat's session is Active by now, that operation already did the rescue's
-    ///    job, and running it anyway kills the Apollo it just started (issue #70). The session
-    ///    looked at is the seat's CURRENT one, so a session the operation replaced counts too.
-    /// 3. Only if it is still down, rescue, still holding the gate.
+    /// 2. Under the gate, look at the session again. The check saw it Disconnected before
+    ///    waiting, but the gate is held by exactly the operations that disconnect a session on
+    ///    purpose: a resize or rescale kills Apollo, disconnects, relaunches and starts Apollo,
+    ///    all under it. If the seat's session is Active by now, that operation already did the
+    ///    rescue's job, and running it anyway kills the Apollo it just started (issue #70). The
+    ///    session looked at is the seat's CURRENT one, so a session the operation replaced
+    ///    counts too. This comes before the status test on purpose: that resize also moves the
+    ///    seat off Connecting (measured live, 2 of 7 runs).
+    /// 3. If the session is still down but the seat is no longer in this check's Connecting
+    ///    (a teardown, say), leave it to whatever moved it.
+    /// 4. Otherwise rescue, still holding the gate.
     ///
     /// Check 2 does the same for a dead Apollo: it looks again after the gate, because a manual
     /// restart or teardown may have completed while it waited.
@@ -252,11 +256,13 @@ public sealed class SessionHealthCheck
     {
         using var lease = await acquireGate(ct);
 
-        if (!seatStillOurs())
-            return SessionRescueOutcome.SeatChanged;
-
+        // The session first: a resize that finished while we waited has also moved the seat off
+        // this check's Connecting (its Apollo readiness wait ends in Ready).
         if (sessionActiveNow())
             return SessionRescueOutcome.AlreadyRecovered;
+
+        if (!seatStillOurs())
+            return SessionRescueOutcome.SeatChanged;
 
         await rescue(ct);
         return SessionRescueOutcome.Rescued;
@@ -397,13 +403,16 @@ public sealed class SessionHealthCheck
                     case SessionRescueOutcome.AlreadyRecovered:
                         // Typically a resize or rescale: it disconnects the session on purpose,
                         // this check saw the gap, and by the time the gate was free the resize
-                        // had relaunched the session and started Apollo on it.
+                        // had relaunched the session and started Apollo on it. That usually also
+                        // set the status (Apollo's readiness wait ends in Ready); only put ours
+                        // back if nothing else has.
                         _logger.LogInformation(
                             "Seat {Id}: session {Sid} was Active again once the lifecycle gate was " +
                             "free (seen Disconnected as session {OldSid}); another operation already " +
                             "reconnected it, so Apollo is left alone",
                             seat.Id, seat.SessionId, triggeringSessionId);
-                        seat.TransitionTo(previousStatus, _logger);
+                        if (seat.Status == SeatStatus.Connecting)
+                            seat.TransitionTo(previousStatus, _logger);
                         return true;
 
                     case SessionRescueOutcome.SeatChanged:

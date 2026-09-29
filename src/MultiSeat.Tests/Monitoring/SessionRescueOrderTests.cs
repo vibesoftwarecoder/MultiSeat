@@ -82,6 +82,26 @@ public class SessionRescueOrderTests
         Assert.Equal(0, rig.Rescues);
     }
 
+    // What the live host actually does (2 of 7 runs, 2026-09-29): the resize's Apollo readiness
+    // wait also moves the seat off the check's Connecting to Ready. That is a recovery, not a
+    // seat taken over by something else, and must be reported as one.
+    [Fact]
+    public async Task SessionRecoveredAndStatusMovedOn_IsReportedAsRecovered()
+    {
+        var rig = new Rig();
+
+        Task<SessionRescueOutcome> check;
+        using (await rig.Gate.AcquireAsync(rig.SeatId, CancellationToken.None))
+        {
+            check = rig.CheckAsync();
+            rig.ActiveSessions.Add(rig.SessionId);
+            rig.SeatStillOurs = false;
+        }
+
+        Assert.Equal(SessionRescueOutcome.AlreadyRecovered, await check);
+        Assert.Equal(0, rig.Rescues);
+    }
+
     // A resize whose relaunch comes back on a different session id still recovered the seat.
     [Fact]
     public async Task SessionReplacedWhileWaitingForTheGate_IsNotRescuedEither()
