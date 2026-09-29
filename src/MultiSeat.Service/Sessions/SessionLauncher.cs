@@ -109,9 +109,13 @@ public sealed class SessionLauncher
     /// </summary>
     /// <param name="geometry">
     /// Desktop size for the session, or null to let mstsc choose (which means inheriting the
-    /// console desktop's size). Only honoured when a session is CREATED — reconnecting to an
-    /// existing session cannot resize it, so a caller changing resolution must log the session
-    /// off first. See <see cref="RdpGeometry"/>.
+    /// console desktop's size). Honoured both when a session is created and when a Disconnected
+    /// one is reconnected: a reconnect at a new geometry DOES resize the session (measured live
+    /// on 2026-09-29, issue #70: Apollo's in-session log read "Desktop resolution [2560x1440]"
+    /// after a resize done purely by reconnecting). Not honoured for a session that is still
+    /// ACTIVE, which returns early without reading Default.rdp, so a caller changing geometry
+    /// must disconnect first and wait for the session to leave ACTIVE. See
+    /// <see cref="RdpGeometry"/>.
     /// </param>
     public async Task<int> LaunchSessionAsync(
         string accountName, CancellationToken ct, RdpGeometry? geometry = null)
@@ -694,10 +698,11 @@ public sealed class SessionLauncher
     /// Stores mstsc in _pendingMstsc; caller must call DisconnectSession().
     /// </summary>
     /// <remarks>
-    /// <paramref name="geometry"/> is written into Default.rdp for consistency but does NOT
-    /// resize the session: reconnecting attaches to a desktop that already exists at its
-    /// original size. Changing a live seat's resolution means logging the session off and
-    /// creating a new one.
+    /// <paramref name="geometry"/> is written into Default.rdp, and the reconnect DOES resize
+    /// the session to it. This was once believed impossible (a reconnect was thought to attach
+    /// at the desktop's original size); live testing on 2026-09-29 (issue #70) disproved that:
+    /// after a resize done purely by this reconnect, Apollo's in-session log read "Desktop
+    /// resolution [2560x1440]". A resize or rescale therefore keeps the same session id.
     /// </remarks>
     private async Task ReconnectSessionAsync(
         int sessionId, string accountName, string password, RdpGeometry? geometry,
