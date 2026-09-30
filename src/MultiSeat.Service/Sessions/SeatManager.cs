@@ -465,6 +465,18 @@ public sealed class SeatManager
             seat.ProvisioningStep = "Apollo";
             await BroadcastState(seat);
 
+            // ── 5.9. Let the logon screen leave the session first (#80) ──
+            // On an account's first logon, LogonUI.exe stays in the session for several seconds
+            // after the session appears, and while it is there it holds the input desktop:
+            // Apollo logs "Failed to Open Input Desktop" and "DuplicateOutput() test failed"
+            // until the moment LogonUI leaves. Starting Apollo into that window spends its
+            // 30-second readiness budget on a desktop it cannot open. On any other logon
+            // LogonUI is already gone by now and this returns after one check.
+            await WaitForLogonUiToLeaveAsync(
+                seat.SessionId,
+                SessionLauncher.IsLogonUiInSession,
+                _logger, ct);
+
             seat.ApolloProcessId = await _apolloManager.StartAsync(seat, ct);
             _logger.LogInformation("Seat {Id}: Apollo PID {Pid}", seat.Id, seat.ApolloProcessId);
 
@@ -1304,6 +1316,89 @@ public sealed class SeatManager
                 sessionId, waited.ElapsedMilliseconds);
 
         return await relaunch(ct);
+    }
+
+    /// <summary>How long provisioning waits for LogonUI.exe to leave a new seat's session.</summary>
+    /// <remarks>
+    /// Measured on the reference host (issue #80): on a new account's first logon, Apollo's
+    /// input-desktop errors lasted 3.5-6.2 s, and 9 s on one cold run, and they ended when LogonUI
+    /// left the session in every run. 15 s covers the slow case with room to spare, and still
+    /// leaves Apollo its own 30-second readiness wait if the cap is ever reached.
+    /// </remarks>
+    internal const int LogonUiWaitTimeoutMs = 15_000;
+
+    internal const int LogonUiPollMs = 250;
+
+    /// <summary>What <see cref="WaitForLogonUiToLeaveAsync"/> found.</summary>
+    internal enum LogonUiWaitOutcome
+    {
+        /// <summary>LogonUI was not in the session at the first check. Nothing was waited.</summary>
+        NotPresent,
+
+        /// <summary>LogonUI was in the session and left before the cap.</summary>
+        Left,
+
+        /// <summary>LogonUI was still in the session at the cap. The caller goes ahead anyway.</summary>
+        TimedOut,
+    }
+
+    /// <summary>
+    /// Wait until no LogonUI.exe runs in <paramref name="sessionId"/>, or until
+    /// <paramref name="timeoutMs"/> has passed.
+    /// </summary>
+    /// <remarks>
+    /// While LogonUI is in a session it owns that session's input desktop, and Apollo cannot open
+    /// it (issue #80). This never fails provisioning: a timeout logs a Warning and returns, so the
+    /// worst case is exactly the behaviour before this wait existed. The probe is a delegate so
+    /// the timing can be tested without a Windows session, as in
+    /// <see cref="DisconnectAndRelaunchAsync"/>.
+    /// </remarks>
+    internal static async Task<LogonUiWaitOutcome> WaitForLogonUiToLeaveAsync(
+        int sessionId,
+        Func<int, bool> isLogonUiInSession,
+        ILogger logger,
+        CancellationToken ct,
+        int pollMs = LogonUiPollMs,
+        int timeoutMs = LogonUiWaitTimeoutMs)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        // The common case: every logon but an account's first is past LogonUI by now.
+        if (!isLogonUiInSession(sessionId))
+        {
+            logger.LogInformation(
+                "Session {Sid}: no LogonUI in the session — starting Apollo without waiting",
+                sessionId);
+            return LogonUiWaitOutcome.NotPresent;
+        }
+
+        logger.LogInformation(
+            "Session {Sid}: LogonUI is still in the session and holds its input desktop — " +
+            "waiting up to {Timeout}ms for it to leave before starting Apollo",
+            sessionId, timeoutMs);
+
+        var waited = Stopwatch.StartNew();
+        var present = true;
+        while (present && waited.ElapsedMilliseconds < timeoutMs)
+        {
+            await Task.Delay(pollMs, ct);
+            present = isLogonUiInSession(sessionId);
+        }
+
+        if (present)
+        {
+            logger.LogWarning(
+                "Session {Sid}: LogonUI was still in the session after {Ms}ms — starting Apollo " +
+                "anyway. Apollo may log \"Failed to Open Input Desktop\" until the logon screen " +
+                "leaves (issue #80)",
+                sessionId, waited.ElapsedMilliseconds);
+            return LogonUiWaitOutcome.TimedOut;
+        }
+
+        logger.LogInformation(
+            "Session {Sid}: LogonUI left the session after {Ms}ms — starting Apollo",
+            sessionId, waited.ElapsedMilliseconds);
+        return LogonUiWaitOutcome.Left;
     }
 
     /// <summary>Recreate the virtual display for a seat.</summary>

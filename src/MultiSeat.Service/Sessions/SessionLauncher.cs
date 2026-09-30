@@ -1782,6 +1782,42 @@ public sealed class SessionLauncher
     public bool IsSessionActive(int sessionId) =>
         FindSessionState(sessionId) == WtsApi.WtsConnectState.Active;
 
+    /// <summary>
+    /// True when a LogonUI.exe process runs in <paramref name="sessionId"/>. LogonUI holds the
+    /// session's input desktop while it is there, which Apollo cannot open (issue #80).
+    /// </summary>
+    /// <remarks>
+    /// A process that exits while it is being inspected is skipped. If the process list cannot
+    /// be read at all, this answers false: the caller would then start Apollo at once, which is
+    /// what happened before this check existed.
+    /// </remarks>
+    public static bool IsLogonUiInSession(int sessionId)
+    {
+        Process[] processes;
+        try
+        {
+            processes = Process.GetProcessesByName("LogonUI");
+        }
+        catch
+        {
+            return false;
+        }
+
+        var found = false;
+        foreach (var p in processes)
+        {
+            try
+            {
+                if (!found && p.SessionId == sessionId)
+                    found = true;
+            }
+            catch { /* exited while we looked */ }
+            finally { p.Dispose(); }
+        }
+
+        return found;
+    }
+
     private WtsApi.WtsConnectState? FindSessionState(int sessionId)
     {
         if (WtsApi.WTSQuerySessionInformationW(
