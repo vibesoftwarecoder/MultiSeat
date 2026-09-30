@@ -141,7 +141,22 @@ public sealed class AccountManager
 
         // Pre-create the user profile so the first RDP login doesn't stall
         // while Windows initializes the profile directory (can exceed the 15s timeout).
-        EnsureUserProfile(username);
+        var profile = EnsureUserProfile(username);
+
+        // Issue #80: turn off the privacy settings screen Windows shows at this account's logons.
+        // It has to happen now, while the profile exists but nobody has logged on yet, because the
+        // first logon is the one that waits for it. See SuppressPrivacyExperience.
+        if (profile is { } created)
+        {
+            SuppressPrivacyExperience(created.Sid, created.ProfilePath, username, _logger);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "Could not find the profile for '{User}', so its first-logon privacy settings " +
+                "screen was not turned off. Its first seat provision may time out (issue #80); " +
+                "a second attempt normally works.", username);
+        }
 
         // Store credential for session launching
         _credentials[username] = password;
@@ -621,7 +636,11 @@ public sealed class AccountManager
     internal static bool IsLegacyScope(string? scopeTag) =>
         !string.Equals(scopeTag, ScopeTagUser, StringComparison.OrdinalIgnoreCase);
 
-    private void EnsureUserProfile(string username)
+    /// <summary>
+    /// Create the account's Windows profile ahead of its first logon. Returns the account's SID
+    /// and profile directory, or null when either is unknown. Never throws.
+    /// </summary>
+    private (string Sid, string ProfilePath)? EnsureUserProfile(string username)
     {
         try
         {
@@ -630,16 +649,223 @@ public sealed class AccountManager
             var hr = UserEnv.CreateProfile(sid, username, profilePath, (uint)profilePath.Capacity);
             const int AlreadyExists = unchecked((int)0x80070050);
             if (hr == 0)
+            {
                 _logger.LogInformation("Pre-created user profile for '{User}': {Path}", username, profilePath);
-            else if (hr == AlreadyExists)
+                return (sid, profilePath.ToString());
+            }
+
+            if (hr == AlreadyExists)
+            {
                 _logger.LogDebug("User profile for '{User}' already exists", username);
-            else
-                _logger.LogWarning("CreateProfile for '{User}' returned HRESULT 0x{Hr:X8} (non-fatal)", username, hr);
+                var existing = ReadProfileImagePath(sid);
+                return existing is null ? null : (sid, existing);
+            }
+
+            _logger.LogWarning("CreateProfile for '{User}' returned HRESULT 0x{Hr:X8} (non-fatal)", username, hr);
+            return null;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to pre-create user profile for '{User}' (non-fatal)", username);
+            return null;
         }
+    }
+
+    /// <summary>
+    /// The profile directory Windows recorded for a SID in ProfileList, or null if there is none.
+    /// </summary>
+    private static string? ReadProfileImagePath(string sid)
+    {
+        using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+            $@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\{sid}", writable: false);
+        return key?.GetValue("ProfileImagePath") is string path
+            ? Environment.ExpandEnvironmentVariables(path)
+            : null;
+    }
+
+    /// <summary>Where the privacy-screen policy lives inside a user's own registry hive.</summary>
+    internal const string PrivacyExperiencePolicyKey = @"Software\Policies\Microsoft\Windows\OOBE";
+
+    internal const string PrivacyExperiencePolicyValue = "DisablePrivacyExperience";
+
+    /// <summary>
+    /// The temporary HKEY_USERS name a new account's hive is loaded under while it is edited.
+    /// Includes the SID so two accounts created at the same moment cannot collide.
+    /// </summary>
+    internal static string HiveMountName(string sid) => $@"HKU\MultiSeat-{sid}";
+
+    internal static string RegLoadArguments(string mount, string hivePath) =>
+        $"load \"{mount}\" \"{hivePath}\"";
+
+    internal static string RegAddPrivacyPolicyArguments(string mount) =>
+        $"add \"{mount}\\{PrivacyExperiencePolicyKey}\" /v {PrivacyExperiencePolicyValue} " +
+        "/t REG_DWORD /d 1 /f";
+
+    internal static string RegUnloadArguments(string mount) => $"unload \"{mount}\"";
+
+    /// <summary>
+    /// Turn off the "Choose privacy settings for your device" screen for one new account, by
+    /// setting the per-user policy <c>DisablePrivacyExperience = 1</c> under
+    /// <c>HKCU\Software\Policies\Microsoft\Windows\OOBE</c> in that account's own hive (issue #80).
+    ///
+    /// Why this screen matters: it is Windows' CloudExperienceHost (<c>WWAHost.exe</c>, source
+    /// <c>ms-cxh://NTHPRIVACY</c>), full-screen, and it appears at every logon until someone
+    /// answers it — which no one does on a seat. On an account's first logon only, the logon
+    /// task <c>LaunchExperienceHost</c> waits until its first page is visible, and the logon
+    /// screen stays up until that task ends. While the logon screen is up, Apollo cannot open the
+    /// input desktop ("Failed to Open Input Desktop", "DuplicateOutput() test failed"). If the
+    /// logon screen outlasts Apollo's startup probe, the provision fails at the 30-second
+    /// readiness check. Later logons do not wait for the screen, which is why a retry works.
+    ///
+    /// Measured on the reference host (Windows 11 26100): with the value set, a new account's
+    /// first and second logons launched no CloudExperienceHost at all and no <c>WWAHost</c>
+    /// process. Two other settings commonly suggested for this screen did not change it:
+    /// <c>EnableFirstLogonAnimation = 0</c> (machine policy) and
+    /// <c>ScoobeSystemSettingEnabled = 0</c> (per user).
+    ///
+    /// The limit of this fix: it takes the screen's web page off the first logon's critical path,
+    /// but it does not shorten the first logon's own wait. Measured in the same runs, Apollo's
+    /// input-desktop errors lasted 3.5-3.9 seconds without the value (4 runs; one cold run 9 s)
+    /// and 5.4-6.2 seconds with it (4 runs). Every run reached Ready on the first attempt either
+    /// way. The errors always ended when <c>LogonUI.exe</c> left the seat's session.
+    ///
+    /// Why this account's hive and not a machine-wide policy or the Default profile: both of
+    /// those would change every account on the host, including the operator's own. This
+    /// changes only the seat account MultiSeat just created.
+    ///
+    /// The hive is loaded with <c>reg.exe</c>, which enables the backup and restore privileges
+    /// that loading a hive needs, and is always unloaded again. A hive left loaded would stop
+    /// Windows loading the profile at the account's logon, so a failed unload is retried and
+    /// then reported. Never throws: a failure here costs, at worst, the known first-provision
+    /// timeout, and must not fail account creation.
+    ///
+    /// <paramref name="runReg"/> runs reg.exe with the given arguments and returns its exit code
+    /// and error text. Tests replace it; production uses <see cref="RunRegExe"/>.
+    /// </summary>
+    internal static void SuppressPrivacyExperience(
+        string sid, string profilePath, string username, ILogger logger,
+        Func<string, (int ExitCode, string Error)>? runReg = null)
+    {
+        runReg ??= RunRegExe;
+
+        if (!SidPattern.IsMatch(sid))
+        {
+            // sid always comes from our own SecurityIdentifier.ToString(), but it becomes part of
+            // a registry path and a command line, so anything else is refused.
+            logger.LogWarning(
+                "Not turning off the privacy settings screen for '{User}': '{Sid}' does not look " +
+                "like a SID.", username, sid);
+            return;
+        }
+
+        var hivePath = Path.Combine(profilePath, "NTUSER.DAT");
+        if (!File.Exists(hivePath))
+        {
+            logger.LogWarning(
+                "Not turning off the privacy settings screen for '{User}': {Hive} does not exist. " +
+                "Its first seat provision may time out (issue #80); a second attempt normally works.",
+                username, hivePath);
+            return;
+        }
+
+        var mount = HiveMountName(sid);
+        try
+        {
+            var load = runReg(RegLoadArguments(mount, hivePath));
+            if (load.ExitCode != 0)
+            {
+                logger.LogWarning(
+                    "Could not load the registry hive of '{User}' to turn off its privacy settings " +
+                    "screen (reg load exited {Code}: {Err}). Its first seat provision may time out " +
+                    "(issue #80); a second attempt normally works.",
+                    username, load.ExitCode, load.Error.Trim());
+                return;
+            }
+
+            try
+            {
+                var add = runReg(RegAddPrivacyPolicyArguments(mount));
+                if (add.ExitCode == 0)
+                {
+                    logger.LogInformation(
+                        "Turned off the privacy settings screen for '{User}' " +
+                        "({Key}\\{Value} = 1 in the account's own hive), so its first logon does " +
+                        "not wait for it (issue #80).",
+                        username, PrivacyExperiencePolicyKey, PrivacyExperiencePolicyValue);
+                }
+                else
+                {
+                    logger.LogWarning(
+                        "Could not turn off the privacy settings screen for '{User}' (reg add " +
+                        "exited {Code}: {Err}). Its first seat provision may time out (issue #80); " +
+                        "a second attempt normally works.",
+                        username, add.ExitCode, add.Error.Trim());
+                }
+            }
+            finally
+            {
+                UnloadHive(mount, username, logger, runReg);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Could not turn off the privacy settings screen for '{User}'. Its first seat " +
+                "provision may time out (issue #80); a second attempt normally works.", username);
+        }
+    }
+
+    private static void UnloadHive(
+        string mount, string username, ILogger logger,
+        Func<string, (int ExitCode, string Error)> runReg)
+    {
+        const int attempts = 3;
+        (int ExitCode, string Error) result = (-1, "not run");
+        for (var i = 1; i <= attempts; i++)
+        {
+            result = runReg(RegUnloadArguments(mount));
+            if (result.ExitCode == 0)
+                return;
+            if (i < attempts)
+                Thread.Sleep(500);
+        }
+
+        logger.LogWarning(
+            "Could not unload the registry hive of '{User}' from {Mount} after {Attempts} " +
+            "attempts (reg unload exited {Code}: {Err}). While it stays loaded, Windows cannot " +
+            "load this account's profile at logon. Run: reg unload \"{Mount}\"",
+            username, mount, attempts, result.ExitCode, result.Error.Trim(), mount);
+    }
+
+    /// <summary>
+    /// Run <c>%SystemRoot%\System32\reg.exe</c> with the given arguments and wait up to 15 seconds.
+    /// The full path is used so a <c>reg.exe</c> earlier on PATH cannot be picked up instead.
+    /// </summary>
+    private static (int ExitCode, string Error) RunRegExe(string arguments)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo(
+            Path.Combine(Environment.SystemDirectory, "reg.exe"), arguments)
+        {
+            CreateNoWindow = true,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+
+        using var proc = System.Diagnostics.Process.Start(psi);
+        if (proc is null)
+            return (-1, "reg.exe did not start");
+
+        var stdout = proc.StandardOutput.ReadToEndAsync();
+        var stderr = proc.StandardError.ReadToEndAsync();
+        if (!proc.WaitForExit(15_000))
+        {
+            try { proc.Kill(); } catch { /* already gone */ }
+            return (-1, "reg.exe timed out after 15 seconds");
+        }
+
+        proc.WaitForExit();
+        return (proc.ExitCode, stderr.Result + stdout.Result);
     }
 
     private static string GeneratePassword()
