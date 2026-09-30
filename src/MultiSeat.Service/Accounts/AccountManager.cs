@@ -1,9 +1,11 @@
 using System.Collections.Concurrent;
+using System.Management;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using MultiSeat.Service.Configuration;
 using MultiSeat.Service.Interop;
@@ -186,7 +188,9 @@ public sealed class AccountManager
 
     /// <summary>
     /// Delete a MultiSeat-managed account or unlink an existing account.
-    /// Only deletes the Windows account if it was created by MultiSeat (IsManaged=true).
+    /// Only deletes the Windows account if it was created by MultiSeat (IsManaged=true), and only
+    /// then does it also remove that account's Windows profile (issue #77) — see
+    /// <see cref="RemoveUserProfile"/>.
     /// </summary>
     public void DeleteAccount(string username)
     {
@@ -195,12 +199,30 @@ public sealed class AccountManager
 
         if (account.IsManaged)
         {
+            // Captured before NetUserDel: once the account is gone, its name can no longer be
+            // translated to a SID, and RemoveUserProfile needs the SID to find the matching
+            // Win32_UserProfile instance.
+            var sid = TryResolveSid(username, _logger);
+
             // Only delete the actual Windows account if MultiSeat created it
             var result = NetApi.NetUserDel(null, username);
             if (result != NetApi.NERR_Success && result != NetApi.NERR_UserNotFound)
                 throw new InvalidOperationException(
                     $"NetUserDel failed for '{username}': error {result}");
             _logger.LogInformation("Deleted Windows account: {User}", username);
+
+            // NetUserDel only removes the SAM account entry. The profile directory under
+            // C:\Users\<name> and its ProfileList registry entry are separate Windows state that
+            // it never touches — every account MultiSeat has ever deleted through the API has
+            // left one of these behind (issue #77). Run after the account is gone, matching the
+            // order that has worked cleanly for manual cleanup all session: deleting the account
+            // first, then the profile via Win32_UserProfile.
+            //
+            // Best-effort and never fails the call: leaking a profile is the lesser problem next
+            // to an account NetUserDel already reports deleted but that DeleteAccount then throws
+            // on. See RemoveUserProfile for what counts as a normal case versus a logged warning.
+            if (sid != null)
+                RemoveUserProfile(sid, username, _logger);
         }
         else
         {
@@ -210,6 +232,94 @@ public sealed class AccountManager
         _managedAccounts.TryRemove(username, out _);
         _credentials.TryRemove(username, out _);
         SavePersistedAccounts();
+    }
+
+    /// <summary>
+    /// Resolve a local account name to its SID while the account still exists. Returns null,
+    /// rather than throwing, when it can't be resolved — the normal case for an account
+    /// <c>NetUserDel</c> is about to report <c>NERR_UserNotFound</c> for (already gone, e.g. a
+    /// previous partial delete): there is no SID to look a profile up by, and that is not an
+    /// error. Takes an explicit <see cref="ILogger"/>, not <c>_logger</c>, so it can be exercised
+    /// directly in a test.
+    /// </summary>
+    internal static string? TryResolveSid(string username, ILogger logger)
+    {
+        try
+        {
+            return new NTAccount(username).Translate(typeof(SecurityIdentifier)).ToString();
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex,
+                "Could not resolve a SID for '{User}' before deleting its Windows account — no " +
+                "profile cleanup will be attempted for it.", username);
+            return null;
+        }
+    }
+
+    /// <summary>Matches the shape of a Windows SID string, e.g. "S-1-5-21-...".</summary>
+    private static readonly Regex SidPattern = new(@"^S-\d+-\d+(-\d+)+$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Remove the Windows user profile — the directory under <c>C:\Users</c> and the matching
+    /// <c>HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\&lt;SID&gt;</c> registry
+    /// entry — that <c>NetUserDel</c> leaves behind (issue #77). Goes through WMI's
+    /// <c>Win32_UserProfile</c>, the same mechanism PowerShell's <c>Remove-CimInstance</c> uses
+    /// and the one that worked cleanly by hand every time this session: it removes the directory
+    /// and the registry entry together, safely, unlike editing the registry key or deleting the
+    /// folder directly, either of which can miss junctions/reparse points or corrupt an unrelated
+    /// profile.
+    ///
+    /// Static and takes an explicit <see cref="ILogger"/> so this can be exercised in a test
+    /// without a live <see cref="AccountManager"/> instance (whose constructor touches real
+    /// accounts and the credential store on disk).
+    ///
+    /// Never throws: a missing profile — an account that was created but never logged into, so
+    /// nothing was ever materialized — is logged at Debug as the normal case it is. A profile
+    /// that exists but is still loaded or in use (for example a seat session that was not torn
+    /// down before its account was deleted) fails the WMI delete; that is logged as a Warning,
+    /// not thrown, because by the time this runs the Windows account is already gone and a
+    /// leaked profile is the lesser problem.
+    /// </summary>
+    internal static void RemoveUserProfile(string sid, string username, ILogger logger)
+    {
+        if (!SidPattern.IsMatch(sid))
+        {
+            // Defensive: sid always comes from TryResolveSid's own SecurityIdentifier.ToString(),
+            // never from external input, but it is about to be interpolated into a WQL query,
+            // and WQL has no parameterised-query API to fall back on instead.
+            logger.LogWarning(
+                "Refusing to look up a Windows profile for '{User}': '{Sid}' does not look like a SID.",
+                username, sid);
+            return;
+        }
+
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                $"SELECT * FROM Win32_UserProfile WHERE SID = '{sid}'");
+            using var results = searcher.Get();
+
+            using var profile = results.Cast<ManagementObject>().FirstOrDefault();
+            if (profile == null)
+            {
+                logger.LogDebug(
+                    "No Windows profile found for '{User}' (SID {Sid}) — nothing to remove. " +
+                    "Normal for an account that was never logged into.", username, sid);
+                return;
+            }
+
+            profile.Delete();
+            logger.LogInformation("Removed Windows profile for '{User}' (SID {Sid}).", username, sid);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Could not remove the Windows profile for '{User}' (SID {Sid}) — it may still be " +
+                "loaded or in use. The Windows account itself is already deleted; the profile " +
+                "directory and its ProfileList entry were left behind and may need manual " +
+                "cleanup.", username, sid);
+        }
     }
 
     /// <summary>
