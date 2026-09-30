@@ -66,6 +66,16 @@ export interface SeatRequest {
   fps?: number;
   launchApp?: string;
   nvencPreset?: NvencQualityPreset;
+  /** DPI scale override in percent. Leave it out to use the host default or the width. */
+  scaleFactor?: number;
+}
+
+/** POST /api/seats/{id}/scale. */
+export interface ScaleChange {
+  scaleFactor: number | null;
+  scaleFactorSource: ScaleFactorSource | null;
+  scaleFactorOverride: number | null;
+  sessionId: number | null;
 }
 
 export interface LaunchAppRequest {

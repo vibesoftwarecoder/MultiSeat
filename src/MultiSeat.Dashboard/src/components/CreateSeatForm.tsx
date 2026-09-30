@@ -3,6 +3,7 @@ import type { AccountInfo, NvencQualityPreset } from "../api/types";
 import { seats as seatsApi } from "../api/client";
 import { parseDimension, validateResolution } from "./resolution";
 import { FollowClientHint, ResolutionPicker } from "./ResolutionPicker";
+import { SCALE_AUTO, SCALE_CHOICES, scaleFromChoice } from "./scale";
 
 interface Props {
   accounts: AccountInfo[];
@@ -15,14 +16,17 @@ export function CreateSeatForm({ accounts, onCreated }: Props) {
   const [height, setHeight] = useState("1080");
   const [fps, setFps] = useState(60);
   const [nvencPreset, setNvencPreset] = useState<NvencQualityPreset>("Balanced");
+  const [scale, setScale] = useState(SCALE_AUTO);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const resolutionError = validateResolution(width, height);
+  // null is Auto; undefined cannot come from the drop-down, but is refused rather than sent.
+  const scaleFactor = scaleFromChoice(scale);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!accountName || resolutionError) return;
+    if (!accountName || resolutionError || scaleFactor === undefined) return;
 
     setCreating(true);
     setError(null);
@@ -33,6 +37,8 @@ export function CreateSeatForm({ accounts, onCreated }: Props) {
         height: parseDimension(height),
         fps,
         nvencPreset,
+        // Auto sends no scaleFactor at all, so the service picks it exactly as it always has.
+        ...(scaleFactor !== null && { scaleFactor }),
       });
       onCreated();
       setAccountName("");
@@ -73,6 +79,28 @@ export function CreateSeatForm({ accounts, onCreated }: Props) {
         <FollowClientHint />
       </div>
 
+      <div className="form-field">
+        Scale
+        <select
+          aria-label="Scale"
+          value={scale}
+          onChange={(e) => setScale(e.target.value)}
+          disabled={creating}
+        >
+          <option value={SCALE_AUTO}>Auto</option>
+          {SCALE_CHOICES.map((s) => (
+            <option key={s} value={String(s)}>
+              {s}%
+            </option>
+          ))}
+        </select>
+        <p className="field-hint">
+          Auto uses the host default, or picks from the width when there is none: 100% up to 1920
+          wide, 125% up to 2560, 150% up to 3200, and 200% above. Choose a value for a small,
+          sharp screen such as a tablet. It can be changed later on the seat's card.
+        </p>
+      </div>
+
       <label>
         FPS
         <select value={fps} onChange={(e) => setFps(Number(e.target.value))}>
@@ -104,7 +132,7 @@ export function CreateSeatForm({ accounts, onCreated }: Props) {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <button type="submit" disabled={creating || !accountName || resolutionError !== null}>
+      <button type="submit" disabled={creating || !accountName || resolutionError !== null || scaleFactor === undefined}>
         {creating ? "Provisioning..." : "Provision Seat"}
       </button>
     </form>

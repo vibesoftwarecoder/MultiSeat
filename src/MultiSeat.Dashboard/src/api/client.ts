@@ -16,6 +16,7 @@ import type {
   SeatServices,
   NvencQualityPreset,
   HostApolloInfo,
+  ScaleChange,
 } from "./types";
 
 const BASE = "/api";
@@ -124,6 +125,14 @@ export const seats = {
     request<{ width: number | null; height: number | null; sessionId: number | null }>(`/seats/${id}/resolution`, {
       method: "POST",
       body: JSON.stringify({ width, height }),
+    }),
+
+  // Sets the seat's DPI scale override, or clears it with null. When the scale in effect changes
+  // the service reconnects the session as it does for a resize, so a live stream drops briefly.
+  setScale: (id: string, scaleFactor: number | null) =>
+    request<ScaleChange>(`/seats/${id}/scale`, {
+      method: "POST",
+      body: JSON.stringify({ scaleFactor }),
     }),
 
   clients: (id: string) =>
