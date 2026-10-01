@@ -255,18 +255,10 @@ public sealed class SessionLauncher
                     and not WtsApi.WtsConnectState.Disconnected)
                     continue;
 
-                if (WtsApi.WTSQuerySessionInformationW(
-                        WtsApi.WTS_CURRENT_SERVER_HANDLE,
-                        current.SessionId,
-                        WtsApi.WtsInfoClass.WTSUserName,
-                        out var pUser, out _))
-                {
-                    var user = Marshal.PtrToStringUni(pUser);
-                    WtsApi.WTSFreeMemory(pUser);
-
-                    if (string.Equals(user, accountName, StringComparison.OrdinalIgnoreCase))
-                        return current.SessionId;
-                }
+                if (string.Equals(
+                        QuerySessionUserName(current.SessionId), accountName,
+                        StringComparison.OrdinalIgnoreCase))
+                    return current.SessionId;
             }
         }
         finally
@@ -449,18 +441,103 @@ public sealed class SessionLauncher
     }
 
     /// <summary>
-    /// Check if the Windows session is still active.
-    /// Uses WTS state as the authoritative source.
+    /// Whether the seat's session still exists AND is still logged on as the seat's account.
+    /// Active or Disconnected both count as alive.
+    ///
+    /// An exited session anchor does not make the session dead: the console-side mstsc keeps
+    /// it Active. The anchor is looked after separately, by TakeExitedSessionAnchor and
+    /// RelaunchSessionAnchorAsync. This used to log a Warning here instead, on every 5-second
+    /// check for as long as the session lived.
     /// </summary>
-    public bool IsSessionAlive(int sessionId)
+    public bool IsSessionAlive(int sessionId, string accountName) =>
+        CheckSession(sessionId, accountName).Verdict
+            is SessionVerdict.Active or SessionVerdict.Disconnected;
+
+    /// <summary>What a seat's session number refers to now. See <see cref="ClassifySession"/>.</summary>
+    internal SessionCheck CheckSession(int sessionId, string accountName) =>
+        ClassifySession(sessionId, accountName, FindSessionState, QuerySessionUserName);
+
+    /// <summary>What a session number held by a seat refers to now.</summary>
+    internal enum SessionVerdict
     {
-        // Always check WTS state as the authoritative source
-        // An exited session anchor does not make the session dead: the console-side mstsc keeps
-        // it Active. The anchor is looked after separately, by TakeExitedSessionAnchor and
-        // RelaunchSessionAnchorAsync. This used to log a Warning here instead, on every 5-second
-        // check for as long as the session lived.
-        return FindSessionState(sessionId) is WtsApi.WtsConnectState.Active
-            or WtsApi.WtsConnectState.Disconnected;
+        /// <summary>No such session, or one that is no longer Active or Disconnected.</summary>
+        Gone,
+
+        /// <summary>
+        /// The session exists, but it is logged on as a different account, or as nobody. The
+        /// number is someone else's now, so nothing done for the seat may touch it.
+        /// </summary>
+        NotOurs,
+
+        /// <summary>The seat's own session, Disconnected.</summary>
+        Disconnected,
+
+        /// <summary>The seat's own session, Active.</summary>
+        Active,
+    }
+
+    /// <summary>The verdict, plus the account the session was found logged on as, for the log.</summary>
+    internal readonly record struct SessionCheck(SessionVerdict Verdict, string? Owner);
+
+    /// <summary>
+    /// Decide what <paramref name="sessionId"/> refers to for a seat of
+    /// <paramref name="accountName"/>.
+    ///
+    /// A seat remembers its session only by number. Checking the number's state alone, as this
+    /// used to, would accept a session that had ended and whose number Windows had handed to
+    /// another logon - another seat, say - as still being this seat's. Everything then done "for
+    /// the seat" (disconnect, log off, launch Apollo) would land on someone else. So the
+    /// session's user is checked too (issue #87). Whether Windows reuses numbers like this in
+    /// practice has not been seen here; this is a guard, not the fix for a reproduced fault.
+    ///
+    /// The lookups are passed in so the decision can be tested without a Windows session.
+    /// <paramref name="queryUserName"/> answers null when the query itself failed. That is
+    /// treated as no information - the state decides, as it did before - rather than as a
+    /// different owner, so a failing call cannot put a healthy seat into Error. An empty name
+    /// is an answer: nobody is logged on, so it is not the seat's session.
+    /// </summary>
+    internal static SessionCheck ClassifySession(
+        int sessionId,
+        string accountName,
+        Func<int, WtsApi.WtsConnectState?> queryState,
+        Func<int, string?> queryUserName)
+    {
+        if (sessionId < 0)
+            return new(SessionVerdict.Gone, null);
+
+        var state = queryState(sessionId);
+        if (state is not (WtsApi.WtsConnectState.Active or WtsApi.WtsConnectState.Disconnected))
+            return new(SessionVerdict.Gone, null);
+
+        var owner = queryUserName(sessionId);
+        if (owner is not null && !string.Equals(owner, accountName, StringComparison.OrdinalIgnoreCase))
+            return new(SessionVerdict.NotOurs, owner);
+
+        return new(state == WtsApi.WtsConnectState.Active
+            ? SessionVerdict.Active
+            : SessionVerdict.Disconnected, owner);
+    }
+
+    /// <summary>
+    /// The user name logged on to a session: empty when nobody is, null when the query failed.
+    /// </summary>
+    private static string? QuerySessionUserName(int sessionId)
+    {
+        if (!WtsApi.WTSQuerySessionInformationW(
+                WtsApi.WTS_CURRENT_SERVER_HANDLE,
+                sessionId,
+                WtsApi.WtsInfoClass.WTSUserName,
+                out var pUser, out _))
+            return null;
+
+        try
+        {
+            return Marshal.PtrToStringUni(pUser) ?? string.Empty;
+        }
+        finally
+        {
+            WtsApi.WTSFreeMemory(pUser);
+        }
     }
 
     /// <summary>
@@ -1778,9 +1855,13 @@ public sealed class SessionLauncher
             FindSessionState(sessionId));
     }
 
-    /// <summary>Returns true if the session exists and is in Active state (not Disconnected).</summary>
-    public bool IsSessionActive(int sessionId) =>
-        FindSessionState(sessionId) == WtsApi.WtsConnectState.Active;
+    /// <summary>
+    /// True if the session exists, is in Active state (not Disconnected), and is still logged on
+    /// as <paramref name="accountName"/>. See <see cref="ClassifySession"/> for why the account
+    /// is checked.
+    /// </summary>
+    public bool IsSessionActive(int sessionId, string accountName) =>
+        CheckSession(sessionId, accountName).Verdict == SessionVerdict.Active;
 
     /// <summary>
     /// True when a LogonUI.exe process runs in <paramref name="sessionId"/>. LogonUI holds the

@@ -122,7 +122,7 @@ public sealed class SessionHealthCheck
                 takeExitedAnchor: () => _sessionLauncher.TakeExitedSessionAnchor(sessionId),
                 seatStillHoldsSession: () => IsWorthChecking(seat.Status)
                     && seat.SessionId == sessionId
-                    && _sessionLauncher.IsSessionActive(sessionId),
+                    && _sessionLauncher.IsSessionActive(sessionId, seat.AccountName),
                 relaunch: c => _sessionLauncher.RelaunchSessionAnchorAsync(sessionId, seat.AccountName, c),
                 ct);
 
@@ -308,7 +308,7 @@ public sealed class SessionHealthCheck
         // on its own: it is a guess about how long the session takes, and losing that
         // race produces exactly this loop.
         if (!await WaitForSessionActiveAsync(
-                id => _sessionLauncher.IsSessionActive(id), seat.SessionId, ct))
+                id => _sessionLauncher.IsSessionActive(id, seat.AccountName), seat.SessionId, ct))
         {
             _logger.LogWarning(
                 "Seat {Id}: session {Sid} did not become ACTIVE within 10s after reconnect — aborting",
@@ -352,10 +352,26 @@ public sealed class SessionHealthCheck
 
     private async Task<bool> CheckSeatAsync(SeatInfo seat, CancellationToken ct)
     {
-        // ── Check 1: Is the Windows session still alive? ──────────
-        var sessionAlive = _sessionLauncher.IsSessionAlive(seat.SessionId);
+        // ── Check 1: Is the Windows session still alive, and still the seat's? ──────────
+        var session = _sessionLauncher.CheckSession(seat.SessionId, seat.AccountName);
 
-        if (!sessionAlive)
+        if (session.Verdict == SessionLauncher.SessionVerdict.NotOurs)
+        {
+            // The number is logged on as another account now (or as nobody), so the seat's own
+            // session is gone just the same. Unlike the branch below, do NOT call
+            // DisconnectSession: the mstsc tracked under this number may belong to whoever holds
+            // it now, and killing it would knock that session over instead.
+            _logger.LogWarning(
+                "Seat {Id}: Windows session {Sid} is now logged on as '{Owner}', not {Account}; " +
+                "the seat's own session has ended. Leaving that session alone",
+                seat.Id, seat.SessionId, session.Owner, seat.AccountName);
+            seat.TransitionTo(SeatStatus.Error, _logger);
+            seat.ErrorMessage =
+                $"Windows session {seat.SessionId} no longer belongs to {seat.AccountName}; the seat's session ended";
+            return true;
+        }
+
+        if (session.Verdict == SessionLauncher.SessionVerdict.Gone)
         {
             _logger.LogWarning(
                 "Seat {Id}: Windows session {Sid} no longer active",
@@ -373,7 +389,7 @@ public sealed class SessionHealthCheck
         // Sessions go Disconnected when the PC sleeps (mstsc drops). A Disconnected
         // session breaks QueryDisplayConfig / DXGI, so Apollo cannot stream.
         // Reconnect via mstsc to restore Active state, then restart Apollo.
-        if (!_sessionLauncher.IsSessionActive(seat.SessionId))
+        if (session.Verdict != SessionLauncher.SessionVerdict.Active)
         {
             // Information, not Warning: at this point the drop may be our own. A resize or rescale
             // disconnects the session on purpose while holding the lifecycle gate, so every one of
@@ -405,7 +421,7 @@ public sealed class SessionHealthCheck
                     // Connecting is what this check just set. Anything else means another
                     // operation (a teardown, say) has taken the seat over while we waited.
                     seatStillOurs: () => seat.Status == SeatStatus.Connecting,
-                    sessionActiveNow: () => _sessionLauncher.IsSessionActive(seat.SessionId),
+                    sessionActiveNow: () => _sessionLauncher.IsSessionActive(seat.SessionId, seat.AccountName),
                     rescue: c => RescueSessionUnderGateAsync(seat, c),
                     ct);
 
