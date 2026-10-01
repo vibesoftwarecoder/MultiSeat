@@ -27,6 +27,13 @@ public sealed class SessionHealthCheck
     private readonly ClientResolutionFollower _resolutionFollower;
     private readonly SeatLifecycleGate _lifecycleGate;
 
+    /// <summary>
+    /// Asked for a reconciliation pass when a seat's session is found gone, so a seat with
+    /// auto-start on is set up again instead of staying in Error (issue #87). Optional so tests
+    /// that build this class can leave it out.
+    /// </summary>
+    private readonly SeatReconcileRequests? _reconcileRequests;
+
     public SessionHealthCheck(
         ILogger<SessionHealthCheck> logger,
         SessionLauncher sessionLauncher,
@@ -34,8 +41,10 @@ public sealed class SessionHealthCheck
         SeatManager seatManager,
         OnConnectAppLauncher onConnectApps,
         ClientResolutionFollower resolutionFollower,
-        SeatLifecycleGate lifecycleGate)
+        SeatLifecycleGate lifecycleGate,
+        SeatReconcileRequests? reconcileRequests = null)
     {
+        _reconcileRequests = reconcileRequests;
         _logger = logger;
         _sessionLauncher = sessionLauncher;
         _apolloManager = apolloManager;
@@ -92,8 +101,10 @@ public sealed class SessionHealthCheck
     /// ⚠️ That last one has a consequence worth stating, because it caused a real bug (PR #22):
     /// nothing here ever takes a seat OUT of Error, and the Apollo-restart check below only runs
     /// for a seat this method admits. So a seat that lands in Error stays broken until something
-    /// outside this class hands it back - which is what POST /api/seats/{id}/session-reconnect now
-    /// does. Widening this set is not the fix; it would have the check fighting a teardown.
+    /// outside this class hands it back - POST /api/seats/{id}/session-reconnect, or, for a seat
+    /// with auto-start on, a <see cref="SeatReconciler"/> pass, which this class asks for when a
+    /// session is lost (issue #87). Widening this set is not the fix; it would have the check
+    /// fighting a teardown.
     /// </summary>
     internal static bool IsWorthChecking(SeatStatus status) =>
         status is not (SeatStatus.Idle or SeatStatus.Provisioning
@@ -368,6 +379,7 @@ public sealed class SessionHealthCheck
             seat.TransitionTo(SeatStatus.Error, _logger);
             seat.ErrorMessage =
                 $"Windows session {seat.SessionId} no longer belongs to {seat.AccountName}; the seat's session ended";
+            RequestReconcileAfterSessionLoss(seat);
             return true;
         }
 
@@ -382,6 +394,7 @@ public sealed class SessionHealthCheck
             try { _sessionLauncher.DisconnectSession(seat.SessionId); } catch { /* best effort */ }
             seat.TransitionTo(SeatStatus.Error, _logger);
             seat.ErrorMessage = "Windows session terminated unexpectedly";
+            RequestReconcileAfterSessionLoss(seat);
             return true;
         }
 
@@ -576,6 +589,15 @@ public sealed class SessionHealthCheck
 
         return false; // no state change
     }
+
+    /// <summary>
+    /// A seat just went to Error because its session is gone. Ask for a reconciliation pass,
+    /// which sets the seat up again if it has auto-start on and otherwise leaves it as it is.
+    /// This is also what recovers seats when no resume notification arrives, for whatever reason.
+    /// </summary>
+    private void RequestReconcileAfterSessionLoss(SeatInfo seat) =>
+        _reconcileRequests?.Request(
+            $"seat {seat.Id} ({seat.AccountName}) lost its Windows session", includeMissing: false);
 
     private static bool IsProcessAlive(int pid)
     {

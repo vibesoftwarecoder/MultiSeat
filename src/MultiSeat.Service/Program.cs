@@ -272,6 +272,13 @@ builder.Services.AddWindowsService(options =>
     options.ServiceName = "MultiSeatService";
 });
 
+// The same lifetime with power notifications, so a resume from sleep or hibernation re-checks the
+// seats (issue #87). Registered after AddWindowsService so it is the IHostLifetime the host uses,
+// and only when running as a service, like the lifetime it replaces.
+builder.Services.AddSingleton<SeatReconcileRequests>();
+if (Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService())
+    builder.Services.AddSingleton<IHostLifetime, PowerAwareServiceLifetime>();
+
 // ── Core services (singletons — one per host lifetime) ───────────────
 builder.Services.AddSingleton<AccountManager>();
 builder.Services.AddSingleton<SessionLauncher>();
@@ -302,6 +309,8 @@ builder.Services.AddSingleton<SeatPresetStore>();
 builder.Services.AddSingleton<GpuMonitor>();
 builder.Services.AddSingleton<MetricsCollector>();
 builder.Services.AddSingleton<SessionHealthCheck>();
+builder.Services.AddSingleton<AutoStartProvisioner>();
+builder.Services.AddSingleton<SeatReconciler>();
 
 // Shared game library + emulator config seeders (register each seeder as IEmulatorConfigSeeder
 // so SeatManager picks them up; add Dolphin/PCSX2 seeders here later with no other changes).

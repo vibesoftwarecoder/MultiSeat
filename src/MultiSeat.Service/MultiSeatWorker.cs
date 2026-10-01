@@ -31,7 +31,17 @@ public sealed class MultiSeatWorker : BackgroundService
     private readonly SeatPresetStore _presets;
     private readonly SharedLibraryProvisioner _sharedLibrary;
     private readonly Accounts.AccountManager _accounts;
+    private readonly AutoStartProvisioner _autoStart;
+    private readonly SeatReconciler _reconciler;
+    private readonly SeatReconcileRequests _reconcileRequests;
     private readonly IServiceProvider _services;
+
+    /// <summary>
+    /// Startup auto-start, then each reconciliation pass, one at a time. Run beside the health
+    /// check rather than inside its loop: a pass that retries a failing seat can take minutes,
+    /// and the other seats' health checks must not wait for it.
+    /// </summary>
+    private Task _recovery = Task.CompletedTask;
 
     private WebApplication? _apiApp;
 
@@ -48,9 +58,15 @@ public sealed class MultiSeatWorker : BackgroundService
         SeatPresetStore presets,
         SharedLibraryProvisioner sharedLibrary,
         Accounts.AccountManager accounts,
+        AutoStartProvisioner autoStart,
+        SeatReconciler reconciler,
+        SeatReconcileRequests reconcileRequests,
         IServiceProvider services)
     {
         _accounts = accounts;
+        _autoStart = autoStart;
+        _reconciler = reconciler;
+        _reconcileRequests = reconcileRequests;
         _logger = logger;
         _options = options.Value;
         _seatManager = seatManager;
@@ -164,7 +180,9 @@ public sealed class MultiSeatWorker : BackgroundService
         _logger.LogInformation("API server listening on port {Port}", _options.ApiPort);
 
         // ── Step 5: Auto-provision seats ─────────────────────────────
-        await AutoProvisionSeatsAsync(stoppingToken);
+        // In the background, so the health check starts at once for seats that come up while
+        // others are still being retried. The health check skips seats that are provisioning.
+        _recovery = Task.Run(() => AutoProvisionSeatsAsync(stoppingToken), stoppingToken);
 
         // ── Step 6: Health-check loop ────────────────────────────────
         using var timer = new PeriodicTimer(
@@ -172,6 +190,11 @@ public sealed class MultiSeatWorker : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            // A resume, or a seat that lost its session, asks for a reconciliation pass
+            // (issue #87). Start one when the previous recovery work has finished; requests made
+            // meanwhile wait for the next tick.
+            StartReconcileIfDue(stoppingToken);
+
             try
             {
                 await _healthCheck.CheckAllSeatsAsync(_seatManager, stoppingToken);
@@ -187,27 +210,49 @@ public sealed class MultiSeatWorker : BackgroundService
 
     private async Task AutoProvisionSeatsAsync(CancellationToken ct)
     {
-        var autoStart = _presets.GetAutoStart();
-        if (autoStart.Count == 0) return;
+        try
+        {
+            var autoStart = _presets.GetAutoStart();
+            if (autoStart.Count == 0) return;
 
-        _logger.LogInformation("Auto-provisioning {Count} seat(s) from presets", autoStart.Count);
+            _logger.LogInformation("Auto-provisioning {Count} seat(s) from presets", autoStart.Count);
 
-        foreach (var preset in autoStart)
+            // One at a time, as before; each one retries a failed attempt (issue #87).
+            foreach (var preset in autoStart)
+                await _autoStart.ProvisionAsync(preset, "service startup", ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Shutdown.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Auto-provisioning at startup failed");
+        }
+    }
+
+    private void StartReconcileIfDue(CancellationToken ct)
+    {
+        if (!_recovery.IsCompleted) return;
+
+        var pass = _reconcileRequests.TakeDue(DateTimeOffset.UtcNow);
+        if (pass is null) return;
+
+        _recovery = Task.Run(async () =>
         {
             try
             {
-                var seat = await _seatManager.ProvisionSeatAsync(RequestFor(preset), ct);
-
-                seat.AutoStart = true;
-                _logger.LogInformation(
-                    "Auto-provisioned seat '{Account}' (ID {Id})", preset.AccountName, seat.Id);
+                await _reconciler.ReconcileAsync(pass, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Shutdown.
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
-                    "Failed to auto-provision seat '{Account}'", preset.AccountName);
+                _logger.LogError(ex, "Seat reconciliation failed ({Reasons})", pass.Reasons);
             }
-        }
+        }, ct);
     }
 
     /// <summary>
@@ -217,6 +262,7 @@ public sealed class MultiSeatWorker : BackgroundService
     internal static SeatRequest RequestFor(SeatPreset preset) => new()
     {
         AccountName = preset.AccountName,
+        AutoStart = preset.AutoStart,
         Width = preset.Width,
         Height = preset.Height,
         Fps = preset.Fps,
