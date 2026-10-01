@@ -164,6 +164,7 @@ Then open the dashboard, click the **Settings** gear icon (top-right), paste the
 1. Go to the **Accounts** tab — create a Windows local account for each seat (e.g., `MultiSeat01`, `MultiSeat02`).
 2. Go to the **Seats** tab — click **+ New Seat**, select an account, and choose resolution and FPS.
 3. Wait ~15 seconds for the seat to reach **Ready** status.
+4. Turn on **Auto-start** for every seat you want to keep, in the New Seat form or later on the seat's card. Seats live in the service's memory, so a seat with auto-start off is gone after the service or the PC restarts. See **A seat is gone after a restart, a reboot or hibernation** under Troubleshooting.
 
 ### Step 7 — Connect with Moonlight
 
@@ -314,6 +315,16 @@ Default `PortBase` = 48100 (each seat reserves a 30-port block). Seat 0 = 48100,
 
 **Moonlight shows "Failed to initialize video capture"**
 The seat's RDP session became Disconnected. The health check will recover it automatically within ~5 seconds. If it persists, check the Apollo log under `C:\ProgramData\MultiSeat\apollo\`.
+
+**A seat is gone after a restart, a reboot or hibernation**
+Seats are kept in the service's memory. Only a seat with **Auto-start** on is saved, to `C:\ProgramData\MultiSeat\seat-presets.json`, and set up again by itself. Turn it on in the New Seat form or on the seat's card.
+
+- **Restart or reboot.** When the service starts, it sets up each auto-start seat. A failed attempt is tried again, up to three attempts, 15 and then 30 seconds apart. The Event Log shows every attempt and the final result.
+- **Sleep or hibernation.** These do not restart the service: Windows suspends it and resumes it. About 15 seconds after the PC resumes, the service checks every seat again. An auto-start seat whose Windows session did not survive, or that is in Error, is torn down and set up again. A seat without auto-start is marked Error with the reason. The same check also runs whenever the health check finds that a seat's session has ended, so recovery does not depend on the resume notice alone. Each seat is rebuilt automatically at most three times an hour.
+- **Windows Fast Startup.** With Fast Startup on, Shut down logs off user sessions and hibernates the system session, where the service runs. The next power-on then resumes the service instead of starting it fresh, and every seat's session has been logged off. The check above handles this the same way. If a seat still does not come back, tear it down and create it again, or restart the MultiSeat service. To rule Fast Startup out, use Restart instead of Shut down, or turn it off under Control Panel > Power Options > *Choose what the power buttons do*.
+- **Tearing a seat down does not turn its auto-start off.** A torn-down auto-start seat comes back when the service starts or the PC resumes. Turn auto-start off first to remove a seat for good.
+
+If a seat does not come back, the Event Log says why: look for lines starting `Auto-start (` and `Seat reconciliation` (see **Where the logs are** below).
 
 **Seat stuck at Provisioning**
 Check the service log (see **Where the logs are** below). Common causes: SudoVDA not installed, Apollo path wrong in `appsettings.json`, or insufficient virtual displays.
