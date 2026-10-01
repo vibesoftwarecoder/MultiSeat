@@ -13,6 +13,12 @@ const PROVISION_STEPS: { key: string; label: string }[] = [
   { key: "DetectDisplay", label: "Display ID" },
 ];
 
+// Seats live in the service's memory. Only one with auto-start on is saved and set up again when
+// the service or the PC restarts (issue #87).
+const AUTO_START_HINT =
+  "Keep this seat after a restart or reboot. On: the seat is saved and set up again by itself " +
+  "when the MultiSeat service starts. Off: a restart removes it and it has to be created again.";
+
 const STATUS_CARD_CLASS: Partial<Record<string, string>> = {
   Streaming:    "card--streaming",
   Ready:        "card--ready",
@@ -236,12 +242,13 @@ export function SeatCard({ seat, onUpdate }: Props) {
         {showControls && (
           <div className="controls-row">
             <div className="control-group">
-              <span className="stat-label">Auto-start</span>
+              <span className="stat-label" title={AUTO_START_HINT}>Auto-start</span>
               <button
                 className={`toggle-btn${seat.autoStart ? " toggle-btn--on" : ""}`}
                 onClick={handleAutoStart}
                 disabled={autoStartLoading}
-                title={seat.autoStart ? "Disable auto-start" : "Enable auto-start"}
+                aria-pressed={seat.autoStart}
+                title={AUTO_START_HINT}
               >
                 {autoStartLoading ? "..." : seat.autoStart ? "On" : "Off"}
               </button>
@@ -267,6 +274,14 @@ export function SeatCard({ seat, onUpdate }: Props) {
               </div>
             </div>
           </div>
+        )}
+
+        {showControls && (
+          <p className="field-hint" style={{ marginTop: 4 }}>
+            {seat.autoStart
+              ? "Auto-start is on: this seat is set up again after a restart or reboot."
+              : "Auto-start is off: a restart or reboot removes this seat. Turn it on to keep it."}
+          </p>
         )}
 
         {/* Live resize: only once the seat has a working session to reconnect (issue #70) */}

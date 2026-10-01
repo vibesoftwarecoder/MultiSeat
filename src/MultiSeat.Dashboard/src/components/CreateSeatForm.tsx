@@ -1,5 +1,5 @@
-import { useState } from "react";
-import type { AccountInfo, NvencQualityPreset } from "../api/types";
+import { useEffect, useState } from "react";
+import type { AccountInfo, NvencQualityPreset, SeatPreset } from "../api/types";
 import { seats as seatsApi } from "../api/client";
 import { parseDimension, validateResolution } from "./resolution";
 import { FollowClientHint, ResolutionPicker } from "./ResolutionPicker";
@@ -17,8 +17,29 @@ export function CreateSeatForm({ accounts, onCreated }: Props) {
   const [fps, setFps] = useState(60);
   const [nvencPreset, setNvencPreset] = useState<NvencQualityPreset>("Balanced");
   const [scale, setScale] = useState(SCALE_AUTO);
+  // Off by default, matching the API. Switched on when the chosen account already has a saved
+  // auto-start preset, so creating the seat does not quietly delete it (issue #87).
+  const [autoStart, setAutoStart] = useState(false);
+  const [presets, setPresets] = useState<SeatPreset[]>([]);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    seatsApi.presets().then(setPresets).catch(() => {
+      // Without the list the toggle just starts off, which is the API default anyway.
+    });
+  }, []);
+
+  const savedPreset = presets.find(
+    (p) => p.autoStart && p.accountName.toLowerCase() === accountName.toLowerCase(),
+  );
+
+  const chooseAccount = (name: string) => {
+    setAccountName(name);
+    setAutoStart(
+      presets.some((p) => p.autoStart && p.accountName.toLowerCase() === name.toLowerCase()),
+    );
+  };
 
   const resolutionError = validateResolution(width, height);
   // null is Auto; undefined cannot come from the drop-down, but is refused rather than sent.
@@ -37,6 +58,8 @@ export function CreateSeatForm({ accounts, onCreated }: Props) {
         height: parseDimension(height),
         fps,
         nvencPreset,
+        // Always sent, so the seat ends up exactly as the toggle shows.
+        autoStart,
         // Auto sends no scaleFactor at all, so the service picks it exactly as it always has.
         ...(scaleFactor !== null && { scaleFactor }),
       });
@@ -55,7 +78,7 @@ export function CreateSeatForm({ accounts, onCreated }: Props) {
 
       <label>
         Account
-        <select value={accountName} onChange={(e) => setAccountName(e.target.value)}>
+        <select value={accountName} onChange={(e) => chooseAccount(e.target.value)}>
           <option value="">Select account...</option>
           {accounts.map((a) => (
             <option key={a.username} value={a.username}>
@@ -129,6 +152,27 @@ export function CreateSeatForm({ accounts, onCreated }: Props) {
           ))}
         </div>
       </label>
+
+      <div className="form-field">
+        Auto-start
+        <button
+          type="button"
+          className={`toggle-btn${autoStart ? " toggle-btn--on" : ""}`}
+          style={{ alignSelf: "flex-start" }}
+          aria-pressed={autoStart}
+          onClick={() => setAutoStart(!autoStart)}
+          disabled={creating}
+        >
+          {autoStart ? "On" : "Off"}
+        </button>
+        <p className="field-hint">
+          Keep this seat after a restart or reboot. Seats are not saved otherwise: when the
+          MultiSeat service or the PC restarts, a seat with auto-start off is gone and has to be
+          created again. With it on, the seat is set up again by itself whenever the service
+          starts. It can be changed later on the seat's card.
+          {savedPreset && " This account already has a saved auto-start seat, so this starts on."}
+        </p>
+      </div>
 
       {error && <div className="error-banner">{error}</div>}
 

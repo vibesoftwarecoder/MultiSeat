@@ -164,14 +164,7 @@ public static class SeatEndpoints
                 var seat = mgr.GetSeat(id);
                 if (seat is null) return Results.NotFound();
 
-                seat.AutoStart = req.Enabled;
-
-                if (req.Enabled)
-                    presets.Upsert(SeatPreset.ForAutoStart(seat));
-                else
-                {
-                    presets.DeleteByAccount(seat.AccountName);
-                }
+                SetAutoStart(seat, req.Enabled, presets);
 
                 return Results.Ok(new { autoStart = seat.AutoStart });
             });
@@ -338,8 +331,21 @@ public static class SeatEndpoints
     /// <summary>
     /// POST /api/seats. A method rather than a lambda so tests can call the real handler.
     /// </summary>
-    internal static async Task<IResult> CreateSeatAsync(
-        SeatRequest request, SeatManager mgr, CancellationToken ct)
+    internal static Task<IResult> CreateSeatAsync(
+        SeatRequest request, SeatManager mgr, SeatPresetStore presets, CancellationToken ct) =>
+        // A lambda rather than the method group: the group would dereference mgr here, before
+        // the validation below has had its chance to refuse the request.
+        CreateSeatCoreAsync(request, (r, c) => mgr.ProvisionSeatAsync(r, c), presets, ct);
+
+    /// <summary>
+    /// The create handler with provisioning passed in, so tests can check what happens around a
+    /// provision (validation first, autostart saved only after success) without a Windows session.
+    /// </summary>
+    internal static async Task<IResult> CreateSeatCoreAsync(
+        SeatRequest request,
+        Func<SeatRequest, CancellationToken, Task<SeatInfo>> provision,
+        SeatPresetStore presets,
+        CancellationToken ct)
     {
         if (!ApiInputValidation.IsValidAccountName(request.AccountName))
             return ApiInputValidation.AccountNameError();
@@ -351,7 +357,22 @@ public static class SeatEndpoints
 
         try
         {
-            var seat = await mgr.ProvisionSeatAsync(request, ct);
+            var seat = await provision(request, ct);
+
+            // Only after the seat is Ready. A provision that failed throws past this, so a seat
+            // that never came up is not saved to start again at every boot.
+            if (request.AutoStart is { } autoStart)
+            {
+                SetAutoStart(seat, autoStart, presets);
+            }
+            else
+            {
+                // The caller did not say. Leave any saved preset alone, as before this field
+                // existed, but report it: a seat that will come back after a restart must not
+                // show its auto-start toggle as off.
+                seat.AutoStart = presets.GetByAccount(seat.AccountName)?.AutoStart == true;
+            }
+
             return Results.Created($"/api/seats/{seat.Id}", seat);
         }
         // No ArgumentException catch on purpose: the scale is validated above, and a broad catch
@@ -361,6 +382,22 @@ public static class SeatEndpoints
         {
             return ApiErrors.ToResult(ex);
         }
+    }
+
+    /// <summary>
+    /// Turn a live seat's autostart on or off. The one place this is done, so the toggle on the
+    /// seat card (PUT /api/seats/{id}/autostart) and the choice made at creation (POST
+    /// /api/seats) cannot drift apart. On saves the seat's full preset through
+    /// <see cref="SeatPreset.ForAutoStart"/>; off deletes the account's preset.
+    /// </summary>
+    internal static void SetAutoStart(SeatInfo seat, bool enabled, SeatPresetStore presets)
+    {
+        seat.AutoStart = enabled;
+
+        if (enabled)
+            presets.Upsert(SeatPreset.ForAutoStart(seat));
+        else
+            presets.DeleteByAccount(seat.AccountName);
     }
 
     /// <summary>

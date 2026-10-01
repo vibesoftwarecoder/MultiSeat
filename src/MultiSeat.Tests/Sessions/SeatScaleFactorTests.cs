@@ -151,7 +151,7 @@ public class SeatScaleFactorTests : IDisposable
         // throw instead of returning a result.
         var result = await SeatEndpoints.CreateSeatAsync(
             new SeatRequest { AccountName = "GuestTest", ScaleFactor = 110 },
-            mgr: null!, CancellationToken.None);
+            mgr: null!, presets: null!, CancellationToken.None);
 
         Assert.Equal(StatusCodes.Status400BadRequest,
             Assert.IsAssignableFrom<IStatusCodeHttpResult>(result).StatusCode);

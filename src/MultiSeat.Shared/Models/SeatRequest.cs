@@ -42,6 +42,19 @@ public sealed class SeatRequest
     /// would give the user a size they did not ask for without saying so.
     /// </summary>
     public int? ScaleFactor { get; init; }
+
+    /// <summary>
+    /// Whether the seat comes back by itself after the service or the PC restarts (issue #87).
+    /// Seats live in memory, so without this a restart loses the seat and it has to be created
+    /// again. True saves the seat to the autostart presets once it is Ready, exactly as
+    /// PUT /api/seats/{id}/autostart does. False removes any saved preset for the account.
+    ///
+    /// Null, the default, changes nothing: a caller that does not know about this field keeps
+    /// the old behaviour, where a preset saved earlier for the account stays as it is. The seat
+    /// then reports whether such a preset exists, so the dashboard shows what will really happen
+    /// at the next restart.
+    /// </summary>
+    public bool? AutoStart { get; init; }
 }
 
 /// <summary>

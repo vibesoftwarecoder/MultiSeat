@@ -68,6 +68,11 @@ export interface SeatRequest {
   nvencPreset?: NvencQualityPreset;
   /** DPI scale override in percent. Leave it out to use the host default or the width. */
   scaleFactor?: number;
+  /**
+   * Bring the seat back by itself after the service or the PC restarts. true saves it, false
+   * removes any saved preset for the account, and leaving it out keeps whatever is saved.
+   */
+  autoStart?: boolean;
 }
 
 /** POST /api/seats/{id}/scale. */
