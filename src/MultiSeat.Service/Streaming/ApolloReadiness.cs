@@ -29,8 +29,14 @@ internal static class ApolloReadiness
                 if (!isAlive())
                     throw new InvalidOperationException("Apollo exited before its serverinfo API became ready.");
 
+                // This only bounds a single HUNG attempt before the loop retries; it does not
+                // bound how fast a healthy exchange completes (that's typically milliseconds).
+                // A real end-to-end test (ApolloReadinessCleanupTests) drives this over a genuine
+                // loopback socket and flaked under CI contention at 1s - widening it costs nothing
+                // in the real failure case this guards (5-6 retries instead of ~25 inside the 30s
+                // overall StartupTimeout is still ample).
                 using var attempt = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
-                attempt.CancelAfter(TimeSpan.FromSeconds(1));
+                attempt.CancelAfter(TimeSpan.FromSeconds(5));
                 try
                 {
                     using var response = await (client ?? Client).GetAsync(endpoint, attempt.Token);
