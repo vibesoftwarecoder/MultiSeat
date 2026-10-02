@@ -22,7 +22,11 @@ public class ApolloReadinessTests
             if (calls == 1) throw new HttpRequestException("Connection refused");
             return Task.FromResult(Response(ServerInfo(calls == 2 ? Guid.NewGuid() : SeatId)));
         }));
-        await ApolloReadiness.WaitAsync(Endpoint, SeatId, () => true, default, client, TimeSpan.FromSeconds(3));
+        // This only needs to outlast two 200ms poll delays (~400ms) to succeed; the generous
+        // budget is slack for a loaded CI runner's thread-pool/timer jitter, not an expectation
+        // of how long this normally takes. A tight budget here flaked under CI contention
+        // (observed: deadline nominally 3s, actual elapsed 6s by the time cancellation unwound).
+        await ApolloReadiness.WaitAsync(Endpoint, SeatId, () => true, default, client, TimeSpan.FromSeconds(15));
         Assert.Equal(3, calls);
     }
 
