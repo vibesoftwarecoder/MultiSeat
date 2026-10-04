@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using MultiSeat.Service.Input;
+using MultiSeat.Service.Interop;
 
 namespace MultiSeat.Service.Diagnostics;
 
@@ -18,7 +19,7 @@ namespace MultiSeat.Service.Diagnostics;
 /// </summary>
 public static class HidHideInspector
 {
-    public static int Report(string cliPath)
+    public static int Report(string cliPath, IReadOnlyList<string>? excludedPhysicalPadDevicePaths = null)
     {
         var cli = new HidHideCli(NullLogger.Instance, cliPath);
 
@@ -123,6 +124,70 @@ public static class HidHideInspector
             Console.WriteLine($"    rules a jail to session N would write:");
             foreach (var rule in HidHideSessionJail.ConfineAll(pad, 99))
                 Console.WriteLine($"       --dev-hide \"{rule.Replace("!99", "!<N>")}\"");
+        }
+
+        // ── Configured physical pad exclusions (issue #92) ──────────────
+        // Ask the machine the same way as everything else here, rather than reason about whether
+        // MultiSeat:ExcludedPhysicalPadDevicePaths is doing what it should.
+        var excluded = excludedPhysicalPadDevicePaths ?? [];
+        if (excluded.Count > 0)
+        {
+            var consoleSessionId = (int)Kernel32.WTSGetActiveConsoleSessionId();
+            var rulesBySession = hidden.Select(HidHideSessionJail.Split).ToList();
+
+            Console.WriteLine();
+            Console.WriteLine($"Configured physical pad exclusions: {excluded.Count} " +
+                "(MultiSeat:ExcludedPhysicalPadDevicePaths)");
+            Console.WriteLine(consoleSessionId > 0
+                ? $"Live console session: {consoleSessionId}"
+                : $"Live console session: NONE (WTSGetActiveConsoleSessionId returned {consoleSessionId}) " +
+                  "— nothing can be confined to it right now");
+
+            foreach (var configuredPath in excluded)
+            {
+                var device = pads.FirstOrDefault(d =>
+                    configuredPath.Equals(d.DeviceInstancePath, StringComparison.OrdinalIgnoreCase) ||
+                    configuredPath.Equals(d.BaseContainerDeviceInstancePath, StringComparison.OrdinalIgnoreCase));
+
+                Console.WriteLine();
+                Console.WriteLine($"  {configuredPath}");
+
+                if (device is null)
+                {
+                    Console.WriteLine("    NOT PRESENT — matches no currently listed gaming device. " +
+                        "No rule is written for an absent device (by design); it will be picked " +
+                        "up on a later health check once it is plugged in.");
+                    continue;
+                }
+
+                Console.WriteLine($"    present     : YES — {device.FriendlyName}");
+
+                foreach (var node in device.Nodes)
+                {
+                    var rule = rulesBySession.FirstOrDefault(r =>
+                        node.Equals(r.Path, StringComparison.OrdinalIgnoreCase));
+
+                    if (rule.Path is null)
+                    {
+                        Console.WriteLine($"    {node} : NO RULE YET");
+                    }
+                    else if (rule.SessionId is null)
+                    {
+                        Console.WriteLine($"    {node} : GLOBAL HIDE (no session suffix) — hidden " +
+                            "from the console too; not what this feature writes");
+                    }
+                    else if (consoleSessionId > 0 && rule.SessionId == consoleSessionId)
+                    {
+                        Console.WriteLine($"    {node} : confined to session {rule.SessionId} " +
+                            "— the LIVE console session, correct");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"    {node} : confined to session {rule.SessionId} " +
+                            $"— STALE, the live console session is {(consoleSessionId > 0 ? consoleSessionId.ToString() : "none")}");
+                    }
+                }
+            }
         }
 
         // ── Verdict ───────────────────────────────────────────────────

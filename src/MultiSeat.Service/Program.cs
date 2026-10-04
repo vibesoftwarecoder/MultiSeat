@@ -55,18 +55,6 @@ if (args.Length >= 2 && args[0] == "--mute-audio" && int.TryParse(args[1], out v
 // Session-scoped like --mute-audio: run it INSIDE the session you want to measure
 // (console session for host audio, a seat/RDP session for that session's audio).
 // Usage: MultiSeat.Service.exe --audio-peaks [seconds]
-// -- HidHide inspection mode -------------------------------------------
-// Reports what HidHide sees on THIS host and what a session jail would write, then exits.
-// Every part of this feature has at some point been wrong while reporting success, so the
-// habit is to ask the machine: MultiSeat.Service.exe --hidhide
-// Read-only (every call carries --cancel). Exit 0 = per-seat isolation could work here.
-if (args.Contains("--hidhide"))
-{
-    var hidHidePath = Environment.GetEnvironmentVariable("MULTISEAT_HIDHIDE_CLI")
-        ?? new MultiSeatOptions().HidHideCliPath;
-    return HidHideInspector.Report(hidHidePath);
-}
-
 if (args.Length >= 1 && args[0] == "--audio-peaks")
 {
     var window = args.Length >= 2 && double.TryParse(args[1], out var secs) ? secs : 5.0;
@@ -339,6 +327,29 @@ var host = builder.Build();
 // Usage: MultiSeat.Service.exe --log-filters
 if (args.Contains("--log-filters"))
     return MultiSeat.Service.Diagnostics.LogFilterInspector.Run(host.Services);
+
+// -- HidHide inspection mode --------------------------------------------
+// Reports what HidHide sees on THIS host and what a session jail would write, then exits.
+// Every part of this feature has at some point been wrong while reporting success, so the
+// habit is to ask the machine: MultiSeat.Service.exe --hidhide
+//
+// Runs after Build() for the same reason as --log-filters above: reporting on
+// MultiSeat:ExcludedPhysicalPadDevicePaths (issue #92) needs the REAL configured host options,
+// not a reconstruction of them — and that option is only meaningful read from the actual
+// appsettings.json / appsettings.local.json this host has, the same file the service itself
+// runs with. MULTISEAT_HIDHIDE_CLI still overrides the configured HidHideCliPath, for pointing
+// this diagnostic at a different HidHideCLI.exe without editing config.
+//
+// Read-only (every call carries --cancel). Exit 0 = per-seat isolation could work here.
+// Usage: MultiSeat.Service.exe --hidhide
+if (args.Contains("--hidhide"))
+{
+    var hidHideOptions = host.Services
+        .GetRequiredService<Microsoft.Extensions.Options.IOptions<MultiSeatOptions>>().Value;
+    var hidHidePath = Environment.GetEnvironmentVariable("MULTISEAT_HIDHIDE_CLI")
+        ?? hidHideOptions.HidHideCliPath;
+    return HidHideInspector.Report(hidHidePath, hidHideOptions.ExcludedPhysicalPadDevicePaths);
+}
 
 // -- Configuration inspection mode -------------------------------------
 // Says which binary is deployed and what it resolved each setting to, naming the file that

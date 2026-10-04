@@ -190,6 +190,40 @@ public sealed class MultiSeatOptions
     // not taken on yet.
     public Dictionary<string, string[]> SeatPadDevicePaths { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Device instance paths of PHYSICAL controller(s) to confine to the CONSOLE's own session,
+    /// so they are invisible to every seat — the opposite problem from <see cref="SeatPadDevicePaths"/>.
+    ///
+    /// Fixes issue #92: a real gamepad plugged into the main/console PC "bleeds" into a seat —
+    /// someone playing on the console is detected inside a seat's game too — because nothing
+    /// previously stopped a seat session's own dwm/explorer/GameInputSvc from opening it. There
+    /// is no equivalent of <see cref="SeatPadDevicePaths"/>' identity-by-evidence problem here:
+    /// the operator names the exact controller(s) to keep for themselves, by device instance
+    /// path, found the same way as a seat's pad — run <c>MultiSeat.Service.exe --hidhide</c> and
+    /// copy either the HID node or the XUSB node path it prints for that controller. Both nodes
+    /// get a rule regardless of which one is configured, same as everywhere else in this feature.
+    ///
+    /// Default empty, which makes the feature a complete no-op: not even the console session is
+    /// resolved. This uses the SAME <c>!&lt;sessionId&gt;</c> session jail as <see cref="SeatPadDevicePaths"/>
+    /// (see <see cref="Input.HidHideSessionJail"/>) just pointed the other way — confine the named
+    /// pad(s) to WTSGetActiveConsoleSessionId() instead of to a seat. It is independent of
+    /// <see cref="EnableHidHideCloaking"/>: an operator may want the console's own controller
+    /// protected without ever turning on per-seat isolation.
+    ///
+    /// Unlike <see cref="SeatPadDevicePaths"/>, this is NOT restricted to emulated pads — a
+    /// physical controller is exactly what this option exists to confine. The emulated-only
+    /// filter in <see cref="Input.HidHideConfigurator"/>'s seat attribution protects a physical
+    /// controller from being taken BY a seat; it has no bearing on the operator deliberately
+    /// naming one here on purpose.
+    ///
+    /// Reconciled on every health-check tick (<see cref="MultiSeatOptions.HealthCheckIntervalMs"/>),
+    /// not just once at startup — the active console session can change on its own (fast user
+    /// switch, logon/logoff) and the controller may not be plugged in yet when the service starts.
+    /// A configured path that matches nothing yet is deliberately NOT pre-written the way a
+    /// seat's known pad is; see the reasoning in <see cref="Input.HidHideConfigurator.ReconcileExcludedPhysicalPads"/>.
+    /// </summary>
+    public string[] ExcludedPhysicalPadDevicePaths { get; set; } = [];
+
     // ── Input Isolation ──────────────────────────────────────────────
     public string InputHookDllPath { get; set; } = @"MultiSeatInputHook.dll";
 

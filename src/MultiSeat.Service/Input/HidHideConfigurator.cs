@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using MultiSeat.Service.Configuration;
+using MultiSeat.Service.Interop;
 using MultiSeat.Shared.Models;
 
 namespace MultiSeat.Service.Input;
@@ -41,15 +42,29 @@ public sealed class HidHideConfigurator
     private readonly ILogger<HidHideConfigurator> _logger;
     private readonly MultiSeatOptions _options;
     private readonly HidHideCli _cli;
+    private readonly Func<int> _consoleSessionId;
 
     // What we confined, so teardown can release exactly that and nothing else.
     private readonly ConcurrentDictionary<Guid, SeatJailState> _seatStates = new();
 
-    public HidHideConfigurator(ILogger<HidHideConfigurator> logger, IOptions<MultiSeatOptions> options)
+    // One entry per configured MultiSeatOptions.ExcludedPhysicalPadDevicePaths path, so a later
+    // tick can tell "never written" from "written, but for a console session that has since
+    // changed" without re-reading HidHide's blacklist on every pass.
+    private readonly ConcurrentDictionary<string, ExcludedPadState> _excludedPadStates =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public HidHideConfigurator(
+        ILogger<HidHideConfigurator> logger,
+        IOptions<MultiSeatOptions> options,
+        Func<int>? consoleSessionIdProvider = null)
     {
         _logger = logger;
         _options = options.Value;
         _cli = new HidHideCli(logger, _options.HidHideCliPath);
+
+        // Overridable so tests can drive the active-console-session-changes-over-time behaviour
+        // without a live Windows session. Production gets the real answer.
+        _consoleSessionId = consoleSessionIdProvider ?? (() => (int)Kernel32.WTSGetActiveConsoleSessionId());
 
         if (!_cli.IsAvailable)
         {
@@ -308,18 +323,23 @@ public sealed class HidHideConfigurator
         {
             var result = _cli.Write(HidHideCli.Sequence(state.Rules.Select(UnhideDeviceArgs).ToArray()));
 
-            if (_seatStates.IsEmpty)
+            // Cloaking is a single global switch — it has to stay on while EITHER a seat or an
+            // excluded physical pad (ReconcileExcludedPhysicalPads) still has a live rule, or the
+            // other feature's confinement silently stops working too.
+            if (_seatStates.IsEmpty && _excludedPadStates.IsEmpty)
             {
                 _cli.Write("--cloak-off");
                 _logger.LogInformation(
-                    "Seat {Id}: released {Count} jail rule(s), cloaking off — no confined seats remain",
+                    "Seat {Id}: released {Count} jail rule(s), cloaking off — no confined seats " +
+                    "or excluded physical pads remain",
                     seat.Id, state.Rules.Count);
             }
             else
             {
                 _logger.LogInformation(
-                    "Seat {Id}: released {Count} jail rule(s); {Remaining} confined seat(s) remain",
-                    seat.Id, state.Rules.Count, _seatStates.Count);
+                    "Seat {Id}: released {Count} jail rule(s); {Remaining} confined seat(s) and " +
+                    "{ExcludedPads} excluded physical pad(s) still need cloaking on",
+                    seat.Id, state.Rules.Count, _seatStates.Count, _excludedPadStates.Count);
             }
 
             if (!result.Succeeded)
@@ -338,6 +358,230 @@ public sealed class HidHideConfigurator
         {
             _logger.LogError(ex, "Seat {Id}: failed to release jail rules", seat.Id);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  EXCLUDE PHYSICAL PADS FROM SEATS — the inverse jail (issue #92)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Confine the operator's named PHYSICAL controller(s) to the CONSOLE's own session, so they
+    /// are invisible to every seat — the mirror image of <see cref="CloakForSession"/>, built on
+    /// the exact same <see cref="HidHideSessionJail"/> mechanism, just pointed the other way.
+    ///
+    /// Fixes issue #92 (RageMC): a real gamepad plugged into the main/console PC was detected
+    /// inside a seat's game too, because nothing had ever stopped a seat session's own
+    /// <c>dwm</c>/<c>explorer</c>/<c>GameInputSvc</c> from opening it — the existing per-seat
+    /// jail only ever isolates seats' own EMULATED pads from each other, and deliberately never
+    /// touches a physical controller (see <see cref="AttributePadTo"/>).
+    ///
+    /// Opt-in via <see cref="MultiSeatOptions.ExcludedPhysicalPadDevicePaths"/> ALONE — an empty
+    /// list (the default) returns immediately without even resolving the console session, and
+    /// this is independent of <see cref="MultiSeatOptions.EnableHidHideCloaking"/>: an operator
+    /// may want their own controller protected without turning on per-seat isolation at all.
+    ///
+    /// Called every health-check tick (<see cref="MultiSeatWorker"/>'s existing
+    /// <c>HealthCheckIntervalMs</c> cadence — the same self-healing pattern
+    /// <c>SeatReconciler</c> uses for issue #87), not a one-shot startup action. Two things here
+    /// can change with nothing to notify us: the ACTIVE CONSOLE SESSION (fast user switch,
+    /// logon/logoff) and whether the named controller is even plugged in yet.
+    /// </summary>
+    public void ReconcileExcludedPhysicalPads()
+    {
+        var configured = _options.ExcludedPhysicalPadDevicePaths;
+        if (configured.Length == 0) return; // feature inert — zero I/O, nothing resolved either
+
+        if (!_cli.IsAvailable)
+        {
+            _logger.LogWarning(
+                "{Count} physical pad(s) are configured for console-only confinement " +
+                "(MultiSeat:ExcludedPhysicalPadDevicePaths) but HidHide is not installed — none " +
+                "of them are isolated from seats", configured.Length);
+            return;
+        }
+
+        var consoleSessionId = _consoleSessionId();
+        if (consoleSessionId <= 0)
+        {
+            // HidHideSessionJail.Confine refuses session <= 0 outright (session 0 never matches
+            // the driver's jail check, so a rule for it would hide the device from EVERY
+            // session, including the console's own — far louder than doing nothing this tick).
+            _logger.LogInformation(
+                "No active console session right now (WTSGetActiveConsoleSessionId returned " +
+                "{Sid}) — the {Count} configured physical pad exclusion(s) are skipped until one exists",
+                consoleSessionId, configured.Length);
+            return;
+        }
+
+        var devices = ListGamingDevices();
+
+        foreach (var path in configured)
+            ReconcileOneExcludedPad(path, MatchConfiguredPhysicalPad(path, devices), consoleSessionId);
+    }
+
+    private void ReconcileOneExcludedPad(string configuredPath, HidHideDevice? device, int consoleSessionId)
+    {
+        var state = _excludedPadStates.GetOrAdd(configuredPath, _ => new ExcludedPadState());
+        var lastSessionId = state.Rules.Count > 0 ? state.SessionId : (int?)null;
+        var plan = PlanExcludedPad(device, lastSessionId, consoleSessionId);
+
+        switch (plan)
+        {
+            case ExcludedPadPlan.DeviceNotPresent:
+                // ⚠️ Deliberately NOT pre-written, unlike PreWriteRules for a seat's own pad —
+                // even though HidHideConfigurator's own docs say "a rule for an absent device
+                // matches nothing, so writing one in advance is inert and free". That is true of
+                // the DEVICE's visibility, but it is not the only thing being committed to here,
+                // and the two situations are not actually the same:
+                //
+                // PreWriteRules pairs a path with a session id that is ALREADY FIXED and ALREADY
+                // CORRECT for as long as the pad can possibly take to appear — a seat's own
+                // session, settled at session-creation time — and it is written right before the
+                // one predictable event that creates the pad (Apollo starting). There is nothing
+                // for that session id to go stale against before the pad shows up.
+                //
+                // Here there is no equivalent predictable event — a physical controller can be
+                // plugged in at any moment, which is exactly why this method polls instead of
+                // reacting to one. And the value being paired with the path, the ACTIVE CONSOLE
+                // SESSION, is itself the thing that changes on its own over time (fast user
+                // switch, logon/logoff) — unlike a seat's fixed session id, it is not safe to
+                // treat as settled just because we have a reading for it right now.
+                //
+                // Writing today's console session against a controller that is not even here
+                // yet would commit to an answer this method cannot verify until the controller
+                // appears. Get it wrong and the choices are both bad: carry a stale, unverified
+                // session suffix in HidHide's PERSISTENT blacklist until the controller happens
+                // to reappear (if the console session moves on first, the real console user
+                // loses their own controller the moment it is plugged in), or re-write the guess
+                // on every single tick forever, paying this CLI's measured ~1s-per-invocation
+                // cost indefinitely for a controller that may never be plugged in at all.
+                // Waiting for presence costs at most one health-check interval of exposure the
+                // first time it is plugged in — the same race PreWriteRules closes for a seat's
+                // own pad — in exchange for never writing a guess this method cannot confirm.
+                if (state.Rules.Count > 0)
+                {
+                    _logger.LogInformation(
+                        "Configured physical pad '{Path}' is no longer present; its previous " +
+                        "jail rule(s) are left untouched in HidHide's blacklist [{Rules}] — inert " +
+                        "while the device is gone, and will be corrected if it reappears",
+                        configuredPath, string.Join(", ", state.Rules));
+                }
+                return;
+
+            case ExcludedPadPlan.AlreadyCurrent:
+                return; // nothing changed since the last tick — no CLI round-trip spent on it
+
+            case ExcludedPadPlan.WriteNew:
+                WriteExcludedPadRules(configuredPath, device!, consoleSessionId, state);
+                return;
+
+            case ExcludedPadPlan.RewriteForNewSession:
+                _logger.LogInformation(
+                    "Console session changed ({Old} -> {New}) while '{Pad}' stays plugged in — " +
+                    "re-confining it to the new console session",
+                    state.SessionId, consoleSessionId, device!.FriendlyName);
+                ReleaseExcludedPadRules(configuredPath, state);
+                WriteExcludedPadRules(configuredPath, device, consoleSessionId, state);
+                return;
+        }
+    }
+
+    private void WriteExcludedPadRules(
+        string configuredPath, HidHideDevice device, int consoleSessionId, ExcludedPadState state)
+    {
+        var rules = HidHideSessionJail.ConfineAll(device, consoleSessionId);
+        var result = _cli.Write(HidHideCli.Sequence(rules.Select(HideDeviceArgs).ToArray()));
+
+        if (!result.Succeeded)
+        {
+            _logger.LogWarning(
+                "Writing the console-confinement rule for '{Pad}' ({Path}) failed — it is NOT " +
+                "yet excluded from seats; will retry on the next health check",
+                device.FriendlyName, configuredPath);
+            return;
+        }
+
+        // Cloaking has to be on for any of it to take effect — same as CloakForSession.
+        _cli.Write("--cloak-on");
+
+        state.Rules.Clear();
+        foreach (var rule in rules) state.Rules.Add(rule);
+        state.SessionId = consoleSessionId;
+
+        _logger.LogInformation(
+            "Confined physical pad '{Pad}' ({Path}) to the console's session {Session} with " +
+            "{Count} rule(s) [{Rules}] — it is now invisible to every seat",
+            device.FriendlyName, configuredPath, consoleSessionId, rules.Count, string.Join(", ", rules));
+    }
+
+    private void ReleaseExcludedPadRules(string configuredPath, ExcludedPadState state)
+    {
+        if (state.Rules.Count == 0) return;
+
+        var stale = state.Rules.ToList();
+        var result = _cli.Write(HidHideCli.Sequence(stale.Select(UnhideDeviceArgs).ToArray()));
+
+        if (!result.Succeeded)
+        {
+            _logger.LogWarning(
+                "Releasing the stale console-confinement rule(s) for '{Path}' failed [{Rules}] — " +
+                "the device may now be confined to BOTH the old and the new console session",
+                configuredPath, string.Join(", ", stale));
+        }
+
+        state.Rules.Clear();
+    }
+
+    /// <summary>
+    /// Match a configured physical-pad path against a present device's identity — the exact same
+    /// pattern as the identity leg of <see cref="AttributePadTo"/> (either node, case-insensitive)
+    /// — but WITHOUT the emulated-pad filter. That filter exists only to stop a seat being
+    /// attributed a physical controller it has no business taking; it has no bearing here, where
+    /// the operator is naming a physical controller on purpose.
+    /// </summary>
+    internal static HidHideDevice? MatchConfiguredPhysicalPad(string configuredPath, IEnumerable<HidHideDevice> devices) =>
+        devices.FirstOrDefault(d =>
+            configuredPath.Equals(d.DeviceInstancePath, StringComparison.OrdinalIgnoreCase) ||
+            configuredPath.Equals(d.BaseContainerDeviceInstancePath, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>What a tick should do about one configured physical-pad path.</summary>
+    internal enum ExcludedPadPlan
+    {
+        /// <summary>No present device matches. Nothing is written — see the reasoning in
+        /// <see cref="ReconcileOneExcludedPad"/>.</summary>
+        DeviceNotPresent,
+
+        /// <summary>Already confined to the current console session; nothing to do.</summary>
+        AlreadyCurrent,
+
+        /// <summary>No rule tracked for this device yet; write one now.</summary>
+        WriteNew,
+
+        /// <summary>A rule is tracked, but for a console session that is no longer current;
+        /// release it and write the current one.</summary>
+        RewriteForNewSession,
+    }
+
+    /// <summary>
+    /// Pure decision for one configured path, kept free of the CLI so it can be unit-tested with
+    /// fakes — the same separation <see cref="SessionHealthCheck"/> uses for its own reconciliation
+    /// order (<c>RelaunchExitedAnchorAsync</c>, <c>RescueDisconnectedSessionAsync</c>).
+    /// </summary>
+    internal static ExcludedPadPlan PlanExcludedPad(HidHideDevice? device, int? lastConfinedSessionId, int consoleSessionId)
+    {
+        if (device is null) return ExcludedPadPlan.DeviceNotPresent;
+        if (lastConfinedSessionId is null) return ExcludedPadPlan.WriteNew;
+        return lastConfinedSessionId.Value == consoleSessionId
+            ? ExcludedPadPlan.AlreadyCurrent
+            : ExcludedPadPlan.RewriteForNewSession;
+    }
+
+    /// <summary>The jail rules written for one configured physical pad, so a session change can
+    /// release exactly those before writing the replacement.</summary>
+    private sealed class ExcludedPadState
+    {
+        public HashSet<string> Rules { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public int SessionId { get; set; }
     }
 
     // ═══════════════════════════════════════════════════════════════════

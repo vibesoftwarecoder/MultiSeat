@@ -198,5 +198,7 @@ public class HidHideSessionJailTests
         Assert.Equal(compiled.EnablePadRulePreWrite, shipped.EnablePadRulePreWrite);
         Assert.Equal(compiled.VerifyHidHideJail, shipped.VerifyHidHideJail);
         Assert.Empty(shipped.SeatPadDevicePaths);
+        Assert.Empty(compiled.ExcludedPhysicalPadDevicePaths);
+        Assert.Empty(shipped.ExcludedPhysicalPadDevicePaths);
     }
 }

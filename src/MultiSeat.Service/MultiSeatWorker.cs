@@ -195,6 +195,20 @@ public sealed class MultiSeatWorker : BackgroundService
             // meanwhile wait for the next tick.
             StartReconcileIfDue(stoppingToken);
 
+            // Self-heals MultiSeat:ExcludedPhysicalPadDevicePaths (issue #92) on the same cadence
+            // as everything else here — the active console session can change at any time (fast
+            // user switch, logon/logoff) and the named controller may not be plugged in yet, so
+            // this is deliberately a poll rather than a one-shot startup action or a new timer.
+            // No-op when nothing is configured.
+            try
+            {
+                _hidHide.ReconcileExcludedPhysicalPads();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Physical pad exclusion reconciliation failed");
+            }
+
             try
             {
                 await _healthCheck.CheckAllSeatsAsync(_seatManager, stoppingToken);
