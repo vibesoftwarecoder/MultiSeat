@@ -200,6 +200,18 @@ if (args.Length == 2 && args[0] == "--setup-display-isolation")
     return DisplayModeHelper.SetupDisplayIsolation(args[1]);
 }
 
+// ── Input-desktop readiness probe (issue #96) ─────────────────────────
+// Session-scoped like every display API: run inside the SEAT session, launched right after the
+// session exists, in parallel with Apollo's own startup rather than ahead of it — the point is to
+// observe the real race, not add a delay in front of it. Polls OpenInputDesktop + the active
+// display identity every 250ms for <seconds> and writes one JSON line per sample, so a reader can
+// see whether the state ever resolves on its own and what the display identity does when it does.
+// Usage: MultiSeat.Service.exe --input-desktop-probe <output-jsonl-file> <seconds>
+if (args.Length == 3 && args[0] == "--input-desktop-probe" && int.TryParse(args[2], out var probeSeconds))
+{
+    return MultiSeat.Service.Diagnostics.InputDesktopReadinessProbe.RunAndWriteToFile(args[1], probeSeconds);
+}
+
 // ── Set-display-hz helper mode ────────────────────────────────────────
 // Read-only: dump every display device the calling session can see, active or not.
 // Usage: MultiSeat.Service.exe --list-session-displays [outputFile]

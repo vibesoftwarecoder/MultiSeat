@@ -61,6 +61,28 @@ public sealed class MultiSeatOptions
     /// </summary>
     public bool KeepaliveOnSeparateDesktop { get; set; } = true;
 
+    /// <summary>
+    /// Issue #96 diagnostic. When true, every provision launches a background probe inside the
+    /// new seat session (parallel to Apollo's own startup, never blocking it) that samples
+    /// <c>OpenInputDesktop</c> and the active display identity every 250ms for
+    /// <see cref="InputDesktopReadinessProbeSeconds"/>, writing a timestamped JSONL timeline to
+    /// <c>C:\ProgramData\MultiSeat\ms_inputdesktop_readiness_{seatId}.jsonl</c>.
+    ///
+    /// Off by default — it is a diagnostic for one open question (does a fresh seat session's
+    /// input desktop ever become accessible on its own, and how does the RDP display identity
+    /// change when it does), not something every host needs running on every provision.
+    /// See scripts\diagnose-issue96.ps1, which drives repeated trials under both values of
+    /// <see cref="KeepaliveOnSeparateDesktop"/> and aggregates the result.
+    /// </summary>
+    public bool DiagnoseInputDesktopReadiness { get; set; } = false;
+
+    /// <summary>
+    /// How long the issue #96 probe (<see cref="DiagnoseInputDesktopReadiness"/>) samples for.
+    /// The reporter's own fixed-delay testing (0/1/3/5/10s) never resolved the failure, so this
+    /// defaults well past that to answer whether it is a slow race or a true deadlock.
+    /// </summary>
+    public int InputDesktopReadinessProbeSeconds { get; set; } = 90;
+
     public bool RotateSharedSeatTls { get; set; }
 
     /// <summary>

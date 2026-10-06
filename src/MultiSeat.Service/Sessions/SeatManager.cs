@@ -330,6 +330,43 @@ public sealed class SeatManager
             _logger.LogInformation("Seat {Id}: Windows session {Sid} at {Scale}% scale ({Source})",
                 seat.Id, seat.SessionId, seat.ScaleFactor, seat.ScaleFactorSource);
 
+            // ── 2.2. Issue #96 diagnostic probe ───────────────────────
+            // Fire-and-forget, on a background Task rather than awaited: RunHelperInSeatSession
+            // blocks its caller for up to 10s even on success, and this probe samples for up to
+            // InputDesktopReadinessProbeSeconds (default 90). Awaiting it here would delay every
+            // step below — including Apollo's own startup — which would stop this from observing
+            // the real race and start it from creating a different one. Off by default; see
+            // MultiSeatOptions.DiagnoseInputDesktopReadiness.
+            if (_options.DiagnoseInputDesktopReadiness)
+            {
+                var probeSeatId = seat.Id;
+                var probeSessionId = seat.SessionId;
+                var probeAccountName = seat.AccountName;
+                var probeSeconds = _options.InputDesktopReadinessProbeSeconds;
+                var probeOutFile = Path.Combine(
+                    @"C:\ProgramData\MultiSeat", $"ms_inputdesktop_readiness_{probeSeatId:N}.jsonl");
+                var probeExe = Path.Combine(AppContext.BaseDirectory, "MultiSeat.Service.exe");
+
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        _sessionLauncher.RunHelperInSeatSession(
+                            probeSessionId, probeAccountName,
+                            $"\"{probeExe}\" --input-desktop-probe \"{probeOutFile}\" {probeSeconds}");
+                        _logger.LogInformation(
+                            "Seat {Id}: issue #96 readiness probe finished, see {Path}",
+                            probeSeatId, probeOutFile);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Seat {Id}: issue #96 readiness probe failed to launch (non-critical)",
+                            probeSeatId);
+                    }
+                });
+            }
+
             seat.TransitionTo(SeatStatus.Configuring, _logger);
             seat.ProvisioningStep = "Display";
             await BroadcastState(seat);

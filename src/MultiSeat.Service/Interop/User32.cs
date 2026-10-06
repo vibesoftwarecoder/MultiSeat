@@ -386,4 +386,32 @@ internal static class User32
     /// </summary>
     [DllImport(Lib, CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    // ── Input desktop (issue #96) ─────────────────────────────────────
+    // What Apollo itself calls before DXGI Desktop Duplication: OpenInputDesktop fails with
+    // ERROR_ACCESS_DENIED (5) on a freshly-created seat session until the session is
+    // disconnected and reconnected. See InputDesktopReadinessProbe.
+
+    public const uint DESKTOP_READOBJECTS = 0x0001;
+    public const uint DESKTOP_SWITCHDESKTOP = 0x0100;
+    public const int UOI_NAME = 2;
+
+    [DllImport(Lib, SetLastError = true)]
+    public static extern IntPtr OpenInputDesktop(uint dwFlags, bool fInherit, uint dwDesiredAccess);
+
+    [DllImport(Lib, SetLastError = true)]
+    public static extern bool CloseDesktop(IntPtr hDesktop);
+
+    [DllImport(Lib, SetLastError = true)]
+    public static extern IntPtr GetThreadDesktop(uint dwThreadId);
+
+    [DllImport(Lib, SetLastError = true)]
+    public static extern bool SetThreadDesktop(IntPtr hDesktop);
+
+    [DllImport(Lib, CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool GetUserObjectInformationW(
+        IntPtr hObj, int nIndex, System.Text.StringBuilder pvInfo, int nLength, out int lpnLengthNeeded);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
 }
