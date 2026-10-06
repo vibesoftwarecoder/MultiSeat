@@ -34,6 +34,10 @@
         is preserved). Restores the file's ORIGINAL content when the script exits, including on
         Ctrl-C or an error, and restarts the service once more to put the setting back.
       - Every seat it creates, it tears down itself before moving to the next trial.
+      - If -Account has a saved AutoStart preset, it is disabled for the run and restored at the
+        end (also on Ctrl-C or an error) - otherwise the service restart inside every condition
+        switch would silently reprovision a seat for it mid-run and break the next trial's own
+        POST with "account already has a seat." Found by self-test, not by reasoning about it.
 
 .PARAMETER Account
     The Windows account to provision each trial's seat under. It must already exist, and it is
@@ -118,6 +122,38 @@ if ($existing.Count -gt 0) {
 
 try { $null = Get-LocalUser -Name $Account -ErrorAction Stop }
 catch { Refuse "no local account named '$Account'. Create it first, or pass -Account with one that exists." }
+
+# ---------------------------------------------------------------- autostart guard
+# Found by self-test on 2026-10-06: every Set-DiagnosticConfig restart below recreates ANY seat
+# with a saved AutoStart preset for -Account - and a seat account used for daily streaming (which
+# this one almost certainly is) very likely has one. The preset survives a seat teardown, so the
+# "no seat exists" check above does not catch it; it only fires on the NEXT service restart, which
+# silently reprovisions a seat mid-run and makes every later trial's own POST fail with "account
+# already has a seat". Clear it for the run and put it back exactly as found.
+function Get-AccountAutoStart {
+    @(Invoke-RestMethod "$Api/seats/presets" -Headers $Headers -TimeoutSec 30) |
+        Where-Object { $_.accountName -eq $Account } |
+        Select-Object -First 1 -ExpandProperty autoStart
+}
+
+function Set-AccountAutoStart {
+    param([bool]$Enabled)
+    # No REST endpoint sets this without a live seat, so provision a throwaway one just to flip
+    # the preset, then tear it straight back down - only the preset is kept.
+    $tmp = Invoke-RestMethod "$Api/seats" -Method Post -Headers $Headers -TimeoutSec 180 `
+        -Body (@{ accountName = $Account; width = $Width; height = $Height; fps = $Fps } | ConvertTo-Json) `
+        -ContentType 'application/json'
+    Invoke-RestMethod "$Api/seats/$($tmp.id)/autostart" -Method Put -Headers $Headers -TimeoutSec 30 `
+        -Body (@{ enabled = $Enabled } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
+    Invoke-RestMethod "$Api/seats/$($tmp.id)" -Method Delete -Headers $Headers -TimeoutSec 180 | Out-Null
+    Start-Sleep -Seconds 5
+}
+
+$originalAutoStart = [bool](Get-AccountAutoStart)
+if ($originalAutoStart) {
+    Write-Host "  '$Account' has AutoStart enabled - disabling it for this run (restored at the end)." -ForegroundColor Yellow
+    Set-AccountAutoStart -Enabled $false
+}
 
 # ---------------------------------------------------------------- config merge/restore
 $originalConfigText = if (Test-Path $localConfigPath) { Get-Content $localConfigPath -Raw } else { $null }
@@ -292,6 +328,17 @@ try {
 }
 finally {
     Restore-OriginalConfig
+    if ($originalAutoStart) {
+        Write-Host ''
+        Write-Host '-- restoring AutoStart --' -ForegroundColor Cyan
+        try {
+            Set-AccountAutoStart -Enabled $true
+            Write-Host "  '$Account' AutoStart restored." -ForegroundColor Green
+        } catch {
+            Write-Host "  COULD NOT RESTORE AutoStart for '$Account': $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "  It started this run ENABLED - re-enable it by hand from the dashboard." -ForegroundColor Yellow
+        }
+    }
 }
 
 # ---------------------------------------------------------------- report
