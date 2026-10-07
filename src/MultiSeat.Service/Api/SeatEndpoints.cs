@@ -288,6 +288,53 @@ public static class SeatEndpoints
                 }
             });
 
+        // Issue #96: start an input-desktop readiness probe inside an ALREADY-LIVE seat, on
+        // demand, so a mid-stream desktop-switch (a UAC prompt, a third-party elevation task) can
+        // be measured with the same instrument that MultiSeat:DiagnoseInputDesktopReadiness
+        // auto-launches at provision time. That auto-launch only ever runs once, right after the
+        // session is created — there was no way to point the probe at a seat that is already
+        // Ready, which is exactly what testing a mid-capture switch needs.
+        //
+        // Fire-and-forget, like advanced-color's helper launch, but NOT awaited for a result file
+        // the way advanced-color is: a readiness probe runs for up to "seconds" (default 90), far
+        // longer than advanced-color's quick read, so this returns immediately with the output
+        // path rather than blocking the request for the probe's whole duration.
+        group.MapPost("/{id:guid}/diagnostics/input-desktop-probe",
+            (Guid id, int? seconds, SeatManager mgr, SessionLauncher launcher) =>
+            {
+                var seat = mgr.GetSeat(id);
+                if (seat is null) return Results.NotFound();
+                if (seat.SessionId < 0)
+                    return Results.BadRequest(new { error = "Seat has no session." });
+
+                var probeSeconds = seconds is > 0 ? seconds.Value : 90;
+
+                // Suffixed with a tick count, not just the seat id, so this can be called more
+                // than once against the same seat (e.g. once at startup, again mid-stream)
+                // without each run overwriting the last one's file.
+                var outFile = Path.Combine(
+                    @"C:\ProgramData\MultiSeat",
+                    $"ms_inputdesktop_readiness_ondemand_{id:N}_{DateTime.UtcNow.Ticks}.jsonl");
+                var exe = Path.Combine(AppContext.BaseDirectory, "MultiSeat.Service.exe");
+
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        launcher.RunHelperInSeatSession(
+                            seat.SessionId, seat.AccountName,
+                            $"\"{exe}\" --input-desktop-probe \"{outFile}\" {probeSeconds}");
+                    }
+                    catch
+                    {
+                        // Best-effort: there is no request left to report to by the time this
+                        // runs. A missing output file is the caller's signal that it failed.
+                    }
+                });
+
+                return Results.Ok(new { outputFile = outFile, seconds = probeSeconds });
+            });
+
         // ── Paired client management ───────────────────────────────────
 
         group.MapGet("/{id:guid}/clients", (Guid id, SeatManager mgr) =>
