@@ -358,7 +358,8 @@ public sealed class ApolloManager
             using var state = JsonDocument.Parse(await File.ReadAllTextAsync(statePath, ct));
             var expectedId = Guid.Parse(state.RootElement.GetProperty("root").GetProperty("uniqueid").GetString()!);
             await ApolloReadiness.WaitAsync(new Uri($"http://127.0.0.1:{seat.PortBase}/serverinfo"),
-                expectedId, () => instance.IsAlive, ct);
+                expectedId, () => instance.IsAlive, ct,
+                timeout: TimeSpan.FromSeconds(_options.ApolloReadinessTimeoutSeconds));
             seat.ErrorMessage = null;
             if (recovering) seat.TransitionTo(SeatStatus.Ready, _logger);
         }

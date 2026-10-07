@@ -430,6 +430,23 @@ public sealed class MultiSeatOptions
     public int ProcessLaunchTimeoutMs { get; set; } = 10_000;
     public int HealthCheckIntervalMs { get; set; } = 5_000;
 
+    /// <summary>
+    /// How long <c>ApolloReadiness.WaitAsync</c> polls a freshly-started seat's Apollo for its
+    /// serverinfo API before giving up. Default 30 (<see cref="Streaming.ApolloReadiness.StartupTimeout"/>'s
+    /// own value, unchanged) - this exists to make that number configurable, not to change it.
+    ///
+    /// Issue #96: a provisioning failure anywhere in <c>SeatManager.ProvisionSeatAsync</c> tears
+    /// the seat down immediately (<c>TeardownSeatInternalAsync</c> in the catch block), including
+    /// the Windows session itself - so this is the ONE thing standing between "Apollo never came
+    /// up" and a long, undisturbed observation window for whatever kept it from coming up.
+    /// Widening this alongside <see cref="DiagnoseInputDesktopReadiness"/> and a matching
+    /// <see cref="InputDesktopReadinessProbeSeconds"/> is how to find out whether a given failure
+    /// is a slow race (resolves given enough patience) or a true deadlock (does not, no matter how
+    /// long provisioning is willing to wait) - the real provisioning flow gets to run that long
+    /// instead of being cut off at 30s regardless of what the probe itself observes.
+    /// </summary>
+    public int ApolloReadinessTimeoutSeconds { get; set; } = 30;
+
     // ── Shared game library ──────────────────────────────────────────
     // Create a shared games/ROMs location all seat accounts can read/write, so a Steam game
     // installed by one seat's account is not re-downloaded by another owning account, and ROMs
