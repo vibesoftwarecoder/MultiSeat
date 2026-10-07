@@ -447,6 +447,19 @@ public sealed class MultiSeatOptions
     /// </summary>
     public int ApolloReadinessTimeoutSeconds { get; set; } = 30;
 
+    /// <summary>
+    /// Issue #96. Before starting a seat's Apollo, wait up to this many seconds for the seat
+    /// session's input desktop to be openable and stay openable (<see cref="InputDesktopStableMs"/>).
+    /// Apollo's capture setup fails once if the desktop is denied and never retries, while the
+    /// seat would still report Ready. A third-party logon task (reported: ASUS Armoury Crate) can
+    /// hold the desktop for about two minutes. On timeout Apollo is started anyway, as before,
+    /// with a warning. 0 disables the wait.
+    /// </summary>
+    public int WaitForInputDesktopSeconds { get; set; } = 180;
+
+    /// <summary>How long the input desktop must stay openable before Apollo is started.</summary>
+    public int InputDesktopStableMs { get; set; } = 3000;
+
     // ── Shared game library ──────────────────────────────────────────
     // Create a shared games/ROMs location all seat accounts can read/write, so a Steam game
     // installed by one seat's account is not re-downloaded by another owning account, and ROMs

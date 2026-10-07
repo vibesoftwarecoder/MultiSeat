@@ -530,6 +530,9 @@ public sealed class SeatManager
                 SessionLauncher.IsLogonUiInSession,
                 _logger, ct);
 
+            // ── 5.95. Let the input desktop become usable (#96) ──────────
+            await WaitForInputDesktopAsync(seat, ct);
+
             seat.ApolloProcessId = await _apolloManager.StartAsync(seat, ct);
             _logger.LogInformation("Seat {Id}: Apollo PID {Pid}", seat.Id, seat.ApolloProcessId);
 
@@ -1444,6 +1447,43 @@ public sealed class SeatManager
     /// the timing can be tested without a Windows session, as in
     /// <see cref="DisconnectAndRelaunchAsync"/>.
     /// </remarks>
+    /// <summary>
+    /// Holds Apollo's start until the seat session's input desktop is openable and stable (#96).
+    /// Never fails provisioning: on timeout or error it logs and lets Apollo start as it always did.
+    /// </summary>
+    private async Task WaitForInputDesktopAsync(SeatInfo seat, CancellationToken ct)
+    {
+        var seconds = _options.WaitForInputDesktopSeconds;
+        if (seconds <= 0) return;
+
+        var resultFile = Path.Combine(@"C:\ProgramData\MultiSeat", $"ms_inputdesktop_gate_{seat.Id:N}.txt");
+        var exe = Path.Combine(AppContext.BaseDirectory, "MultiSeat.Service.exe");
+        try
+        {
+            File.Delete(resultFile);
+            await Task.Run(() => _sessionLauncher.RunHelperInSeatSession(
+                seat.SessionId, seat.AccountName,
+                $"\"{exe}\" --wait-input-desktop \"{resultFile}\" {seconds} {_options.InputDesktopStableMs}",
+                waitMs: (uint)(seconds + 15) * 1000), ct);
+
+            var result = File.Exists(resultFile)
+                ? InputDesktopGate.ParseResult(await File.ReadAllTextAsync(resultFile, ct))
+                : null;
+            if (result is { Outcome: InputDesktopGateOutcome.Ready })
+                _logger.LogInformation(
+                    "Seat {Id}: input desktop usable after {Ms:F0}ms - starting Apollo", seat.Id, result.ElapsedMs);
+            else
+                _logger.LogWarning(
+                    "Seat {Id}: input desktop still not usable ({Result}) - starting Apollo anyway; " +
+                    "it may fail to capture (issue #96)", seat.Id, result?.Outcome.ToString() ?? "no result");
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Seat {Id}: input desktop wait failed (non-critical)", seat.Id);
+        }
+    }
+
     internal static async Task<LogonUiWaitOutcome> WaitForLogonUiToLeaveAsync(
         int sessionId,
         Func<int, bool> isLogonUiInSession,

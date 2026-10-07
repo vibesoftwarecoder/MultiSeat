@@ -1006,7 +1006,8 @@ public sealed class SessionLauncher
     /// Used for operations that must run from within the session (e.g. setting display Hz),
     /// because some APIs (ChangeDisplaySettingsEx null, Core Audio) are session-scoped.
     /// </summary>
-    public void RunHelperInSeatSession(int sessionId, string accountName, string commandLine)
+    public void RunHelperInSeatSession(int sessionId, string accountName, string commandLine,
+        uint waitMs = 10_000)
     {
         using var token = GetSessionToken(sessionId, accountName);
 
@@ -1047,7 +1048,7 @@ public sealed class SessionLauncher
             }
 
             Kernel32.CloseHandle(pi.hThread);
-            Kernel32.WaitForSingleObject(pi.hProcess, 10_000);
+            Kernel32.WaitForSingleObject(pi.hProcess, waitMs);
             Kernel32.CloseHandle(pi.hProcess);
         }
         finally

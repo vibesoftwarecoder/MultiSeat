@@ -212,6 +212,16 @@ if (args.Length == 3 && args[0] == "--input-desktop-probe" && int.TryParse(args[
     return MultiSeat.Service.Diagnostics.InputDesktopReadinessProbe.RunAndWriteToFile(args[1], probeSeconds);
 }
 
+// ── Input-desktop gate helper (issue #96) ──────────────────────────────
+// Runs inside a seat session: returns once OpenInputDesktop has worked continuously for
+// <stable-ms>, or when <timeout-seconds> pass. Result goes to <result-file>.
+// Usage: MultiSeat.Service.exe --wait-input-desktop <result-file> <timeout-seconds> <stable-ms>
+if (args.Length == 4 && args[0] == "--wait-input-desktop"
+    && int.TryParse(args[2], out var gateTimeout) && int.TryParse(args[3], out var gateStable))
+{
+    return MultiSeat.Service.Sessions.InputDesktopGate.RunAndWriteResult(args[1], gateTimeout, gateStable);
+}
+
 // ── Set-display-hz helper mode ────────────────────────────────────────
 // Read-only: dump every display device the calling session can see, active or not.
 // Usage: MultiSeat.Service.exe --list-session-displays [outputFile]
