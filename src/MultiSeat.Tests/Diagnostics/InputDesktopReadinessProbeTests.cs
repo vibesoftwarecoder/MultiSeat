@@ -33,6 +33,37 @@ public class InputDesktopReadinessProbeTests
             Assert.Null(sample.DesktopName);
         }
         Assert.NotNull(sample.ActiveDisplays);
+
+        // Direct observation, not inference: this build agent's own window station has at least
+        // one desktop (it is running on one right now), and the shape holds for every entry -
+        // "denied" and "has windows" are mutually exclusive, never both and never neither.
+        Assert.NotNull(sample.DesktopsInStation);
+        Assert.NotEmpty(sample.DesktopsInStation);
+        foreach (var desktop in sample.DesktopsInStation)
+        {
+            Assert.False(string.IsNullOrEmpty(desktop.DesktopName));
+            if (desktop.EnumerationSucceeded)
+            {
+                Assert.False(desktop.EnumerationDenied);
+                Assert.Null(desktop.Win32ErrorIfDenied);
+                Assert.NotNull(desktop.Windows);
+            }
+            else
+            {
+                Assert.True(desktop.EnumerationDenied);
+                Assert.NotNull(desktop.Win32ErrorIfDenied);
+                Assert.Empty(desktop.Windows);
+            }
+        }
+
+        // Cross-check the two observations against each other: if OpenInputDesktop just
+        // succeeded and named a desktop, that exact name must also appear in the independent
+        // window-station enumeration - they are two different Win32 calls describing the same
+        // real object, and they had better agree.
+        if (sample.OpenInputDesktopSucceeded && sample.DesktopName is { } openedName)
+        {
+            Assert.Contains(sample.DesktopsInStation, d => d.DesktopName == openedName);
+        }
     }
 
     [Fact]
@@ -55,6 +86,10 @@ public class InputDesktopReadinessProbeTests
                 using var doc = JsonDocument.Parse(lines[i]);
                 Assert.Equal(i, doc.RootElement.GetProperty("Index").GetInt32());
                 Assert.True(doc.RootElement.TryGetProperty("ActiveDisplays", out _));
+
+                var desktops = doc.RootElement.GetProperty("DesktopsInStation");
+                Assert.Equal(JsonValueKind.Array, desktops.ValueKind);
+                Assert.True(desktops.GetArrayLength() > 0, "expected at least one desktop in the window station");
             }
 
             using var last = JsonDocument.Parse(lines[^1]);

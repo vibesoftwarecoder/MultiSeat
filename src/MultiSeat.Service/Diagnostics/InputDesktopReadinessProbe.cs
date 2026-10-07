@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using MultiSeat.Service.Display;
 using MultiSeat.Service.Interop;
@@ -6,10 +7,11 @@ using MultiSeat.Service.Interop;
 namespace MultiSeat.Service.Diagnostics;
 
 /// <summary>
-/// Continuously samples whether this seat session's input desktop is accessible, and what the
-/// active display identity is, from the moment it starts until <paramref name="seconds"/> have
-/// elapsed — written as it runs the moment it starts, so a crash or an early kill still leaves a
-/// real partial timeline rather than nothing.
+/// Continuously samples whether this seat session's input desktop is accessible, what the active
+/// display identity is, and — directly, not inferred — which desktops exist in this session's
+/// window station and what is running on each one, from the moment it starts until
+/// <paramref name="seconds"/> have elapsed. Written as it runs, so a crash or an early kill still
+/// leaves a real partial timeline rather than nothing.
 ///
 /// WHY THIS EXISTS (issue #96)
 ///
@@ -22,12 +24,25 @@ namespace MultiSeat.Service.Diagnostics;
 /// change they separately observed (RDP output going from DISPLAY1 to DISPLAY17 across a reconnect)
 /// as a continuous, timestamped series.
 ///
-/// This probe answers that: it is launched inside the seat session right after the session exists
-/// (in parallel with, not instead of, Apollo's own startup — it must not perturb the race it is
-/// trying to observe), and polls both facts together at a fixed interval for the whole window. A
+/// A later measurement on the reporter's machine found a third-party elevation/Secure Desktop
+/// transition correlated with the failure (an ETW ConsentUI_SwitchDesktop event), but that is a
+/// correlation from a SEPARATE trace, not something this probe observed directly — OpenInputDesktop
+/// failing does not by itself show WHAT currently owns the desktop. Checking that by timing alone
+/// (does access ever return within some window) only narrows which KIND of fix applies; it does not
+/// show the mechanism. So this probe also enumerates the window station's desktops and, for each,
+/// the processes with windows on it — EnumDesktopsW needs WINSTA_ENUMDESKTOPS on the window
+/// station, a different and usually less restricted right than the DESKTOP_READOBJECTS
+/// OpenInputDesktop needs on the desktop object itself, so the former can succeed even while the
+/// latter is denied. If a UAC-style Secure Desktop is genuinely present and holding things up, this
+/// shows it directly: its name, and — access permitting — what is actually on it.
+///
+/// This probe is launched inside the seat session right after the session exists (in parallel
+/// with, not instead of, Apollo's own startup — it must not perturb the race it is trying to
+/// observe), and samples all of the above together at a fixed interval for the whole window. A
 /// true deadlock (the state never changes without an external reconnect) and a slow race (it would
 /// have resolved on its own, just not within the 10s anyone had tried) produce different fix
-/// shapes — a readiness wait versus a forced recovery step — and this is what tells them apart.
+/// shapes — a readiness wait versus a forced recovery step — and the desktop/window observation is
+/// what tells us WHY, not just WHETHER.
 ///
 /// Session-scoped like every display API: run inside the seat session, never session 0.
 /// Usage: MultiSeat.Service.exe --input-desktop-probe &lt;output-jsonl-file&gt; &lt;seconds&gt;
@@ -104,15 +119,85 @@ internal static class InputDesktopReadinessProbe
             ActiveDisplays: displays
                 .Where(d => d.Active)
                 .Select(d => new ProbeDisplay(d.GdiName, d.AdapterLow, d.AdapterHigh, d.TargetId))
-                .ToArray());
+                .ToArray(),
+            DesktopsInStation: EnumerateDesktopsAndWindows());
     }
 
     private static string? ReadObjectName(IntPtr handle)
     {
-        var sb = new System.Text.StringBuilder(256);
+        var sb = new StringBuilder(256);
         return User32.GetUserObjectInformationW(handle, User32.UOI_NAME, sb, sb.Capacity, out _)
             ? sb.ToString()
             : null;
+    }
+
+    /// <summary>
+    /// Every desktop currently in this session's window station, and — access permitting — every
+    /// process with a window on each one. A denial opening a specific named desktop is recorded
+    /// as evidence (which desktop, which Win32 error), not swallowed: a Secure Desktop refusing
+    /// DESKTOP_ENUMERATE while still existing is itself the finding.
+    /// </summary>
+    private static DesktopObservation[] EnumerateDesktopsAndWindows()
+    {
+        var names = new List<string>();
+        var hWinsta = User32.GetProcessWindowStation();
+        if (hWinsta != IntPtr.Zero)
+        {
+            try
+            {
+                User32.EnumDesktopsW(hWinsta, (name, _) => { names.Add(name); return true; }, IntPtr.Zero);
+            }
+            catch
+            {
+                // Best-effort: a probe sample must never throw and abort the whole run over this.
+            }
+        }
+
+        var results = new List<DesktopObservation>(names.Count);
+        foreach (var name in names)
+        {
+            var hDesk = User32.OpenDesktopW(name, 0, false, User32.DESKTOP_ENUMERATE);
+            if (hDesk == IntPtr.Zero)
+            {
+                results.Add(new DesktopObservation(name, false, Marshal.GetLastWin32Error(), []));
+                continue;
+            }
+
+            var windows = new List<DesktopWindow>();
+            try
+            {
+                User32.EnumDesktopWindows(hDesk, (hwnd, _) =>
+                {
+                    User32.GetWindowThreadProcessId(hwnd, out var pid);
+                    var sb = new StringBuilder(256);
+                    User32.GetClassName(hwnd, sb, sb.Capacity);
+
+                    string? processName = null;
+                    try
+                    {
+                        using var proc = System.Diagnostics.Process.GetProcessById((int)pid);
+                        processName = proc.ProcessName;
+                    }
+                    catch { /* process gone, or access denied to query it - PID/class still recorded */ }
+
+                    windows.Add(new DesktopWindow((int)pid, processName, sb.ToString()));
+                    return true;
+                }, IntPtr.Zero);
+            }
+            finally
+            {
+                User32.CloseDesktop(hDesk);
+            }
+
+            // Dedupe exact repeats (one process commonly owns several windows on one desktop) so
+            // the file stays readable without losing any distinct process/class combination.
+            var distinctWindows = windows
+                .Distinct()
+                .ToArray();
+            results.Add(new DesktopObservation(name, true, null, distinctWindows));
+        }
+
+        return results.ToArray();
     }
 }
 
@@ -123,11 +208,33 @@ internal record ProbeSample(
     bool OpenInputDesktopSucceeded,
     int Win32Error,
     string? DesktopName,
-    ProbeDisplay[] ActiveDisplays);
+    ProbeDisplay[] ActiveDisplays,
+    DesktopObservation[] DesktopsInStation);
 
 /// <summary>The RDP-side display identity bits the reporter tracked by hand (DISPLAY1 → DISPLAY17,
 /// adapter LUID low part) — captured here per sample instead of eyeballed once per reconnect.</summary>
 internal record ProbeDisplay(string GdiName, uint AdapterLow, int AdapterHigh, uint TargetId);
+
+/// <summary>
+/// One desktop found in this session's window station at sample time. <paramref name="Windows"/>
+/// is empty either because the desktop genuinely has none, or because <see cref="EnumerationDenied"/>
+/// is true and <see cref="Win32ErrorIfDenied"/> says why — the two cases are distinguished, not
+/// collapsed, because a desktop that EXISTS but refuses enumeration is itself a finding.
+/// </summary>
+internal record DesktopObservation(
+    string DesktopName,
+    bool EnumerationSucceeded,
+    int? Win32ErrorIfDenied,
+    DesktopWindow[] Windows)
+{
+    internal bool EnumerationDenied => !EnumerationSucceeded;
+}
+
+/// <summary>One window found on a desktop: its owning process (by id, and by name when the probe
+/// could still query it) and its window class — enough to name what is actually sitting there
+/// (a UAC consent dialog's class, an elevation helper's process name) rather than just "something
+/// is open".</summary>
+internal record DesktopWindow(int ProcessId, string? ProcessName, string ClassName);
 
 /// <summary>Final line of the file: how long the probe actually ran and how many samples it took,
 /// so a reader can tell a clean finish from a probe that was killed mid-run.</summary>

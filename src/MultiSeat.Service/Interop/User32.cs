@@ -414,4 +414,39 @@ internal static class User32
 
     [DllImport("kernel32.dll")]
     public static extern uint GetCurrentThreadId();
+
+    // ── Desktop/window enumeration (issue #96) ────────────────────────
+    // Direct observation of what is actually holding the desktop, instead of inferring it from
+    // OpenInputDesktop's pass/fail alone. EnumDesktopsW needs WINSTA_ENUMDESKTOPS on the WINDOW
+    // STATION, which a process already running in it normally has - a different, usually less
+    // restricted right than DESKTOP_READOBJECTS on the desktop OBJECT that OpenInputDesktop
+    // needs, so this can succeed even while that fails. Opening a NAMED desktop found this way
+    // (e.g. a UAC-style Secure Desktop) with DESKTOP_ENUMERATE can still be denied on its own
+    // ACL; that denial is itself recorded, not swallowed, because it is evidence too.
+
+    public const uint DESKTOP_ENUMERATE = 0x0040;
+
+    // CharSet.Unicode on the DllImport this is PASSED to does not make the marshaler treat the
+    // callback's own string parameter as wide - a delegate needs that stated on itself. Without
+    // this, names came back as a single character each ("M", "C", "D", "W" for what should have
+    // been full desktop names) - found by InputDesktopReadinessProbeTests cross-checking the
+    // enumerated name against OpenInputDesktop's own, not by inspection.
+    [UnmanagedFunctionPointer(CallingConvention.Winapi, CharSet = CharSet.Unicode)]
+    public delegate bool EnumDesktopProc(string lpszDesktop, IntPtr lParam);
+
+    public delegate bool EnumDesktopWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport(Lib, SetLastError = true)]
+    public static extern IntPtr GetProcessWindowStation();
+
+    [DllImport(Lib, CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool EnumDesktopsW(IntPtr hWinsta, EnumDesktopProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport(Lib, CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr OpenDesktopW(
+        string lpszDesktop, uint dwFlags, bool fInherit, uint dwDesiredAccess);
+
+    [DllImport(Lib, SetLastError = true)]
+    public static extern bool EnumDesktopWindows(
+        IntPtr hDesktop, EnumDesktopWindowsProc lpfn, IntPtr lParam);
 }
