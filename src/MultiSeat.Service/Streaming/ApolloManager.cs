@@ -348,6 +348,31 @@ public sealed class ApolloManager
         return pid;
     }
 
+    /// <summary>
+    /// /serverinfo answers before capture is proven (issue #96). If Apollo's own log says it found
+    /// no working encoder at startup, say so: the seat is reachable but may not stream until the
+    /// next launch re-probes. Warning only - it never changes the seat's status or fails a start.
+    /// </summary>
+    private void WarnIfNoEncoder(SeatInfo seat, ApolloInstance instance)
+    {
+        try
+        {
+            var logPath = ResolveLogPath(Path.GetDirectoryName(instance.ConfigPath)!);
+            if (!File.Exists(logPath)) return;
+            var line = ApolloLogScan.FindNoEncoderLine(
+                ApolloLogScan.ReadTail(logPath), instance.StartedAt.LocalDateTime);
+            if (line is not null)
+                _logger.LogWarning(
+                    "Seat {Id}: Apollo's API is up but its log reports no working encoder at startup " +
+                    "(\"{Line}\"). Capture may fail until a stream launch re-probes (issue #96). Log: {Log}",
+                    seat.Id, line, logPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Seat {Id}: could not scan Apollo's log for encoder state", seat.Id);
+        }
+    }
+
     internal async Task WaitForReadinessAsync(SeatInfo seat, ApolloInstance instance, CancellationToken ct)
     {
         var recovering = seat.Status is SeatStatus.Ready or SeatStatus.Streaming or SeatStatus.Error or SeatStatus.Connecting;
@@ -361,6 +386,7 @@ public sealed class ApolloManager
                 expectedId, () => instance.IsAlive, ct,
                 timeout: TimeSpan.FromSeconds(_options.ApolloReadinessTimeoutSeconds));
             seat.ErrorMessage = null;
+            WarnIfNoEncoder(seat, instance);
             if (recovering) seat.TransitionTo(SeatStatus.Ready, _logger);
         }
         catch (Exception ex)
