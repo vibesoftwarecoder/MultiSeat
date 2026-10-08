@@ -67,6 +67,22 @@ public sealed class SeatInfo
     /// <summary>Where <see cref="ScaleFactor"/> came from.</summary>
     public ScaleFactorSource ScaleFactorSource { get; set; } = ScaleFactorSource.Derived;
 
+    /// <summary>
+    /// The DPI scale the session was last READ running at, in percent — what Windows applied, not
+    /// what <see cref="ScaleFactor"/> says was asked for (issue #93). Null when it has not been
+    /// read since the session was last launched or reconnected, or could not be read.
+    /// </summary>
+    public int? AppliedScaleFactor { get; set; }
+
+    /// <summary>When <see cref="AppliedScaleFactor"/> was read.</summary>
+    public DateTimeOffset? AppliedScaleCheckedAt { get; set; }
+
+    /// <summary>
+    /// True when the session was read running at a different scale than <see cref="ScaleFactor"/>.
+    /// False when it matches or has not been read, so a missing reading never raises an alarm.
+    /// </summary>
+    public bool ScaleMismatch => AppliedScaleFactor is { } applied && applied != ScaleFactor;
+
     // Networking
     public int PortBase { get; set; }
     public int ApolloProcessId { get; set; }
