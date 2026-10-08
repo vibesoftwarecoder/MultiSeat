@@ -40,6 +40,13 @@ export interface SeatInfo {
   /** The seat's own override, or null when it has none. */
   scaleFactorOverride: number | null;
   /**
+   * The scale the session was last READ running at, in percent: what Windows applied, where
+   * scaleFactor is what was asked for. Null until it has been read since the last (re)connect.
+   */
+  appliedScaleFactor?: number | null;
+  /** True when the session was read running at a different scale than scaleFactor. */
+  scaleMismatch?: boolean;
+  /**
    * Set when the seat's fps is above what the host's refresh rate can compose, checked when the
    * seat was provisioned (issue #70). Null when there is no mismatch.
    */

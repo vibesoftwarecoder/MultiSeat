@@ -221,6 +221,8 @@ public static class SeatEndpoints
                         width = seat?.Width,
                         height = seat?.Height,
                         scaleFactor = seat?.ScaleFactor,
+                        appliedScaleFactor = seat?.AppliedScaleFactor,
+                        scaleMismatch = seat?.ScaleMismatch,
                         sessionId = seat?.SessionId,
                     });
                 }
@@ -285,6 +287,46 @@ public static class SeatEndpoints
                 finally
                 {
                     try { File.Delete(outFile); } catch { /* best effort */ }
+                }
+            });
+
+        // Issue #93: what scale is this seat's session ACTUALLY running at? Reads it from inside
+        // the session (per monitor, plus the system DPI) and returns it beside the scale
+        // MultiSeat asked for. Everything else the API reports about scale is the request; this
+        // is the only answer from the session itself. Run it again after a client connects to see
+        // the scale of Apollo's virtual display, which the reading taken at reconnect predates.
+        group.MapGet("/{id:guid}/diagnostics/applied-scale",
+            async (Guid id, SeatManager mgr, CancellationToken ct) =>
+            {
+                if (mgr.GetSeat(id) is null) return Results.NotFound();
+                try
+                {
+                    var (seat, verdict, observation) = await mgr.CheckAppliedScaleAsync(id, ct);
+                    return Results.Ok(new
+                    {
+                        intendedScaleFactor = seat.ScaleFactor,
+                        intendedSource = seat.ScaleFactorSource,
+                        appliedScaleFactor = seat.AppliedScaleFactor,
+                        verdict = verdict.ToString(),
+                        scaleMismatch = seat.ScaleMismatch,
+                        sessionId = seat.SessionId,
+                        systemScaleFactor = observation?.SystemPercent,
+                        error = observation is null ? "The helper produced no result in the seat session." : observation.Error,
+                        monitors = observation?.Monitors.Select(m => new
+                        {
+                            gdiName = m.GdiName,
+                            adapter = m.Adapter,
+                            primary = m.Primary,
+                            widthPx = m.WidthPx,
+                            heightPx = m.HeightPx,
+                            effectiveScaleFactor = m.EffectivePercent,
+                            storedScaleFactor = m.StoredPercent,
+                        }),
+                    });
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return ApiErrors.ToResult(ex);
                 }
             });
 
@@ -470,6 +512,8 @@ public static class SeatEndpoints
                 scaleFactor = seat?.ScaleFactor,
                 scaleFactorSource = seat?.ScaleFactorSource,
                 scaleFactorOverride = seat?.ScaleFactorOverride,
+                appliedScaleFactor = seat?.AppliedScaleFactor,
+                scaleMismatch = seat?.ScaleMismatch,
                 sessionId = seat?.SessionId,
             });
         }

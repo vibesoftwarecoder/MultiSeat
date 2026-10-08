@@ -79,6 +79,11 @@ export function ScaleControl({ seat, onUpdate, canChange }: Props) {
             {seat.scaleFactor}%{" "}
             <span className="text-muted">({scaleSourceLabel(seat.scaleFactorSource)})</span>
           </span>
+          {seat.scaleMismatch && (
+            <span className="field-error" title="The scale the session was read running at differs from the one asked for.">
+              Running at {seat.appliedScaleFactor}%
+            </span>
+          )}
           {canChange && (
             <button className="btn-sm" onClick={handleOpen}>
               Change
@@ -122,7 +127,8 @@ export function ScaleControl({ seat, onUpdate, canChange }: Props) {
       {pending && (
         <div className="text-muted" style={{ fontSize: 12 }}>
           If the scale in effect changes, the seat's session reconnects at the new scale. A live
-          stream pauses for a few seconds.
+          stream pauses for a few seconds. If Windows keeps the old scale through the reconnect,
+          the session is created again, and programs running in it are closed.
         </div>
       )}
       {error && <div className="error-banner">{error}</div>}
