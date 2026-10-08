@@ -449,4 +449,55 @@ internal static class User32
     [DllImport(Lib, SetLastError = true)]
     public static extern bool EnumDesktopWindows(
         IntPtr hDesktop, EnumDesktopWindowsProc lpfn, IntPtr lParam);
+
+    // -- Desktop-switch events (issue #96) -----------------------------
+    // EVENT_SYSTEM_DESKTOPSWITCH is raised when the input desktop changes (Default <-> Winlogon
+    // / Secure Desktop). WINEVENT_OUTOFCONTEXT delivers it to the installing thread through its
+    // message queue, so that thread MUST pump messages. See DesktopSwitchHook.
+
+    public const uint EVENT_SYSTEM_DESKTOPSWITCH = 0x0020;
+    public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    public const uint WM_QUIT = 0x0012;
+    public const uint PM_NOREMOVE = 0x0000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NativeMsg
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public UIntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public int ptX;
+        public int ptY;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    public delegate void WinEventProc(
+        IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild,
+        uint idEventThread, uint dwmsEventTime);
+
+    [DllImport(Lib, SetLastError = true)]
+    public static extern IntPtr SetWinEventHook(
+        uint eventMin, uint eventMax, IntPtr hmodWinEventProc, WinEventProc lpfnWinEventProc,
+        uint idProcess, uint idThread, uint dwFlags);
+
+    [DllImport(Lib, SetLastError = true)]
+    public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+
+    [DllImport(Lib, SetLastError = true)]
+    public static extern int GetMessageW(out NativeMsg lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+    [DllImport(Lib, SetLastError = true)]
+    public static extern bool PeekMessageW(
+        out NativeMsg lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+
+    [DllImport(Lib)]
+    public static extern bool TranslateMessage(ref NativeMsg lpMsg);
+
+    [DllImport(Lib)]
+    public static extern IntPtr DispatchMessageW(ref NativeMsg lpMsg);
+
+    [DllImport(Lib, SetLastError = true)]
+    public static extern bool PostThreadMessageW(uint idThread, uint msg, UIntPtr wParam, IntPtr lParam);
 }

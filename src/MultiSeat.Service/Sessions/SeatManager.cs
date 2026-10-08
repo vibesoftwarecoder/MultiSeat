@@ -1794,11 +1794,15 @@ public sealed class SeatManager
                 : null;
             if (result is { Outcome: InputDesktopGateOutcome.Ready })
                 _logger.LogInformation(
-                    "Seat {Id}: input desktop usable after {Ms:F0}ms - starting Apollo", seat.Id, result.ElapsedMs);
+                    "Seat {Id}: input desktop usable after {Ms:F0}ms - starting Apollo " +
+                    "(desktop-switch events: {Events}, hook installed: {Hook})",
+                    seat.Id, result.ElapsedMs, result.SwitchEvents, result.HookInstalled);
             else
                 _logger.LogWarning(
                     "Seat {Id}: input desktop still not usable ({Result}) - starting Apollo anyway; " +
-                    "it may fail to capture (issue #96)", seat.Id, result?.Outcome.ToString() ?? "no result");
+                    "it may fail to capture (issue #96) (desktop-switch events: {Events}, hook installed: {Hook})",
+                    seat.Id, result?.Outcome.ToString() ?? "no result",
+                    result?.SwitchEvents ?? 0, result?.HookInstalled ?? false);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)

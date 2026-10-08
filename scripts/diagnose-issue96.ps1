@@ -269,11 +269,18 @@ function Invoke-Trial {
     }
 
     $samples = @()
+    $switchEvents = @()
+    $hookLine = $null
     $summaryLine = $null
     if (Test-Path $probeFile) {
         foreach ($line in Get-Content $probeFile) {
             if ($line -match '"Kind":"summary"') { $summaryLine = $line; continue }
-            if ($line.Trim()) { $samples += ($line | ConvertFrom-Json) }
+            if (-not $line.Trim()) { continue }
+            # The probe also writes one "hook" line (did the desktop-switch hook install) and one
+            # "desktop-switch" line per EVENT_SYSTEM_DESKTOPSWITCH; neither is a sample.
+            if ($line -match '"Kind":"hook"') { $hookLine = $line | ConvertFrom-Json; continue }
+            if ($line -match '"Kind":"desktop-switch"') { $switchEvents += ($line | ConvertFrom-Json); continue }
+            $samples += ($line | ConvertFrom-Json)
         }
     }
 
@@ -291,6 +298,8 @@ function Invoke-Trial {
         FirstSuccessMs   = if ($firstSuccess) { [math]::Round($firstSuccess.ElapsedMs) } else { $null }
         NeverSucceeded   = ($null -eq $firstSuccess)
         SampleCount      = $samples.Count
+        HookInstalled    = if ($hookLine) { $hookLine.Installed } else { $null }
+        SwitchEvents     = $switchEvents.Count
         DisplayAtStart   = $startDisplay
         DisplayAtSuccess = $successDisplay
         DisplayChanged   = if ($firstSuccess) { $startDisplay -ne $successDisplay } else { $null }
@@ -344,7 +353,7 @@ finally {
 # ---------------------------------------------------------------- report
 Write-Host ''
 Write-Host '== per-trial results ==' -ForegroundColor Cyan
-$allResults | Format-Table Keepalive, Trial, SeatStatus, FirstSuccessMs, NeverSucceeded, DisplayChanged, SampleCount -AutoSize
+$allResults | Format-Table Keepalive, Trial, SeatStatus, FirstSuccessMs, NeverSucceeded, DisplayChanged, SampleCount, HookInstalled, SwitchEvents -AutoSize
 
 Write-Host ''
 Write-Host '== aggregate, per condition ==' -ForegroundColor Cyan
