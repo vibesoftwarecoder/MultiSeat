@@ -330,6 +330,11 @@ public sealed class SessionHealthCheck
             return;
         }
 
+        // Read the scale the reconnected session is running at and record it beside the one the
+        // seat is meant to have (#93). Not awaited, and never acted on here: a session that
+        // dropped on its own keeps the scale it had, so a mismatch is something to report.
+        _seatManager.RecordAppliedScaleInBackground(seat, "after health-check reconnect");
+
         // Give the display pipeline a moment to reinitialize after the session
         // transitions back to Active — SudoVDA and DXGI need a beat to be ready.
         await Task.Delay(2000, ct);

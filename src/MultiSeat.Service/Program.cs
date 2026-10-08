@@ -212,6 +212,16 @@ if (args.Length == 3 && args[0] == "--input-desktop-probe" && int.TryParse(args[
     return MultiSeat.Service.Diagnostics.InputDesktopReadinessProbe.RunAndWriteToFile(args[1], probeSeconds);
 }
 
+// ── Applied-scale reader (issue #93) ──────────────────────────────────
+// Runs inside a seat session and writes the DPI scale that session is ACTUALLY running at (per
+// monitor, plus the system DPI) as JSON, so the service can compare it with the scale it asked
+// mstsc for instead of trusting its own record of the request.
+// Usage: MultiSeat.Service.exe --read-applied-scale <output-json-file>
+if (args.Length == 2 && args[0] == "--read-applied-scale")
+{
+    return MultiSeat.Service.Diagnostics.SessionScaleProbe.RunAndWriteToFile(args[1]);
+}
+
 // ── Input-desktop gate helper (issue #96) ──────────────────────────────
 // Runs inside a seat session: returns once OpenInputDesktop has worked continuously for
 // <stable-ms>, or when <timeout-seconds> pass. Result goes to <result-file>.

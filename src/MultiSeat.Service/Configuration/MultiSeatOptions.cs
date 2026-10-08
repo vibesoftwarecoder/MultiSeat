@@ -364,6 +364,14 @@ public sealed class MultiSeatOptions
     // Must be one of 100, 125, 150, 175, 200, 250, 300, 400, 500 — the values mstsc accepts for
     // desktopscalefactor. Anything else is refused with a warning at startup and NOT used; it is
     // never rounded to a neighbour, because that would hand every seat a size nobody asked for.
+    //
+    // A scale change on a live seat (and a resize that moves the scale, such as a client-triggered
+    // one with FollowClientResolution) reconnects the seat's session, then reads the scale the
+    // session is actually running at (issue #93). If Windows kept the old scale, the session is
+    // logged off and created again, and the programs running in it are closed. Nothing is
+    // recreated when the reconnect took. GET /api/seats/{id}/diagnostics/applied-scale returns
+    // the reading beside the scale that was asked for; the seat's appliedScaleFactor and
+    // scaleMismatch carry the last one.
     public int? DefaultScaleFactor { get; set; }
 
     /// <summary>
