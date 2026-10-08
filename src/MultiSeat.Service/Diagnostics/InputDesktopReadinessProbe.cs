@@ -54,21 +54,39 @@ internal static class InputDesktopReadinessProbe
 
     internal static int RunAndWriteToFile(string outputPath, int seconds)
     {
-        using var writer = new StreamWriter(outputPath, append: false) { AutoFlush = true };
+        using var file = new StreamWriter(outputPath, append: false) { AutoFlush = true };
+
+        // Samples (this thread) and desktop-switch events (the hook thread) both write lines, so
+        // every write goes through one lock: a line is never interleaved with another.
+        var gate = new object();
+        void WriteLine(string line) { lock (gate) file.WriteLine(line); }
 
         var start = DateTime.UtcNow;
         var deadline = start + TimeSpan.FromSeconds(Math.Max(1, seconds));
         var sampleIndex = 0;
 
+        // EVENT_SYSTEM_DESKTOPSWITCH, recorded as it happens. This is the direct observation of
+        // WHEN the input desktop switches and which desktops/windows exist at that instant. Whether
+        // Windows raises it at all to a non-SYSTEM process in an RDP session is unverified: the
+        // "hook" line below says whether it installed, and the summary's EventCount says whether it
+        // ever fired. Zero events across a run that also shows denied samples means it does NOT.
+        var recorder = new ProbeEventRecorder(
+            WriteLine, start, () => DateTime.UtcNow, () => ReadInputDesktop(), EnumerateDesktopsAndWindows);
+        using var hook = DesktopSwitchHook.Start(recorder.OnSwitch);
+        WriteLine(JsonSerializer.Serialize(new ProbeHookStatus(
+            "hook", (DateTime.UtcNow - start).TotalMilliseconds, hook.Installed, hook.InstallError)));
+        var hookInstalled = hook.Installed;
+
         while (DateTime.UtcNow < deadline)
         {
             var sample = TakeSample(start, sampleIndex++);
-            writer.WriteLine(JsonSerializer.Serialize(sample));
+            WriteLine(JsonSerializer.Serialize(sample));
             Thread.Sleep(SampleInterval);
         }
 
-        writer.WriteLine(JsonSerializer.Serialize(new ProbeSummary(
-            "summary", (DateTime.UtcNow - start).TotalMilliseconds, sampleIndex)));
+        WriteLine(JsonSerializer.Serialize(new ProbeSummary(
+            "summary", (DateTime.UtcNow - start).TotalMilliseconds, sampleIndex,
+            recorder.Count, hookInstalled)));
 
         return 0;
     }
@@ -82,29 +100,7 @@ internal static class InputDesktopReadinessProbe
     internal static ProbeSample TakeSample(DateTime start, int index)
     {
         var elapsedMs = (DateTime.UtcNow - start).TotalMilliseconds;
-        var hDesktop = User32.OpenInputDesktop(0, false, User32.DESKTOP_READOBJECTS);
-
-        bool opened;
-        int win32Error;
-        string? desktopName = null;
-
-        if (hDesktop == IntPtr.Zero)
-        {
-            opened = false;
-            win32Error = Marshal.GetLastWin32Error();
-        }
-        else
-        {
-            opened = true;
-            win32Error = 0;
-            desktopName = ReadObjectName(hDesktop);
-
-            // Mirror syncThreadDesktop(): if Apollo's own next move is attaching the calling
-            // thread to whatever it just opened, a probe that only opens and never attaches
-            // would miss a failure mode scoped to SetThreadDesktop specifically.
-            User32.SetThreadDesktop(hDesktop);
-            User32.CloseDesktop(hDesktop);
-        }
+        var (opened, win32Error, desktopName) = ReadInputDesktop(attachThread: true);
 
         List<DisplayPathRecord> displays;
         try { displays = DisplayEnumeratorHelper.EnumerateAllPaths(); }
@@ -123,6 +119,27 @@ internal static class InputDesktopReadinessProbe
             DesktopsInStation: EnumerateDesktopsAndWindows());
     }
 
+    /// <summary>
+    /// Can this thread open the input desktop right now, with which error, and what is it called.
+    /// <paramref name="attachThread"/> mirrors Apollo's <c>syncThreadDesktop()</c> (sample loop
+    /// only): the hook thread must NOT move itself onto another desktop, so it passes false.
+    /// </summary>
+    internal static (bool Opened, int Win32Error, string? Name) ReadInputDesktop(bool attachThread = false)
+    {
+        var hDesktop = User32.OpenInputDesktop(0, false, User32.DESKTOP_READOBJECTS);
+        if (hDesktop == IntPtr.Zero)
+            return (false, Marshal.GetLastWin32Error(), null);
+
+        var name = ReadObjectName(hDesktop);
+
+        // Mirror syncThreadDesktop(): if Apollo's own next move is attaching the calling
+        // thread to whatever it just opened, a probe that only opens and never attaches
+        // would miss a failure mode scoped to SetThreadDesktop specifically.
+        if (attachThread) User32.SetThreadDesktop(hDesktop);
+        User32.CloseDesktop(hDesktop);
+        return (true, 0, name);
+    }
+
     private static string? ReadObjectName(IntPtr handle)
     {
         var sb = new StringBuilder(256);
@@ -137,7 +154,7 @@ internal static class InputDesktopReadinessProbe
     /// as evidence (which desktop, which Win32 error), not swallowed: a Secure Desktop refusing
     /// DESKTOP_ENUMERATE while still existing is itself the finding.
     /// </summary>
-    private static DesktopObservation[] EnumerateDesktopsAndWindows()
+    internal static DesktopObservation[] EnumerateDesktopsAndWindows()
     {
         var names = new List<string>();
         var hWinsta = User32.GetProcessWindowStation();
@@ -209,7 +226,8 @@ internal record ProbeSample(
     int Win32Error,
     string? DesktopName,
     ProbeDisplay[] ActiveDisplays,
-    DesktopObservation[] DesktopsInStation);
+    DesktopObservation[] DesktopsInStation,
+    string Kind = "sample");
 
 /// <summary>The RDP-side display identity bits the reporter tracked by hand (DISPLAY1 → DISPLAY17,
 /// adapter LUID low part) — captured here per sample instead of eyeballed once per reconnect.</summary>
@@ -238,4 +256,63 @@ internal record DesktopWindow(int ProcessId, string? ProcessName, string ClassNa
 
 /// <summary>Final line of the file: how long the probe actually ran and how many samples it took,
 /// so a reader can tell a clean finish from a probe that was killed mid-run.</summary>
-internal record ProbeSummary(string Kind, double TotalElapsedMs, int SampleCount);
+internal record ProbeSummary(
+    string Kind, double TotalElapsedMs, int SampleCount, int EventCount = 0, bool HookInstalled = false);
+
+/// <summary>First line after the run starts: did the desktop-switch hook install, and if not, why.</summary>
+internal record ProbeHookStatus(string Kind, double ElapsedMs, bool Installed, int Win32Error);
+
+/// <summary>
+/// One EVENT_SYSTEM_DESKTOPSWITCH, written the moment it was delivered. <paramref name="EventTimeMs"/>
+/// is the system's own timestamp for the event (ms since boot), <paramref name="ElapsedMs"/> is when
+/// this process handled it; the input desktop and the desktop/window listing are read at handling
+/// time. An event with <c>OpenInputDesktopSucceeded</c> false is a switch INTO a desktop this
+/// session cannot open - the Winlogon / Secure Desktop case - and <c>DesktopsInStation</c> shows
+/// what is on it, access permitting.
+/// </summary>
+internal record ProbeEvent(
+    string Kind,
+    int EventIndex,
+    double ElapsedMs,
+    uint EventTimeMs,
+    bool OpenInputDesktopSucceeded,
+    int Win32Error,
+    string? InputDesktopName,
+    DesktopObservation[] DesktopsInStation);
+
+/// <summary>
+/// Turns a desktop-switch notification into a JSONL line. All system access goes through the
+/// delegates, so a test can feed it a fake clock, a fake "input desktop" and a fake window list
+/// and check exactly what is written. Never throws: it runs inside a WinEvent callback.
+/// </summary>
+internal sealed class ProbeEventRecorder(
+    Action<string> writeLine,
+    DateTime start,
+    Func<DateTime> utcNow,
+    Func<(bool Opened, int Win32Error, string? Name)> readInputDesktop,
+    Func<DesktopObservation[]> enumerateDesktops)
+{
+    private int _count;
+
+    /// <summary>How many events have been recorded.</summary>
+    public int Count => Volatile.Read(ref _count);
+
+    public void OnSwitch(uint eventTimeMs)
+    {
+        try
+        {
+            var index = Interlocked.Increment(ref _count) - 1;
+            var elapsed = (utcNow() - start).TotalMilliseconds;
+            var (opened, err, name) = readInputDesktop();
+            DesktopObservation[] desktops;
+            try { desktops = enumerateDesktops(); }
+            catch { desktops = []; }
+            writeLine(JsonSerializer.Serialize(new ProbeEvent(
+                "desktop-switch", index, elapsed, eventTimeMs, opened, err, name, desktops)));
+        }
+        catch
+        {
+            // A callback must never unwind into the OS; a lost line is better than a dead hook.
+        }
+    }
+}
