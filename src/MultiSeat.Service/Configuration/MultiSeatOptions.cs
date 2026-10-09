@@ -365,13 +365,17 @@ public sealed class MultiSeatOptions
     // desktopscalefactor. Anything else is refused with a warning at startup and NOT used; it is
     // never rounded to a neighbour, because that would hand every seat a size nobody asked for.
     //
+    // The scale reaches the session through Default.rdp as desktopscalefactor plus
+    // devicescalefactor:i:100. Before 0.6.19 the second key was missing, and mstsc then sends the
+    // CONSOLE monitor's scale instead, so this setting and every seat override did nothing
+    // (issue #93).
+    //
     // A scale change on a live seat (and a resize that moves the scale, such as a client-triggered
     // one with FollowClientResolution) reconnects the seat's session, then reads the scale the
-    // session is actually running at (issue #93). If Windows kept the old scale, the session is
-    // logged off and created again, and the programs running in it are closed. Nothing is
-    // recreated when the reconnect took. GET /api/seats/{id}/diagnostics/applied-scale returns
-    // the reading beside the scale that was asked for; the seat's appliedScaleFactor and
-    // scaleMismatch carry the last one.
+    // session is actually running at. A mismatch is reported, never acted on: the session is not
+    // logged off, because that closes the programs running in it. GET
+    // /api/seats/{id}/diagnostics/applied-scale returns the reading beside the scale that was
+    // asked for; the seat's appliedScaleFactor, scaleMismatch and scaleNote carry the last one.
     public int? DefaultScaleFactor { get; set; }
 
     /// <summary>

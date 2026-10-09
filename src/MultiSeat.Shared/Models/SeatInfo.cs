@@ -83,6 +83,15 @@ public sealed class SeatInfo
     /// </summary>
     public bool ScaleMismatch => AppliedScaleFactor is { } applied && applied != ScaleFactor;
 
+    /// <summary>
+    /// A plain-language note on the last reading, for the dashboard and the API: why the scale
+    /// the session runs at is not the one asked for, that it could not be read, or that the
+    /// session's system scale still lags behind until the seat user signs out. Null when the
+    /// reading matches in full or there is no reading. Set together with
+    /// <see cref="AppliedScaleFactor"/>.
+    /// </summary>
+    public string? ScaleNote { get; set; }
+
     // Networking
     public int PortBase { get; set; }
     public int ApolloProcessId { get; set; }
