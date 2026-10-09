@@ -53,6 +53,9 @@ public sealed record ReleaseFetchResult(
 /// </summary>
 public sealed class GitHubReleaseClient
 {
+    /// <summary>The <see cref="ReleaseFetchResult.Error"/> of a rate-limited fetch; the service tells it apart from other failures by this text.</summary>
+    public const string RateLimitedError = "rate limited";
+
     public const int MaxRedirects = 3;
     public const long MaxBodyBytes = 2 * 1024 * 1024;
     public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(10);
@@ -170,7 +173,7 @@ public sealed class GitHubReleaseClient
                 {
                     var notBefore = RateLimitNotBefore(response);
                     if (notBefore is not null)
-                        return new ReleaseFetchResult(FetchOutcome.RateLimited, [], null, "rate limited", notBefore, status);
+                        return new ReleaseFetchResult(FetchOutcome.RateLimited, [], null, RateLimitedError, notBefore, status);
                     return ReleaseFetchResult.Fail("HTTP " + status, status);
                 }
 
