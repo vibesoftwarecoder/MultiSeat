@@ -18,8 +18,10 @@ public static class UpdateEndpoints
     private const int MaxSettingsBodyBytes = 1024;
     private static readonly SemaphoreSlim SettingsLock = new(1, 1);
 
-    public static void Map(WebApplication app)
+    /// <param name="settingsPath">Where the enable switch is saved; tests pass a temp file. Default: appsettings.local.json beside the exe.</param>
+    public static void Map(WebApplication app, string? settingsPath = null)
     {
+        settingsPath ??= Path.Combine(AppContext.BaseDirectory, "appsettings.local.json");
         var group = app.MapGroup("/api/system").WithTags("System");
 
         // Reads the in-memory result only, whether or not a cache exists.
@@ -34,7 +36,7 @@ public static class UpdateEndpoints
         // the file that outranks appsettings.json; the running service picks it up through the
         // configuration reload, no restart.
         group.MapPost("/updates/settings", (HttpRequest request, ILoggerFactory logs) =>
-            SetEnabledAsync(request.Body, Path.Combine(AppContext.BaseDirectory, "appsettings.local.json"),
+            SetEnabledAsync(request.Body, settingsPath,
                 logs.CreateLogger("MultiSeat.Updates"), request.HttpContext.RequestAborted));
     }
 
