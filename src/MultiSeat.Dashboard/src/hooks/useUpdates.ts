@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, system } from "../api/client";
 import type { UpdatesState } from "../api/types";
-import { loadDismissed, saveDismissed } from "../components/updateUtils";
+import { loadDismissed, loadOffNoticeDismissed, saveDismissed, saveOffNoticeDismissed } from "../components/updateUtils";
 
 /** A cheap local read on the service, so ten minutes is plenty. */
 export const UPDATES_POLL_MS = 10 * 60 * 1000;
@@ -46,6 +46,7 @@ export function useUpdates() {
   const [data, setData] = useState<UpdatesState | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [dismissed, setDismissed] = useState<Record<string, string>>(loadDismissed);
+  const [offNoticeDismissed, setOffNoticeDismissed] = useState<boolean>(loadOffNoticeDismissed);
   const alive = useRef(true);
   const lastLoad = useRef(0);
 
@@ -105,5 +106,11 @@ export function useUpdates() {
     });
   }, []);
 
-  return { data, loaded, dismissed, dismiss, refresh: load, checkNow, setEnabled };
+  /** Hides the one-time "update checks are off" notice for good in this browser. */
+  const dismissOffNotice = useCallback(() => {
+    saveOffNoticeDismissed();
+    setOffNoticeDismissed(true);
+  }, []);
+
+  return { data, loaded, dismissed, dismiss, offNoticeDismissed, dismissOffNotice, refresh: load, checkNow, setEnabled };
 }

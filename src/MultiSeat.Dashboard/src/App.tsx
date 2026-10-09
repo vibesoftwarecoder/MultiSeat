@@ -7,6 +7,7 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { TipsPage } from "./pages/TipsPage";
 import { UpdatesProvider, useUpdatesContext } from "./hooks/UpdatesContext";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { UpdateOffNotice } from "./components/UpdateOffNotice";
 import { visibleAnnouncements } from "./components/updateUtils";
 
 // A small dot after "System" while any update notice is announced and not dismissed.
@@ -52,6 +53,7 @@ export default function App() {
 
         <main className="main-content">
           <UpdateBanner />
+          <UpdateOffNotice />
           <Routes>
             <Route path="/" element={<SeatsPage />} />
             <Route path="/input" element={<InputPage />} />

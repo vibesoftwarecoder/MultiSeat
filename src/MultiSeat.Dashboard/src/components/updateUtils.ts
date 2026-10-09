@@ -4,6 +4,8 @@ import type { UpdateComponent, UpdateStatus, UpdatesState } from "../api/types";
 
 export const DISMISS_KEY = "multiseat-update-dismissed";
 
+export const OFF_NOTICE_DISMISS_KEY = "multiseat-update-off-notice-dismissed";
+
 /** At most this many announcement lines are shown at once. */
 export const MAX_ANNOUNCEMENTS = 3;
 
@@ -57,6 +59,24 @@ export function saveDismissed(map: Record<string, string>): void {
     localStorage.setItem(DISMISS_KEY, JSON.stringify(map));
   } catch {
     // Storage blocked or full: the in-memory state still hides the notice for this visit.
+  }
+}
+
+/** Whether the one-time "update checks are off" notice was dismissed in this browser. Any storage failure means not dismissed. */
+export function loadOffNoticeDismissed(): boolean {
+  try {
+    return localStorage.getItem(OFF_NOTICE_DISMISS_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Best effort, like saveDismissed. */
+export function saveOffNoticeDismissed(): void {
+  try {
+    localStorage.setItem(OFF_NOTICE_DISMISS_KEY, "1");
+  } catch {
+    // Storage blocked or full: the in-memory flag still hides the notice for this visit.
   }
 }
 
