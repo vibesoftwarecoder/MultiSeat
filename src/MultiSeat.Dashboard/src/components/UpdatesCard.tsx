@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import type { UpdateComponent } from "../api/types";
 import { useUpdatesContext } from "../hooks/UpdatesContext";
 import { ReleaseLink, UpdateInstructions } from "./UpdateInstructions";
@@ -50,11 +51,33 @@ function UpdateRow({ c }: { c: UpdateComponent }) {
 export function UpdatesCard() {
   const updates = useUpdatesContext();
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const checkInFlight = useRef(false);
+  const mounted = useRef(true);
+  const location = useLocation();
   const [cooling, setCooling] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  useEffect(() => () => clearTimeout(timer.current), []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      clearTimeout(timer.current);
+    };
+  }, []);
+
+  // Arriving at /system#updates (first render or from the "See what is sent" link) lands on this
+  // card: scroll it into view and move focus to its heading for keyboard users. The card only
+  // exists once the data has loaded, hence the dependency on it. A missing element is ignored.
+  const hasData = updates?.data != null;
+  useEffect(() => {
+    if (location.hash !== "#updates" || !hasData) return;
+    const card = document.getElementById("updates");
+    if (!card) return;
+    card.scrollIntoView?.({ block: "start" });
+    card.querySelector<HTMLElement>("h3")?.focus();
+  }, [location.hash, location.key, hasData]);
 
   const startCooldown = () => {
     setCooling(true);
@@ -69,7 +92,7 @@ export function UpdatesCard() {
     return (
       <div className="card update-card" id="updates">
         <div className="card-body">
-          <h3>Updates</h3>
+          <h3 tabIndex={-1}>Updates</h3>
           <div className="text-muted" style={{ fontSize: 13 }}>
             {updates.loaded ? "Update information is not available right now." : "Loading..."}
           </div>
@@ -78,11 +101,17 @@ export function UpdatesCard() {
     );
   }
 
+  // The service runs the check inside this request, which can take about 30 seconds. The button
+  // stays disabled for the whole time and a second click cannot start a second request.
   const handleCheck = async () => {
-    setBusy(true);
+    if (checkInFlight.current) return;
+    checkInFlight.current = true;
+    setChecking(true);
     setMessage(null);
     const r = await updates.checkNow();
-    setBusy(false);
+    checkInFlight.current = false;
+    if (!mounted.current) return;
+    setChecking(false);
     if (r.ok) {
       startCooldown();
     } else {
@@ -95,6 +124,7 @@ export function UpdatesCard() {
     setBusy(true);
     setMessage(null);
     const r = await updates.setEnabled(enabled);
+    if (!mounted.current) return;
     setBusy(false);
     if (!r.ok) setMessage(r.message);
   };
@@ -104,7 +134,7 @@ export function UpdatesCard() {
     return (
       <div className="card update-card" id="updates">
         <div className="card-body">
-          <h3>Updates</h3>
+          <h3 tabIndex={-1}>Updates</h3>
           <p className="update-off-lead">
             Update checks are off. MultiSeat has not contacted the internet.
           </p>
@@ -133,18 +163,23 @@ export function UpdatesCard() {
   }
 
   // ── On ──
-  const checkDisabled = busy || cooling;
+  const checkDisabled = busy || checking || cooling;
   return (
     <div className="card update-card" id="updates">
       <div className="card-body">
         <div className="update-card-head">
-          <h3>Updates</h3>
+          <h3 tabIndex={-1}>Updates</h3>
           <span className="text-muted update-checked">Last checked {formatAge(data.checkedAt)}</span>
           <button className="btn-sm" onClick={handleCheck} disabled={checkDisabled}>
-            {busy ? "Checking..." : "Check now"}
+            {checking ? "Checking…" : "Check now"}
           </button>
         </div>
-        {cooling && !message && (
+        {checking && (
+          <div className="text-muted update-message" role="status">
+            Checking GitHub for new releases. This can take up to 30 seconds.
+          </div>
+        )}
+        {cooling && !checking && !message && (
           <div className="text-muted update-message" role="status">
             A check just ran. You can check again in a minute.
           </div>
@@ -160,7 +195,7 @@ export function UpdatesCard() {
 
         <div className="update-toggle">
           <span>Update checks: ON</span>
-          <button className="btn-sm" onClick={() => handleEnabled(false)} disabled={busy}>
+          <button className="btn-sm" onClick={() => handleEnabled(false)} disabled={busy || checking}>
             Turn off
           </button>
         </div>

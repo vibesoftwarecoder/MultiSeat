@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { UpdateComponent, UpdatesState } from "./api/types";
 import { UpdatesProvider } from "./hooks/UpdatesContext";
@@ -110,7 +111,7 @@ const CHECK = "POST /api/system/updates/check";
 const SETTINGS = "POST /api/system/updates/settings";
 
 function mount(ui: React.ReactNode = <><UpdateBanner /><UpdatesCard /></>) {
-  return render(<UpdatesProvider>{ui}</UpdatesProvider>);
+  return render(<MemoryRouter><UpdatesProvider>{ui}</UpdatesProvider></MemoryRouter>);
 }
 
 function banner() {
