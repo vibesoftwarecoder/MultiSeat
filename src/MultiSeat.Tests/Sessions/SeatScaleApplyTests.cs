@@ -10,21 +10,21 @@ using Xunit;
 namespace MultiSeat.Tests.Sessions;
 
 /// <summary>
-/// Issue #93: after a client-triggered reconnect the seat's dashboard scale read 100%. The scale
-/// MultiSeat reports is the one it wrote into Default.rdp, and nothing had ever read back what
-/// Windows applied. A reconnect keeps the Windows session and is known to apply a new size; that
-/// it applies a new scale was never measured. So the seat reads the scale from the session after
-/// a reconnect and recreates the session when the two disagree.
+/// Issue #93: a seat's dashboard scale did not match what the session rendered at. After a
+/// reconnect the seat reads the scale from inside the session and reports it beside the scale
+/// asked for.
 ///
-/// These fake the session through the same delegates the seat manager passes in, and record the
-/// ORDER of operations: the recreate must follow a mismatch that lasted, and the create must
-/// follow the logoff having finished, or it would reconnect to the very session it was meant to
-/// replace.
+/// It reports and does nothing else. The 0.6.19 draft logged the session off and created it again
+/// over a mismatch, on the theory that Windows applies a scale at creation but not on a reconnect.
+/// A live seat disproved that: the new session ran at the same wrong scale, because mstsc never
+/// sent the scale at all (no devicescalefactor in Default.rdp; see RdpFileBuilderTests). The
+/// recreate only closed the player's programs. ReconnectAndVerifyScaleAsync no longer takes a
+/// recreate step at all, so these check what it reads, logs and returns.
 /// </summary>
 public class SeatScaleApplyTests
 {
-    private static SessionScaleObservation Reading(int rdpPercent) => new(
-        SystemDpi: 96, SystemPercent: 100,
+    private static SessionScaleObservation Reading(int rdpPercent, int systemPercent = 100) => new(
+        SystemDpi: (uint)(systemPercent * 96 / 100), SystemPercent: systemPercent,
         Monitors:
         [
             new MonitorScale(@"\\.\DISPLAY1", "Microsoft Remote Display Adapter", true,
@@ -37,10 +37,8 @@ public class SeatScaleApplyTests
         public List<string> Trace { get; } = new();
         public RecordingLogger Logger { get; } = new();
 
-        /// <summary>Scale the session reports after each observation, in order; the last repeats.</summary>
-        public Queue<int?> ReadingsBeforeRecreate { get; init; } = new();
-        public int ReadingAfterRecreate { get; init; } = 200;
-        public bool Recreated { get; private set; }
+        /// <summary>Scale the session reports at each observation, in order; the last repeats.</summary>
+        public Queue<int?> Readings { get; init; } = new();
 
         public Task<int> Reconnect(CancellationToken _)
         {
@@ -51,171 +49,121 @@ public class SeatScaleApplyTests
         public Task<SessionScaleObservation?> Observe(int sessionId, CancellationToken _)
         {
             Trace.Add($"observe:{sessionId}");
-            int? percent;
-            if (Recreated) percent = ReadingAfterRecreate;
-            else if (ReadingsBeforeRecreate.Count > 1) percent = ReadingsBeforeRecreate.Dequeue();
-            else percent = ReadingsBeforeRecreate.Peek();
+            var percent = Readings.Count > 1 ? Readings.Dequeue() : Readings.Peek();
             return Task.FromResult(percent is { } p ? Reading(p) : null);
-        }
-
-        public Task<int> Recreate(int sessionId, CancellationToken _)
-        {
-            Trace.Add($"recreate:{sessionId}");
-            Recreated = true;
-            return Task.FromResult(31);
         }
 
         public Task<SeatManager.ScaleApplyResult> Run(int wanted) =>
             SeatManager.ReconnectAndVerifyScaleAsync(
-                wanted, Reconnect, Observe, Recreate, Logger, CancellationToken.None,
+                wanted, Reconnect, Observe, Logger, CancellationToken.None,
                 settleAttempts: 3, settleDelayMs: 1);
     }
 
     private static Queue<int?> Readings(params int?[] values) => new(values);
 
-    // ── The reconnect took: nothing is recreated ───────────────────────────────
-
     [Fact]
-    public async Task ReconnectThatAppliedTheScaleLeavesTheSessionAlone()
+    public async Task AReconnectThatAppliedTheScaleIsReadOnceAndLoggedAsAMatch()
     {
-        var script = new Script { ReadingsBeforeRecreate = Readings(200) };
+        var script = new Script { Readings = Readings(200) };
 
         var result = await script.Run(wanted: 200);
 
-        Assert.False(result.Recreated);
         Assert.Equal(22, result.SessionId);
         Assert.Equal(ScaleVerdict.Match, result.Verdict);
         Assert.Equal(["reconnect", "observe:22"], script.Trace);
         Assert.DoesNotContain(script.Logger.Entries, e => e.Level >= LogLevel.Warning);
-    }
-
-    // ── The reconnect did not take: recreate, once, after the reconnect ────────
-
-    [Fact]
-    public async Task ReconnectThatKeptTheOldScaleIsFollowedByARecreateAndAFreshReading()
-    {
-        var script = new Script { ReadingsBeforeRecreate = Readings(100), ReadingAfterRecreate = 200 };
-
-        var result = await script.Run(wanted: 200);
-
-        Assert.True(result.Recreated);
-        Assert.Equal(31, result.SessionId);
-        Assert.Equal(ScaleVerdict.Match, result.Verdict);
-        Assert.Equal(200, result.Observation!.AppliedPercent);
-
-        // Reconnect, read it for the whole settle window, only then recreate, then read the NEW
-        // session (id 31), not the old one.
-        Assert.Equal(
-            ["reconnect", "observe:22", "observe:22", "observe:22", "recreate:22", "observe:31"],
-            script.Trace);
-    }
-
-    [Fact]
-    public async Task TheLogShowsWhatWasAskedForBesideWhatWindowsApplied()
-    {
-        var script = new Script { ReadingsBeforeRecreate = Readings(100), ReadingAfterRecreate = 200 };
-
-        await script.Run(wanted: 200);
-
-        Assert.Contains(script.Logger.Entries, e =>
-            e.Level == LogLevel.Warning
-            && e.Message.Contains("asked for 200%")
-            && e.Message.Contains("runs at 100%"));
-        Assert.Contains(script.Logger.Entries, e =>
-            e.Level == LogLevel.Warning && e.Message.Contains("logging it off and creating it again"));
         Assert.Contains(script.Logger.Entries, e =>
             e.Level == LogLevel.Information && e.Message.Contains("running at 200% as asked"));
     }
 
+    // The live case from 2026-10-08: asked for 200%, the session ran at 100%. The seat keeps its
+    // session (same id), the reading is returned, and the log says what was asked, what was read,
+    // and that the session was left alone. Nothing but reads follows the reconnect.
     [Fact]
-    public async Task ReadingThatSettlesWithinTheWindowDoesNotCostThePlayerTheirSession()
+    public async Task AMismatchIsReportedAndTheSessionIsKept()
+    {
+        var script = new Script { Readings = Readings(100) };
+
+        var result = await script.Run(wanted: 200);
+
+        Assert.Equal(22, result.SessionId);
+        Assert.Equal(ScaleVerdict.Mismatch, result.Verdict);
+        Assert.Equal(100, result.Observation!.AppliedPercent);
+        Assert.Equal(["reconnect", "observe:22", "observe:22", "observe:22"], script.Trace);
+        Assert.Contains(script.Logger.Entries, e =>
+            e.Level == LogLevel.Warning
+            && e.Message.Contains("asked for 200%")
+            && e.Message.Contains("runs at 100%")
+            && e.Message.Contains("left the session running"));
+    }
+
+    [Fact]
+    public async Task AReadingThatSettlesWithinTheWindowIsAMatch()
     {
         // The session turns Active before its displays have settled. A first reading of the old
         // scale followed by the right one is a slow reconnect, not a failed one.
-        var script = new Script { ReadingsBeforeRecreate = Readings(100, 200) };
+        var script = new Script { Readings = Readings(100, 200) };
 
         var result = await script.Run(wanted: 200);
 
-        Assert.False(result.Recreated);
         Assert.Equal(["reconnect", "observe:22", "observe:22"], script.Trace);
         Assert.Equal(ScaleVerdict.Match, result.Verdict);
+        Assert.DoesNotContain(script.Logger.Entries, e => e.Level >= LogLevel.Warning);
     }
 
     [Fact]
-    public async Task ASessionRecreatedAtTheWrongScaleIsReportedNotRecreatedAgain()
+    public async Task AnUnreadableSessionIsUnverifiedNotAMismatch()
     {
-        var script = new Script { ReadingsBeforeRecreate = Readings(100), ReadingAfterRecreate = 100 };
+        var script = new Script { Readings = Readings((int?)null) };
 
         var result = await script.Run(wanted: 200);
 
-        Assert.True(result.Recreated);
-        Assert.Equal(ScaleVerdict.Mismatch, result.Verdict);
-        Assert.Single(script.Trace, t => t.StartsWith("recreate"));   // never a loop
-        Assert.Contains(script.Logger.Entries, e =>
-            e.Level == LogLevel.Warning && e.Message.Contains("after recreate")
-            && e.Message.Contains("asked for 200%") && e.Message.Contains("runs at 100%"));
-    }
-
-    // ── No reading: unverified, never a guess either way ───────────────────────
-
-    [Fact]
-    public async Task AnUnreadableSessionIsNotRecreatedOnAGuess()
-    {
-        var script = new Script { ReadingsBeforeRecreate = Readings((int?)null) };
-
-        var result = await script.Run(wanted: 200);
-
-        Assert.False(result.Recreated);
         Assert.Equal(ScaleVerdict.Unknown, result.Verdict);
-        Assert.DoesNotContain(script.Trace, t => t.StartsWith("recreate"));
+        Assert.Null(result.Observation);
         Assert.Contains(script.Logger.Entries, e =>
             e.Level == LogLevel.Warning && e.Message.Contains("unverified"));
     }
 
-    // ── Logoff, then create: the create must wait for the logoff ───────────────
+    // ── The note the dashboard shows ───────────────────────────────────────────
 
     [Fact]
-    public async Task CreateWaitsUntilTheOldSessionIsGone()
+    public void AFullMatchNeedsNoNote()
     {
-        var trace = new List<string>();
-        var existsPolls = 0;
-        var gone = false;
-
-        var id = await SeatManager.LogoffAndCreateAsync(
-            sessionId: 22,
-            logoff: sid => trace.Add($"logoff:{sid}"),
-            sessionExists: _ =>
-            {
-                // Windows takes a few polls to finish the logoff.
-                if (++existsPolls >= 4) gone = true;
-                return !gone;
-            },
-            create: _ =>
-            {
-                trace.Add(gone ? "create:after-gone" : "create:TOO-EARLY");
-                return Task.FromResult(31);
-            },
-            new RecordingLogger(), CancellationToken.None, pollMs: 1, timeoutMs: 5_000);
-
-        Assert.Equal(31, id);
-        Assert.Equal(["logoff:22", "create:after-gone"], trace);
-        Assert.True(existsPolls >= 4, "the session's existence was never waited on");
+        Assert.Null(SessionScaleProbe.Explain(200, Reading(200, systemPercent: 200)));
     }
 
     [Fact]
-    public async Task CreatesAnywayWithAWarningWhenTheOldSessionWillNotGo()
+    public void AMismatchNoteSaysWhatRanWhatWasAskedAndThatNothingWasClosed()
     {
-        var logger = new RecordingLogger();
-        var creates = 0;
+        var note = SessionScaleProbe.Explain(200, Reading(100));
 
-        var id = await SeatManager.LogoffAndCreateAsync(
-            22, _ => { }, _ => true,
-            _ => { creates++; return Task.FromResult(31); },
-            logger, CancellationToken.None, pollMs: 1, timeoutMs: 30);
+        Assert.NotNull(note);
+        Assert.Contains("at 100%", note);
+        Assert.Contains("200%", note);
+        Assert.Contains("left the session running", note);
+    }
 
-        Assert.Equal(1, creates);   // a timeout must not leave the seat without a session
-        Assert.Equal(31, id);
-        Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning);
+    // Windows fixes a session's system DPI at sign-in. A reconnect at a new scale moves the
+    // display's DPI, so the verdict is a Match, but programs that only read the system DPI keep
+    // the old size. That is worth saying, and it is the user's call to sign out.
+    [Fact]
+    public void AMatchWithAnOldSystemScaleSaysSigningOutFinishesIt()
+    {
+        var reading = Reading(200, systemPercent: 100);
+
+        Assert.Equal(ScaleVerdict.Match, SessionScaleProbe.Evaluate(200, reading));
+        var note = SessionScaleProbe.Explain(200, reading);
+        Assert.NotNull(note);
+        Assert.Contains("system scale is still 100%", note);
+        Assert.Contains("signs out", note);
+    }
+
+    [Fact]
+    public void NoReadingSaysUnverified()
+    {
+        Assert.Contains("not verified", SessionScaleProbe.Explain(200, null));
+        Assert.Contains("not verified", SessionScaleProbe.Explain(
+            200, new SessionScaleObservation(0, 0, [], "no monitors visible to this process")));
     }
 
     // ── What the seat reports ──────────────────────────────────────────────────
@@ -251,15 +199,17 @@ public class SeatScaleApplyTests
             AccountName = "GuestTest", Width = 1920, Height = 1080,
             ScaleFactorOverride = 200, AppliedScaleFactor = 100,
             AppliedScaleCheckedAt = DateTimeOffset.UtcNow,
+            ScaleNote = "Windows runs this seat's session at 100%",
         };
 
-        // Every launch and relaunch asks for the geometry first. The old reading says nothing
-        // about the session that is about to replace the one it was taken from.
+        // Every launch and relaunch asks for the geometry first. The old reading, and the note
+        // about it, say nothing about the session that is about to replace the one it described.
         var geometry = mgr.GeometryFor(seat);
 
         Assert.Equal(200, geometry.ScaleFactor);
         Assert.Null(seat.AppliedScaleFactor);
         Assert.Null(seat.AppliedScaleCheckedAt);
+        Assert.Null(seat.ScaleNote);
         Assert.False(seat.ScaleMismatch);
     }
 

@@ -47,6 +47,12 @@ export interface SeatInfo {
   /** True when the session was read running at a different scale than scaleFactor. */
   scaleMismatch?: boolean;
   /**
+   * A plain-language note on the last reading: why the session runs at another scale, that it
+   * could not be read, or that its system scale lags until the seat user signs out. Null when the
+   * reading matches in full or there is none.
+   */
+  scaleNote?: string | null;
+  /**
    * Set when the seat's fps is above what the host's refresh rate can compose, checked when the
    * seat was provisioned (issue #70). Null when there is no mismatch.
    */

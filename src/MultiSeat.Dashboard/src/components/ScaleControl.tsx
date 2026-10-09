@@ -90,6 +90,9 @@ export function ScaleControl({ seat, onUpdate, canChange }: Props) {
             </button>
           )}
         </div>
+        {seat.scaleNote && (
+          <div className={seat.scaleMismatch ? "field-error" : "field-hint"}>{seat.scaleNote}</div>
+        )}
         {done && <div className="field-success">{done}</div>}
       </div>
     );
@@ -127,8 +130,8 @@ export function ScaleControl({ seat, onUpdate, canChange }: Props) {
       {pending && (
         <div className="text-muted" style={{ fontSize: 12 }}>
           If the scale in effect changes, the seat's session reconnects at the new scale. A live
-          stream pauses for a few seconds. If Windows keeps the old scale through the reconnect,
-          the session is created again, and programs running in it are closed.
+          stream pauses for a few seconds. Programs running in the seat keep running. The scale
+          the session then runs at is read back and shown here.
         </div>
       )}
       {error && <div className="error-banner">{error}</div>}

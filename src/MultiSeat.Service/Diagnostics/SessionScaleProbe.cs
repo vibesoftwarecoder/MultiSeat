@@ -67,6 +67,44 @@ internal static class SessionScaleProbe
     }
 
     /// <summary>
+    /// What a reading means for the person running the seat, in one or two sentences, or null
+    /// when it matches in full. Shown by the dashboard and the API next to the scale, and logged.
+    /// </summary>
+    /// <remarks>
+    /// Three cases need words:
+    ///
+    ///   - No reading. Nothing is claimed either way.
+    ///   - A mismatch. MultiSeat leaves the session alone rather than logging it off; the note says
+    ///     so, because the dashboard otherwise shows a problem with no hint of what happened.
+    ///   - A match whose SYSTEM scale lags. Windows fixes a session's system DPI when the user
+    ///     signs in; a later scale change moves the per-monitor DPI that modern apps use, but
+    ///     programs that only read the system DPI keep drawing at the old size until the user signs
+    ///     out and back in. That is Windows' rule for every desktop, not something MultiSeat can
+    ///     change, so the note names the remedy and leaves the choice to the user.
+    /// </remarks>
+    internal static string? Explain(int intendedPercent, SessionScaleObservation? observation)
+    {
+        if (observation is null)
+            return $"The seat's session could not be read, so {intendedPercent}% is not verified.";
+        if (observation.AppliedPercent is not { } applied)
+            return $"The seat's session could not be read ({observation.Error ?? "no display found"}), " +
+                   $"so {intendedPercent}% is not verified.";
+
+        if (applied != intendedPercent)
+            return $"Windows runs this seat's session at {applied}%, not the {intendedPercent}% it " +
+                   "was asked for. MultiSeat left the session running rather than log it off, " +
+                   "which would close the programs in it.";
+
+        if (observation.SystemPercent > 0 && observation.SystemPercent != intendedPercent)
+            return $"The display runs at {applied}%, but the session's system scale is still " +
+                   $"{observation.SystemPercent}% from when the seat user signed in. Programs that " +
+                   $"only use the system scale draw at {observation.SystemPercent}% until the seat " +
+                   "user signs out and back in.";
+
+        return null;
+    }
+
+    /// <summary>
     /// Reads the session as it is now. Never throws: a failure is reported in
     /// <see cref="SessionScaleObservation.Error"/>, which makes the verdict Unknown rather than
     /// a wrong Match or Mismatch.

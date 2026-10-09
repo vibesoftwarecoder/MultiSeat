@@ -1179,10 +1179,8 @@ public sealed class SeatManager
     /// reconnect with the new geometry, and restart Apollo so it re-reads the desktop.
     ///
     /// The Windows session id is preserved — mstsc reconnects to the same session rather than
-    /// logging it off — so anything running in the seat survives. The one exception is a resize
-    /// that moves the scale (the width heuristic follows the width, and an override or the host
-    /// default does not): if the reconnect leaves the session at the wrong scale, the session is
-    /// recreated, as <see cref="SetScaleFactorAsync"/> describes (issue #93).
+    /// logging it off — so anything running in the seat survives. The scale the session then runs
+    /// at is read back and reported, as <see cref="SetScaleFactorAsync"/> describes (issue #93).
     /// </summary>
     public async Task SetResolutionAsync(Guid seatId, int width, int height,
         SeatPresetStore presetStore, CancellationToken ct)
@@ -1239,12 +1237,12 @@ public sealed class SeatManager
     /// disconnect, reconnect with the new geometry, start Apollo. The Windows session id is
     /// preserved, as it is for a resize.
     ///
-    /// A reconnect is verified rather than assumed to have worked (issue #93). That a reconnect
-    /// applies a new SIZE was measured; that it applies a new SCALE never was. So after the
-    /// reconnect the scale the session is actually running at is read from inside it. If that is
-    /// not the scale asked for, the session is logged off and created again, which does apply it,
-    /// and the programs running in it are closed. Nothing is recreated when the reconnect took.
-    /// See <see cref="ReconnectAndVerifyScaleAsync"/>.
+    /// A reconnect is verified rather than assumed to have worked (issue #93). After it, the scale
+    /// the session is actually running at is read from inside it and reported beside the scale
+    /// asked for: in the log, on the seat (<c>appliedScaleFactor</c>, <c>scaleMismatch</c>,
+    /// <c>scaleNote</c>) and in the dashboard. The session is never logged off over a mismatch.
+    /// See <see cref="ReconnectAndVerifyScaleAsync"/>, and <see cref="RdpFileBuilder"/> for why
+    /// the scale used to be ignored altogether.
     /// </summary>
     public async Task SetScaleFactorAsync(Guid seatId, int? scaleFactor,
         SeatPresetStore presetStore, CancellationToken ct)
@@ -1311,6 +1309,7 @@ public sealed class SeatManager
     {
         seat.AppliedScaleFactor = null;
         seat.AppliedScaleCheckedAt = null;
+        seat.ScaleNote = null;
     }
 
     private RdpGeometry ResolveGeometry(int width, int height, int? seatScale) =>
@@ -1335,12 +1334,10 @@ public sealed class SeatManager
         _apolloManager.KillForReconnect(seat);
         ClearAppliedScale(seat);
 
-        // Reconnect, then read what scale the session is actually running at. A reconnect applies
-        // a new size; whether it applies a new scale was never measured (issue #93), so when the
-        // reading disagrees with the scale asked for, the session is recreated instead. The seat's
-        // SessionId is updated inside each step: the recreate must act on the id the reconnect
-        // answered with, and a failure part-way must not leave the seat pointing at the old one.
-        var previousSessionId = seat.SessionId;
+        // Reconnect, then read what scale the session is actually running at, and report it
+        // beside the scale asked for. The session is never recreated over the answer: see
+        // ReconnectAndVerifyScaleAsync. The seat's SessionId is updated inside the reconnect, so
+        // a failure part-way never leaves the seat pointing at a session it no longer has.
         var result = await ReconnectAndVerifyScaleAsync(
             geometry.ScaleFactor,
             reconnect: async token => seat.SessionId = await DisconnectAndRelaunchAsync(
@@ -1350,35 +1347,20 @@ public sealed class SeatManager
                 t => _sessionLauncher.LaunchSessionAsync(seat.AccountName, t, geometry),
                 _logger, token),
             observe: (sessionId, token) => ReadAppliedScaleAsync(seat, sessionId, token),
-            recreate: async (sessionId, token) => seat.SessionId = await LogoffAndCreateAsync(
-                sessionId,
-                _sessionLauncher.LogoffSession,
-                id => _sessionLauncher.IsSessionAlive(id, seat.AccountName),
-                t => _sessionLauncher.LaunchSessionAsync(seat.AccountName, t, geometry),
-                _logger, token),
             _logger, ct);
         seat.SessionId = result.SessionId;
         RecordScale(seat, geometry);
         StoreAppliedScale(seat, result.Observation);
 
-        // A session created from scratch has none of what the old one had been given. Provisioning
-        // sets these up; so does the rescue after a session had to be recreated.
-        if (result.Recreated)
-            await PrepareRecreatedSessionAsync(seat, previousSessionId, ct);
-
         // Apollo advertises the seat's resolution in its config, so regenerate before starting.
         _configBuilder.BuildConfig(seat, _options.ApolloConfigDir);
         seat.ApolloProcessId = await _apolloManager.StartAsync(seat, ct);
-
-        // Display isolation lives in the session it was applied to, so a new session has lost it.
-        if (result.Recreated)
-            await ApplyDisplayIsolationAsync(seat, ct);
     }
 
     /// <summary>
     /// Keep RustDesk from opening the default render endpoint exclusively in this seat's session, which
     /// makes Apollo's loopback capture fail with AUDCLNT_E_DEVICE_IN_USE. Best-effort. Used when a seat is
-    /// provisioned and again when its session is recreated.
+    /// provisioned.
     /// </summary>
     private async Task SuppressRustDeskAudioAsync(SeatInfo seat, CancellationToken ct)
     {
@@ -1425,114 +1407,53 @@ public sealed class SeatManager
 
     /// <summary>What <see cref="ReconnectAndVerifyScaleAsync"/> ended up with.</summary>
     internal sealed record ScaleApplyResult(
-        int SessionId, bool Recreated, ScaleVerdict Verdict, SessionScaleObservation? Observation);
+        int SessionId, ScaleVerdict Verdict, SessionScaleObservation? Observation);
 
     /// <summary>
-    /// Reconnect a session at new geometry, then check that it is running at the scale asked for,
-    /// and recreate it when it is not.
+    /// Reconnect a session at new geometry, then read the scale it is actually running at and
+    /// report it beside the scale asked for.
     /// </summary>
     /// <remarks>
-    /// Why this is not "always recreate": a reconnect keeps the Windows session and everything
-    /// running in it, and that is worth keeping whenever the reconnect does the job. Why it is not
-    /// "never recreate": nothing established that a reconnect applies a new
-    /// <c>desktopscalefactor</c> (issue #93), and a seat that reports 200% while rendering at 100%
-    /// is the failure this guards. So the answer comes from the session, not from a rule.
+    /// This never logs the session off or creates it again, whatever the reading says. 0.6.19's
+    /// draft did, on the theory that Windows applies a scale when a session is created but not on
+    /// a reconnect. Measured on a live seat, that theory was wrong: a newly created session ran at
+    /// the same wrong scale as the reconnected one, at 200% and at 150% alike, and the recreate
+    /// closed the seat's programs for nothing. The real cause was that mstsc never sent the scale
+    /// at all, because <c>Default.rdp</c> lacked <c>devicescalefactor</c> (see
+    /// <see cref="RdpFileBuilder"/>). mstsc sends the same client data whether it creates a
+    /// session or reconnects to one, so with that fixed there is no case left where a new session
+    /// was shown to get a scale a reconnect does not. Closing a player's programs on a guess is
+    /// not acceptable, so a mismatch is reported (log, seat state, dashboard) and left alone.
     ///
     /// The reading is retried for a few seconds before it counts as a mismatch: the session turns
-    /// Active before its displays have necessarily settled, and recreating a session over a
-    /// reading taken too early would close the player's programs for nothing.
+    /// Active before its displays have necessarily settled.
     ///
-    /// The recreate happens at most once. If a freshly created session is still at the wrong scale
-    /// the cause is not the reconnect, so the result says Mismatch and the log says so, rather
-    /// than recreating in a loop.
-    ///
-    /// Takes the session operations as delegates so the ordering can be tested without a Windows
-    /// session, as <see cref="DisconnectAndRelaunchAsync"/> does.
+    /// Takes the session operations as delegates so it can be tested without a Windows session,
+    /// as <see cref="DisconnectAndRelaunchAsync"/> does.
     /// </remarks>
     internal static async Task<ScaleApplyResult> ReconnectAndVerifyScaleAsync(
         int wantedScale,
         Func<CancellationToken, Task<int>> reconnect,
         Func<int, CancellationToken, Task<SessionScaleObservation?>> observe,
-        Func<int, CancellationToken, Task<int>> recreate,
         ILogger logger,
         CancellationToken ct,
         int settleAttempts = 4,
         int settleDelayMs = 1_000)
     {
-        async Task<(ScaleVerdict, SessionScaleObservation?)> ReadSettledAsync(int sessionId)
-        {
-            SessionScaleObservation? observation = null;
-            var verdict = ScaleVerdict.Unknown;
-            for (var attempt = 1; attempt <= Math.Max(1, settleAttempts); attempt++)
-            {
-                observation = await observe(sessionId, ct);
-                verdict = SessionScaleProbe.Evaluate(wantedScale, observation);
-                if (verdict == ScaleVerdict.Match) break;
-                if (attempt < settleAttempts) await Task.Delay(settleDelayMs, ct);
-            }
-            return (verdict, observation);
-        }
-
         var sessionId = await reconnect(ct);
-        var (verdict, observation) = await ReadSettledAsync(sessionId);
-        LogScaleReading(logger, "after reconnect", sessionId, wantedScale, verdict, observation);
 
-        if (verdict != ScaleVerdict.Mismatch)
-            return new ScaleApplyResult(sessionId, false, verdict, observation);
-
-        logger.LogWarning(
-            "Session {Sid}: the reconnect did not apply the {Wanted}% scale (the session runs at " +
-            "{Applied}%) — logging it off and creating it again. Programs running in it are closed",
-            sessionId, wantedScale, observation?.AppliedPercent);
-
-        sessionId = await recreate(sessionId, ct);
-        (verdict, observation) = await ReadSettledAsync(sessionId);
-        LogScaleReading(logger, "after recreate", sessionId, wantedScale, verdict, observation);
-        return new ScaleApplyResult(sessionId, true, verdict, observation);
-    }
-
-    /// <summary>
-    /// Log off a session, wait until it is gone, then create it again.
-    /// </summary>
-    /// <remarks>
-    /// The wait is the point. <c>LaunchSessionAsync</c> reconnects to any session the account still
-    /// has, and a reconnect is exactly what did not apply the scale, so creating before the logoff
-    /// has finished would hand back the same session. A timeout is logged and the create goes
-    /// ahead, as in <see cref="DisconnectAndRelaunchAsync"/>: leaving the seat without a session
-    /// is worse, and the health check still reconnects it.
-    /// </remarks>
-    /// <returns>The id of the new session.</returns>
-    internal static async Task<int> LogoffAndCreateAsync(
-        int sessionId,
-        Action<int> logoff,
-        Func<int, bool> sessionExists,
-        Func<CancellationToken, Task<int>> create,
-        ILogger logger,
-        CancellationToken ct,
-        int pollMs = 250,
-        int timeoutMs = 15_000)
-    {
-        logoff(sessionId);
-
-        var waited = Stopwatch.StartNew();
-        var stillThere = sessionExists(sessionId);
-        while (stillThere && waited.ElapsedMilliseconds < timeoutMs)
+        SessionScaleObservation? observation = null;
+        var verdict = ScaleVerdict.Unknown;
+        for (var attempt = 1; attempt <= Math.Max(1, settleAttempts); attempt++)
         {
-            await Task.Delay(pollMs, ct);
-            stillThere = sessionExists(sessionId);
+            observation = await observe(sessionId, ct);
+            verdict = SessionScaleProbe.Evaluate(wantedScale, observation);
+            if (verdict == ScaleVerdict.Match) break;
+            if (attempt < settleAttempts) await Task.Delay(settleDelayMs, ct);
         }
 
-        if (stillThere)
-            logger.LogWarning(
-                "Session {Sid} still existed {Ms}ms after its logoff — creating the new session " +
-                "anyway; it may reconnect to the old one",
-                sessionId, waited.ElapsedMilliseconds);
-        else
-            logger.LogInformation(
-                "Session {Sid} was gone {Ms}ms after its logoff — creating a new session",
-                sessionId, waited.ElapsedMilliseconds);
-
-        return await create(ct);
+        LogScaleReading(logger, "after reconnect", sessionId, wantedScale, verdict, observation);
+        return new ScaleApplyResult(sessionId, verdict, observation);
     }
 
     /// <summary>Put the reading on the log, beside the scale that was asked for.</summary>
@@ -1541,17 +1462,23 @@ public sealed class SeatManager
         ScaleVerdict verdict, SessionScaleObservation? observation)
     {
         var detail = observation?.Describe() ?? "no reading";
+        var note = SessionScaleProbe.Explain(wantedScale, observation);
         switch (verdict)
         {
-            case ScaleVerdict.Match:
+            case ScaleVerdict.Match when note is null:
                 logger.LogInformation(
                     "Session {Sid} {When}: running at {Wanted}% as asked ({Detail})",
                     sessionId, when, wantedScale, detail);
                 break;
+            case ScaleVerdict.Match:
+                logger.LogInformation(
+                    "Session {Sid} {When}: running at {Wanted}% as asked ({Detail}). {Note}",
+                    sessionId, when, wantedScale, detail, note);
+                break;
             case ScaleVerdict.Mismatch:
                 logger.LogWarning(
-                    "Session {Sid} {When}: asked for {Wanted}% but the session runs at {Applied}% ({Detail})",
-                    sessionId, when, wantedScale, observation?.AppliedPercent, detail);
+                    "Session {Sid} {When}: asked for {Wanted}% but the session runs at {Applied}% ({Detail}). {Note}",
+                    sessionId, when, wantedScale, observation?.AppliedPercent, detail, note);
                 break;
             default:
                 logger.LogWarning(
@@ -1566,6 +1493,7 @@ public sealed class SeatManager
     {
         seat.AppliedScaleFactor = observation?.AppliedPercent;
         seat.AppliedScaleCheckedAt = DateTimeOffset.UtcNow;
+        seat.ScaleNote = SessionScaleProbe.Explain(seat.ScaleFactor, observation);
     }
 
     /// <summary>
@@ -1606,9 +1534,8 @@ public sealed class SeatManager
     /// <summary>
     /// Read and record the scale a session runs at without holding anything up: for the places
     /// that (re)create a session as part of something else (provisioning, the health check's
-    /// rescue) and must not wait for the reading before starting Apollo. Only logs and records;
-    /// those paths never recreate a session over a mismatch, because a session that dropped on
-    /// its own keeps the scale it had.
+    /// rescue) and must not wait for the reading before starting Apollo. Only logs and records,
+    /// like every other reading: nothing logs a session off over a mismatch.
     /// </summary>
     public void RecordAppliedScaleInBackground(SeatInfo seat, string when)
     {
@@ -1652,36 +1579,6 @@ public sealed class SeatManager
         LogScaleReading(_logger, "on request", sessionId, seat.ScaleFactor, verdict, observation);
         _ = BroadcastState(seat);
         return (seat, verdict, observation);
-    }
-
-    /// <summary>
-    /// Give a session that was just created in place of the seat's old one what the old one had.
-    /// A reconnect keeps all of this, which is why it is only done after a recreate.
-    /// </summary>
-    private async Task PrepareRecreatedSessionAsync(SeatInfo seat, int previousSessionId, CancellationToken ct)
-    {
-        _logger.LogInformation(
-            "Seat {Id}: session {Old} was recreated as {New} — redoing the per-session setup",
-            seat.Id, previousSessionId, seat.SessionId);
-
-        await SuppressRustDeskAudioAsync(seat, ct);
-        try { _hidHide.PreWriteRules(seat); }
-        catch (Exception ex) { _logger.LogWarning(ex, "Seat {Id}: pre-writing gamepad jail rules failed (non-critical)", seat.Id); }
-
-        ApplyAudioDefaults(seat);
-
-        // The hook filters one session at a time. If it was filtering the one that is gone, point it
-        // at the new one; if it was filtering another seat's session, that is not ours to move.
-        try
-        {
-            if (_inputHookManager.CurrentSessionId == (uint)previousSessionId)
-                _inputHookManager.InstallForSession((uint)seat.SessionId);
-        }
-        catch (Exception ex) { _logger.LogWarning(ex, "Seat {Id}: re-installing the input hook failed (non-critical)", seat.Id); }
-
-        // LogonUI holds the input desktop of a new session for a few seconds (#80, #96).
-        await WaitForLogonUiToLeaveAsync(seat.SessionId, SessionLauncher.IsLogonUiInSession, _logger, ct);
-        await WaitForInputDesktopAsync(seat, ct);
     }
 
     /// <summary>

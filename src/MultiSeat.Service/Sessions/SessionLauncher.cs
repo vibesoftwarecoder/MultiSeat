@@ -112,10 +112,10 @@ public sealed class SessionLauncher
     /// console desktop's size). Honoured both when a session is created and when a Disconnected
     /// one is reconnected: a reconnect at a new geometry DOES resize the session (measured live
     /// on 2026-09-29, issue #70: Apollo's in-session log read "Desktop resolution [2560x1440]"
-    /// after a resize done purely by reconnecting). That is the SIZE. Whether a reconnect also
-    /// applies a new <c>ScaleFactor</c> was never measured (issue #93), so SeatManager reads the
-    /// scale back from the session after a reconnect and recreates the session when it differs.
-    /// Not honoured for a session that is still
+    /// after a resize done purely by reconnecting). That is the SIZE. The <c>ScaleFactor</c> is
+    /// sent the same way on both paths (it only reaches Windows at all since devicescalefactor is
+    /// written beside it, issue #93), and SeatManager reads it back from the session after a
+    /// reconnect and reports what it finds. Not honoured for a session that is still
     /// ACTIVE, which returns early without reading Default.rdp, so a caller changing geometry
     /// must disconnect first and wait for the session to leave ACTIVE. See
     /// <see cref="RdpGeometry"/>.
@@ -782,9 +782,8 @@ public sealed class SessionLauncher
     /// the session to it. This was once believed impossible (a reconnect was thought to attach
     /// at the desktop's original size); live testing on 2026-09-29 (issue #70) disproved that:
     /// after a resize done purely by this reconnect, Apollo's in-session log read "Desktop
-    /// resolution [2560x1440]". A resize therefore keeps the same session id. A rescale may not
-    /// (issue #93): the size was measured, the scale was not, and SeatManager checks it after the
-    /// reconnect and recreates the session if it did not take.
+    /// resolution [2560x1440]". A resize therefore keeps the same session id, and so does a
+    /// rescale. SeatManager reads the scale back after the reconnect and reports it (issue #93).
     /// </remarks>
     private async Task ReconnectSessionAsync(
         int sessionId, string accountName, string password, RdpGeometry? geometry,

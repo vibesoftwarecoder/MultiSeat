@@ -115,6 +115,12 @@ public sealed record RdpGeometry(
 /// </summary>
 public static class RdpFileBuilder
 {
+    /// <summary>
+    /// The <c>devicescalefactor</c> written beside every <c>desktopscalefactor</c>. Without a valid
+    /// one (100, 140 or 180) mstsc never sends the desktop scale at all; see <see cref="Build"/>.
+    /// </summary>
+    public const int DeviceScaleFactor = 100;
+
     public static string Build(AudioMode audioMode, RdpGeometry? geometry)
     {
         // audiomode decides where the seat's audio is rendered, and it is the single switch
@@ -198,10 +204,25 @@ public static class RdpFileBuilder
         // it covers the screen of whoever is using the host. It is not enough to hide it once
         // after connecting: mstsc re-shows it later. SessionLauncher therefore starts a resident
         // watcher (--hide-windows <pid> -1) that keeps it hidden for the process's lifetime.
+        //
+        // desktopscalefactor does NOTHING on its own; devicescalefactor must be written beside it
+        // (issue #93). mstsc reads both keys from the file, each defaulting to 0, and hands them
+        // to its RDP control only when BOTH are non-zero. Otherwise it sets neither, and the
+        // control sends the scale of the console monitor its own window sits on. The control also
+        // refuses a device scale other than 100, 140 or 180. That is the rule MS-RDPBCGR states
+        // for the client core data: the server ignores desktopScaleFactor unless deviceScaleFactor
+        // is 100, 140 or 180. Without this line every seat ran at the CONSOLE's scale, at creation
+        // and on reconnect alike, whatever the dashboard said. Found by reading mstsc.exe and
+        // mstscax.dll 10.0.26100.9444 (see RdpFileBuilderTests); measured live before the fix:
+        // 200% and 150% both ran at 100%, the console's scale, even in a newly created session.
+        //
+        // 100 is the neutral device scale. Windows only uses it for Windows 8.1 store apps
+        // (MS-RDPBCGR appendix A, note 7); here it exists to make the desktop scale count.
         content +=
             $"desktopwidth:i:{geometry.Width}\r\n" +
             $"desktopheight:i:{geometry.Height}\r\n" +
             $"desktopscalefactor:i:{geometry.ScaleFactor}\r\n" +
+            $"devicescalefactor:i:{DeviceScaleFactor}\r\n" +
             "smart sizing:i:0\r\n" +
             "dynamic resolution:i:0\r\n" +
             "screen mode id:i:1\r\n";

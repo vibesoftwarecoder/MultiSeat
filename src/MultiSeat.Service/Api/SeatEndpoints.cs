@@ -223,6 +223,7 @@ public static class SeatEndpoints
                         scaleFactor = seat?.ScaleFactor,
                         appliedScaleFactor = seat?.AppliedScaleFactor,
                         scaleMismatch = seat?.ScaleMismatch,
+                        scaleNote = seat?.ScaleNote,
                         sessionId = seat?.SessionId,
                     });
                 }
@@ -309,6 +310,7 @@ public static class SeatEndpoints
                         appliedScaleFactor = seat.AppliedScaleFactor,
                         verdict = verdict.ToString(),
                         scaleMismatch = seat.ScaleMismatch,
+                        scaleNote = seat.ScaleNote,
                         sessionId = seat.SessionId,
                         systemScaleFactor = observation?.SystemPercent,
                         error = observation is null ? "The helper produced no result in the seat session." : observation.Error,
@@ -514,6 +516,7 @@ public static class SeatEndpoints
                 scaleFactorOverride = seat?.ScaleFactorOverride,
                 appliedScaleFactor = seat?.AppliedScaleFactor,
                 scaleMismatch = seat?.ScaleMismatch,
+                scaleNote = seat?.ScaleNote,
                 sessionId = seat?.SessionId,
             });
         }
