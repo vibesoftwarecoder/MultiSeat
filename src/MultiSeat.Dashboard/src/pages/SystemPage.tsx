@@ -3,6 +3,7 @@ import { system, input } from "../api/client";
 import { usePolling } from "../hooks/usePolling";
 import type { HookStatus, TopProcess, DiskInfo } from "../api/types";
 import { RefreshRateControl } from "../components/RefreshRateControl";
+import { UpdatesCard } from "../components/UpdatesCard";
 
 export function SystemPage() {
   const [rebuilding, setRebuilding] = useState(false);
@@ -286,6 +287,9 @@ export function SystemPage() {
             </div>
           </div>
         )}
+
+        {/* Update notices (opt-in) */}
+        <UpdatesCard />
 
         {/* Host-wide refresh rate (issue #74) */}
         <RefreshRateControl />

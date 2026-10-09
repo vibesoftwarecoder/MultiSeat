@@ -78,6 +78,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The dashboard has a vitest + jsdom suite (update notices today). It runs here because
+      # nothing else does: `npm run build` type-checks the tests but never executes them.
+      - name: Test
+        run: npm test
+
       # This FAILS the job on a high advisory, deliberately. A warning that does not fail is
       # what we already had -- nothing was watching, and 8 highs is what nothing-watching
       # produces. The tradeoff is real: an advisory published upstream can break CI on an

@@ -280,3 +280,61 @@ export interface HostApolloInfo {
   consoleSessionId: number;
   note: string | null;
 }
+
+// ── Update notifications (GET /api/system/updates) ───────────────
+// Everything in here that is text comes from the service, which got it from GitHub. Treat it
+// as untrusted: render it as plain React text and never as HTML.
+
+export type UpdateStatus =
+  | "upToDate"
+  | "updateAvailable"
+  | "ahead"
+  | "unknownInstalled"
+  | "notInstalled"
+  | "latestOnly"
+  | "unavailable"
+  | "disabled";
+
+export type UpdateInstalledSource =
+  | "assembly"
+  | "marker"
+  | "marker-modified"
+  | "release-hash"
+  | "commit-match";
+
+export type UpdateComponentId = "multiseat" | "apollovibe" | "moonlightvibe";
+
+export interface UpdateInstalled {
+  version: string;
+  display: string;
+  source: UpdateInstalledSource;
+  note: string | null;
+}
+
+export interface UpdateLatest {
+  version: string;
+  tag: string;
+  publishedAt: string;
+  releaseUrl: string;
+}
+
+export interface UpdateComponent {
+  id: UpdateComponentId | string;
+  name: string;
+  status: UpdateStatus;
+  installed: UpdateInstalled | null;
+  installedNote?: string | null;
+  latest: UpdateLatest | null;
+  announce: boolean;
+  checkedAt: string | null;
+  error: string | null;
+}
+
+export interface UpdatesState {
+  enabled: boolean;
+  intervalHours: number;
+  checkedAt: string | null;
+  nextCheckAt: string | null;
+  error: string | null;
+  components: UpdateComponent[];
+}
