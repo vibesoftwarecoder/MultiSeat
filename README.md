@@ -211,6 +211,46 @@ Edit `appsettings.json` in `C:\Program Files\MultiSeat\` (restart the service af
 | `SharedGameLibraryDir` | `C:\MultiSeatGames` | Root of the shared library (`\SteamLibrary` + `\ROMs`) |
 | `EnableEmulatorNetplay` | `true` | Assign + open a per-seat RetroArch netplay port (seats connect over `127.0.0.1`) |
 | `SeedRetroArchNetplayConfig` | `false` | Auto-write each seat's `retroarch.cfg` (netplay port + shared ROM dir) |
+| `UpdateCheckEnabled` | `false` | Ask GitHub's public releases API whether newer MultiSeat, ApolloVibe and MoonlightVibe releases exist, and show the answer on the dashboard. **Off by default**: it is the only internet connection the service would make. It sends an unauthenticated GET with a generic User-Agent and nothing about your host, and never downloads or installs anything. Set it in `appsettings.local.json` or from the dashboard's System page; no restart needed. Details: `docs/security-posture.md`, "Outbound connections". |
+| `UpdateCheckIntervalHours` | `12` | Hours between update checks (clamped to 1 to 168). Ignored while `UpdateCheckEnabled` is `false`. |
+
+---
+
+## Updating
+
+MultiSeat never updates itself or anything else. If you turn on update checks (`UpdateCheckEnabled`, see Configuration), the dashboard tells you when a newer release exists and links to it; you run the update yourself. These are the manual steps for each component.
+
+### MultiSeat
+
+Run these on the host in an **elevated PowerShell 7**, **when nobody is streaming**: the service restarts and every seat drops.
+
+1. Download `multiseat-windows-x64.zip` from the [releases page](https://github.com/vibesoftwarecoder/MultiSeat/releases/latest) and extract it to a folder.
+2. Copy the install folder first, so you can roll back:
+   `Copy-Item 'C:\Program Files\MultiSeat' 'C:\Program Files\MultiSeat.bak-<date>' -Recurse`
+3. From the extracted folder: `.\scripts\install-service.ps1 -FromZip .\multiseat-windows-x64.zip`
+
+Things to know:
+
+- `-FromZip` replaces the whole install folder and puts `appsettings.json` and `appsettings.local.json` back byte for byte. Copies of both also go to `C:\ProgramData\MultiSeat\config-backups\`. That protection protects the upgrade after the one that carries it: if you are on 0.6.3 or earlier, the installer you are running deletes both files, so copy them out first.
+- Release installs are updated with `-FromZip`. Do **not** run a plain `.\scripts\install-service.ps1` (a source build) over a folder that came from a release zip on 0.6.19 or earlier: it can leave a framework-dependent config beside the bundled runtime, and the service then fails to start with "No frameworks were found". From 0.6.20 on both paths build in a staging folder and replace the install folder the same way.
+- The System page's "Rebuild & Redeploy" button runs that source-build path. Do not use it as an update on a release-installed host.
+
+### ApolloVibe
+
+The prerequisites installer does **not** update an existing ApolloVibe: it sees `sunshine.exe` and `assets\apps.json` and skips. Update by hand, when nobody is streaming:
+
+1. Open the [ApolloVibe releases page](https://github.com/vibesoftwarecoder/ApolloVibe/releases/latest) and download `apollovibe-windows-x64.zip`.
+2. Check its SHA-256 against the hash in the release notes (`Get-FileHash .\apollovibe-windows-x64.zip`).
+3. Stop the MultiSeat service and anything running from `C:\Program Files\ApolloVibe`.
+4. Back up `sunshine.exe` and the `assets` folder next to them (for example `sunshine.exe.bak` and `assets.bak`).
+5. Extract the zip over `C:\Program Files\ApolloVibe`. The zip holds `sunshine.exe`, `assets\` and `tools\` and no `config\`, so Apollo's configuration is kept.
+6. Start the MultiSeat service.
+
+These steps are written from the zip's contents and the installer's logic and have not been run end to end on a live host. A script that does them, `scripts\update-apollovibe.ps1`, is planned but does **not exist yet**; until it does, follow the steps above.
+
+### MoonlightVibe
+
+MoonlightVibe runs on your other devices, not on the host, so MultiSeat cannot see which version they have. The dashboard shows only the latest release. Download it from the [MoonlightVibe releases page](https://github.com/vibesoftwarecoder/MoonlightVibe/releases/latest) and install it on the device; the app also checks GitHub itself when it starts.
 
 ---
 

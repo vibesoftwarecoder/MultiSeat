@@ -116,6 +116,18 @@ provisioning that nobody is there to dismiss — which usually shows up as a sea
   toggle before it holds a key. `POST` on that path — the call that turns authentication off — is
   gated, and a test holds that distinction in place.
 
+## Outbound connections
+
+MultiSeat makes **no** connection to the internet unless you turn on update checks. With `MultiSeat:UpdateCheckEnabled` left at its default of `false`, the service only talks to loopback addresses (Apollo on this host).
+
+With `UpdateCheckEnabled` set to `true`, the service sends an unauthenticated HTTPS GET to `api.github.com` for the release lists of `vibesoftwarecoder/MultiSeat`, `vibesoftwarecoder/ApolloVibe` and `vibesoftwarecoder/MoonlightVibe`, about every 12 hours (`UpdateCheckIntervalHours`, 1 to 168). The request carries the User-Agent `MultiSeat-update-check`, the usual `Accept` and `X-GitHub-Api-Version` headers, and an `If-None-Match` header after the first answer. It carries no version, host name, user name, seat data or API key, no cookies and no credentials. GitHub, and anyone who can see your network traffic, can see that this host's IP address asked for those pages. The three repository names and the API host are fixed in the program; no setting can point the check at another address, and redirects are followed only within `https://api.github.com`.
+
+The check only reads. It never downloads, installs or runs anything. The installed ApolloVibe `sunshine.exe` is hashed on this host and compared on this host; the hash is not sent anywhere. Text from GitHub (release notes, `html_url`) is never forwarded to the dashboard: the release links it shows are built from the repository name and the version tag.
+
+The result is shown on the dashboard (`GET /api/system/updates`). That endpoint needs the API key like the rest of `/api` whenever authentication is on, because the installed versions it reports would help someone choose an attack. `POST /api/system/updates/check` (check now, at most once a minute) and `POST /api/system/updates/settings` (the on/off switch) are gated the same way. The switch writes only `MultiSeat:UpdateCheckEnabled`, into `appsettings.local.json`.
+
+To turn it off again, set `UpdateCheckEnabled` to `false` in `appsettings.local.json`, or use the System page. Both take effect without a service restart. The cache file `C:\ProgramData\MultiSeat\update-check.json` (restricted to SYSTEM and Administrators) can be deleted at any time.
+
 ## What protects the secrets on disk
 
 - `accounts.json` (seat passwords) and `api-key.txt` carry an explicit DACL of SYSTEM +
