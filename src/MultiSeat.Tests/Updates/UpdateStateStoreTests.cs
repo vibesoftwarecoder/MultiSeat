@@ -151,7 +151,16 @@ public class UpdateStateStoreTests : IDisposable
         Assert.True(store.Save(big));
         var fullLength = new FileInfo(FilePath).Length;
 
+        // The reader and the writer race, so the test must PROVE they overlapped instead of hoping
+        // the scheduler lets them. A first version wrote a fixed 40 times and then asserted the
+        // reader had read at least once; on a busy CI runner the reader thread had not run by the
+        // time the writer finished, so the assertion failed (and a passing run could have proved
+        // nothing). Now: the writer starts only once the reader has read the file, and keeps
+        // saving until the reader has seen it many times, with a time limit as the safety net.
+        const int MinReads = 200;
+        const int MinSaves = 40;
         using var stop = new CancellationTokenSource();
+        using var readerRunning = new ManualResetEventSlim();
         var torn = 0;
         var reads = 0;
         var reader = Task.Run(() =>
@@ -163,19 +172,28 @@ public class UpdateStateStoreTests : IDisposable
                     using var fs = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                     using var ms = new MemoryStream();
                     fs.CopyTo(ms);
-                    reads++;
-                    if (ms.Length != fullLength) torn++;
+                    if (ms.Length != fullLength) Interlocked.Increment(ref torn);
+                    if (Interlocked.Increment(ref reads) == 1) readerRunning.Set();
                 }
                 catch (IOException) { /* the file was being replaced at that instant: not a torn read */ }
                 catch (UnauthorizedAccessException) { }
             }
         });
 
-        for (var i = 0; i < 40; i++) store.Save(big);
+        Assert.True(readerRunning.Wait(TimeSpan.FromSeconds(30)), "the reader never managed a single read before the writer started");
+
+        var saves = 0;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while ((saves < MinSaves || Volatile.Read(ref reads) < MinReads) && clock.Elapsed < TimeSpan.FromSeconds(60))
+        {
+            store.Save(big);
+            saves++;
+        }
         stop.Cancel();
         await reader;
 
-        Assert.True(reads > 0);
+        Assert.True(Volatile.Read(ref reads) >= MinReads,
+            $"the reader saw the file only {reads} times in {saves} saves; the race was not exercised, so this run proves nothing");
         Assert.Equal(0, torn);
     }
 
