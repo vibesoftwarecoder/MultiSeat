@@ -158,6 +158,45 @@ Two separate scripts — prereqs and service deploy are intentionally split:
 .\scripts\install-service.ps1 -Uninstall
 ```
 
+### How the deploy replaces the install folder (both paths)
+
+⛔ **Neither path writes into `C:\Program Files\MultiSeat` while it builds.** Both produce a
+payload in a temporary **staging** directory, check it, and only then call one shared routine,
+`Install-Payload` in `scripts\lib\install-lib.ps1`. The two paths differ only in how the stage is made
+(`-FromZip` unpacks the asset; the source build runs `dotnet publish -o <stage>`, builds the dashboard
+into `<stage>\wwwroot` and carries the InputHook DLL).
+
+1. **Verify the stage:** `MultiSeat.Service.exe`, `appsettings.json`, `wwwroot\index.html`, and a
+   **consistent runtime layout** (`Test-PayloadConsistency`): `hostfxr.dll` present <=>
+   `runtimeconfig.json` has `includedFrameworks`; a framework-dependent payload has `frameworks` and no
+   bundled runtime file. `-FromZip` still refuses a zip that is not self-contained.
+2. **Preflight (source build only):** the shared runtimes the built `runtimeconfig.json` demands
+   (`Microsoft.NETCore.App`, `Microsoft.AspNetCore.App`) must exist on the host, under the .NET
+   roll-forward rules, read from the dotnet install the service will use. A host without them stops
+   **before** the service is touched.
+3. **Only now stop the service**, then copy `appsettings.json` and `appsettings.local.json` out byte for
+   byte (`C:\ProgramData\MultiSeat\config-backups\<stamp>`), copy the **whole** install folder to
+   `C:\ProgramData\MultiSeat\install-backups\<stamp>` (newest 3 kept), wipe, copy the stage in, put the
+   host's config back, and check the **installed** folder is consistent. Both backup folders are
+   limited to SYSTEM, Administrators and the installing account: they hold `appsettings.local.json`,
+   which can carry the API key, and ProgramData's inherited ACL lets every user read.
+4. **Any failure after the wipe** puts the previous folder back from that backup and starts the service
+   again if it was running.
+
+⚠️ **Why it exists (2026-10-08).** The source build used to publish straight into the install folder.
+`dotnet publish` copies `runtimeconfig.json` only when the source is *newer* than the destination, so on
+a folder that had once been self-contained it produced a hybrid: a framework-dependent config beside a
+leftover `hostfxr.dll`. The host then looked for a bundled runtime the config no longer declared, and
+the service failed with `No frameworks were found` (SCM 7000/7009). It looked like a missing runtime;
+the host had .NET 9.0.20 installed all along. After any deploy you can still check the installed
+`MultiSeat.Service.runtimeconfig.json`: `includedFrameworks` = self-contained, `frameworks` =
+framework-dependent.
+
+⚠️ **Consequence for settings.** The source build now keeps the host's `appsettings.json` as-is, like
+`-FromZip`, and lists the settings the build adds that the host's file lacks. Before, a *newer* repo copy
+silently replaced it (`PreserveNewest`). To change a default on a deployed host, edit the host's file or
+use `appsettings.local.json`.
+
 ⚠️ **The shipped version comes from `version.txt` at the repo root**, read into `<Version>` by the
 csproj. `.github/workflows/release.yml` refuses to publish when the git tag and that file disagree,
 so `v0.5.2` requires `version.txt` to say `0.5.2`. Before 2026-09-09 there was no version file and
@@ -213,7 +252,8 @@ had been doing the opposite for months, silently, because nothing checked afterw
 Put anything true of **this machine** rather than of MultiSeat in
 `C:\Program Files\MultiSeat\appsettings.local.json`. `Program.cs` loads it **last**, so it outranks
 the shipped `appsettings.json` in the same folder; it is gitignored and absent from the repo, so
-`dotnet publish` never overwrites it.
+`dotnet publish` never overwrites it. `install-service.ps1` (both paths) also copies it out and back
+byte for byte when it replaces the install folder - see "How the deploy replaces the install folder".
 
 ⚠️ **"A deploy cannot overwrite it" was only ever true of `dotnet publish`.** Until `98b5cfa`
 (2026-09-10) `install-service.ps1 -FromZip` **wiped the entire install directory** —
@@ -233,8 +273,9 @@ installer; this protects the upgrade *after* the one that carries it.
 { "MultiSeat": { "AudioMode": "PerSession" } }
 ```
 
-This exists because editing the deployed `appsettings.json` is **durable right up until it isn't**.
-The csproj marks it `PreserveNewest`, so `dotnet publish` leaves a newer host copy alone — but the
+This exists because editing the deployed `appsettings.json` is **durable right up until it isn't**
+(for a hand-run `dotnet publish` into the install folder; `install-service.ps1` now always keeps the
+host's copy, see above). The csproj marks it `PreserveNewest`, so `dotnet publish` leaves a newer host copy alone — but the
 moment anyone touches the repo's copy, the next deploy silently overwrites the host's settings.
 Verified both halves: five deploys left a host edit intact, then one `touch` on the repo file
 reverted it. Environment variables and `appsettings.{Environment}.json` are no escape either — the

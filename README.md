@@ -120,8 +120,11 @@ It also enables Remote Desktop and opens the required firewall ports automatical
 
 This script:
 - Installs dashboard npm packages if needed
-- Builds and publishes `MultiSeat.Service`
-- Builds the web dashboard
+- Builds `MultiSeat.Service` and the web dashboard into a temporary staging folder and checks it
+- Confirms the host has the .NET runtimes that build needs (before it touches the running service)
+- Replaces `C:\Program Files\MultiSeat` as a whole, keeping your `appsettings.json` and
+  `appsettings.local.json` and a full backup of the old folder in `C:\ProgramData\MultiSeat\install-backups`
+  (it puts the old folder back if the copy fails)
 - Registers `MultiSeatService` as a Windows auto-start service running as SYSTEM
 - Starts the service immediately
 
@@ -239,8 +242,8 @@ Remove-Item "C:\ProgramData\MultiSeat"   -Recurse -Force
 ### Build and deploy
 
 ```powershell
-# Builds the service, installs npm deps, builds the dashboard,
-# registers the Windows service, and starts it.
+# Builds the service and dashboard into a staging folder, verifies it, replaces the install
+# folder, registers the Windows service, and starts it.
 .\scripts\install-service.ps1
 ```
 
