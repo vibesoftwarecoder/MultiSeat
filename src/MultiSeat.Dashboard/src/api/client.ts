@@ -17,6 +17,7 @@ import type {
   NvencQualityPreset,
   HostApolloInfo,
   ScaleChange,
+  UpdatesState,
 } from "./types";
 
 const BASE = "/api";
@@ -182,6 +183,16 @@ export const system = {
     request<RefreshRateChange>("/system/refresh-rate", {
       method: "POST",
       body: JSON.stringify({ intervalMs }),
+    }),
+  // Update notices. GET only reads the service's cache; it never makes the service call GitHub.
+  getUpdates: () => request<UpdatesState>("/system/updates"),
+  // 202 with the new state; 409 when update checks are off; 429 inside the 60 s cooldown.
+  checkUpdates: () =>
+    request<UpdatesState>("/system/updates/check", { method: "POST" }),
+  setUpdatesEnabled: (enabled: boolean) =>
+    request<UpdatesState>("/system/updates/settings", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
     }),
 };
 

@@ -5,10 +5,21 @@ import { SystemPage } from "./pages/SystemPage";
 import { InputPage } from "./pages/InputPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { TipsPage } from "./pages/TipsPage";
+import { UpdatesProvider, useUpdatesContext } from "./hooks/UpdatesContext";
+import { UpdateBanner } from "./components/UpdateBanner";
+import { visibleAnnouncements } from "./components/updateUtils";
+
+// A small dot after "System" while any update notice is announced and not dismissed.
+function SystemNavDot() {
+  const updates = useUpdatesContext();
+  if (!updates || visibleAnnouncements(updates.data, updates.dismissed).length === 0) return null;
+  return <span className="nav-dot" role="img" aria-label="Update notice" />;
+}
 
 export default function App() {
   return (
     <BrowserRouter>
+      <UpdatesProvider>
       <div className="app-layout">
         <nav className="sidebar">
           <div className="sidebar-brand">
@@ -28,6 +39,7 @@ export default function App() {
             </NavLink>
             <NavLink to="/system">
               System
+              <SystemNavDot />
             </NavLink>
             <NavLink to="/settings">
               Settings
@@ -39,6 +51,7 @@ export default function App() {
         </nav>
 
         <main className="main-content">
+          <UpdateBanner />
           <Routes>
             <Route path="/" element={<SeatsPage />} />
             <Route path="/input" element={<InputPage />} />
@@ -49,6 +62,7 @@ export default function App() {
           </Routes>
         </main>
       </div>
+      </UpdatesProvider>
     </BrowserRouter>
   );
 }

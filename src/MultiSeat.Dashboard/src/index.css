@@ -983,3 +983,199 @@ select:focus {
 .process-table tr:last-child td {
   border-bottom: none;
 }
+
+/* ── Update notices ──────────────────────────────────────────── */
+/* Informational blue only (the info-banner palette). Never red or yellow. */
+.update-banners {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.update-banner-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.update-banner-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.update-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.update-dismiss {
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.update-banner .update-instructions {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #3b82f6;
+}
+
+.nav-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
+
+.nav-links a.active .nav-dot {
+  background: #fff;
+}
+
+.update-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+}
+
+.update-card-head h3 {
+  margin-right: auto;
+}
+
+.update-checked,
+.update-message,
+.update-sent,
+.update-howto-lead {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.update-message {
+  margin-bottom: 8px;
+}
+
+.update-sent {
+  margin: 8px 0 12px;
+}
+
+.update-off-lead {
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.update-rows {
+  display: flex;
+  flex-direction: column;
+  margin: 12px 0;
+  border-top: 1px solid var(--border);
+}
+
+.update-row {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.update-row-name {
+  font-weight: 600;
+}
+
+.update-row-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  overflow-wrap: anywhere;
+}
+
+.update-row-status {
+  color: var(--text-secondary);
+}
+
+.update-status--updateAvailable {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.update-status--upToDate {
+  color: var(--success);
+}
+
+.update-row-note {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.update-row-link {
+  margin-top: 4px;
+}
+
+.update-link {
+  text-decoration: none;
+}
+
+.update-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.update-howto-title {
+  margin-top: 14px;
+  font-size: 14px;
+}
+
+.update-howto {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.update-howto summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.update-instructions {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.update-instructions p,
+.update-instructions ol,
+.update-instructions ul {
+  margin: 8px 0;
+}
+
+.update-instructions ol,
+.update-instructions ul {
+  padding-left: 20px;
+}
+
+.update-instructions li {
+  margin-bottom: 6px;
+}
+
+.update-instructions code,
+.update-code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+}
+
+.update-code {
+  margin: 4px 0;
+  padding: 6px 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
