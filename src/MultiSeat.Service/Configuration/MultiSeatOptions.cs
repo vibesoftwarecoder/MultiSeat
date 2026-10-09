@@ -494,6 +494,20 @@ public sealed class MultiSeatOptions
     // C:\Users\{AccountName}\AppData\Roaming\RetroArch\retroarch.cfg.
     public string RetroArchConfigPath { get; set; } = string.Empty;
 
+    // ── Update notifications ─────────────────────────────────────────
+    /// <summary>
+    /// Ask GitHub's public releases API whether newer MultiSeat, ApolloVibe and MoonlightVibe
+    /// releases exist, and show the answer in the dashboard. Default false: this is the only
+    /// internet connection the service would make, so it is opt-in.
+    /// It sends an unauthenticated GET to api.github.com with a generic User-Agent and nothing
+    /// else - no version, host name, user name or seat data. It never downloads or installs
+    /// anything. Set in appsettings.local.json, or turn it on from the dashboard System page.
+    /// </summary>
+    public bool UpdateCheckEnabled { get; set; } = false;
+
+    /// <summary>Hours between checks. Clamped to 1..168. Ignored while UpdateCheckEnabled is false.</summary>
+    public int UpdateCheckIntervalHours { get; set; } = Shared.Constants.DefaultUpdateCheckIntervalHours;
+
     // ── Rebuild ───────────────────────────────────────────────────────
     // Absolute path to the repo root. Required for the dashboard Rebuild button.
     // Example: C:\MultiSeat-Development

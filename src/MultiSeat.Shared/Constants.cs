@@ -60,6 +60,24 @@ public static class Constants
     public const string DefaultApolloConfigDir = @"C:\ProgramData\MultiSeat\apollo";
     public const string DefaultMultiSeatConfigPath = @"C:\ProgramData\MultiSeat\multiseat-host.json";
 
+    // ── Update notifications ─────────────────────────────────────────
+    // Fixed on purpose and NOT configurable: a setting that could point the update check at
+    // another host or repository would turn an update notice into a generic outbound request
+    // primitive. See MultiSeat.Service.Updates.
+    public const string UpdateApiHost = "api.github.com";
+    public const string UpdateRepoOwner = "vibesoftwarecoder";
+    public const string UpdateRepoMultiSeat = "MultiSeat";
+    public const string UpdateRepoApolloVibe = "ApolloVibe";
+    public const string UpdateRepoMoonlightVibe = "MoonlightVibe";
+    // Generic on purpose: no version, no host name. GitHub rejects a request with no User-Agent.
+    public const string UpdateUserAgent = "MultiSeat-update-check";
+    public const string DefaultUpdateStatePath = @"C:\ProgramData\MultiSeat\update-check.json";
+    // File an ApolloVibe release package may carry beside sunshine.exe (tag, commit, sunshineSha256).
+    public const string ApolloReleaseMarkerFileName = "release.json";
+    public const int DefaultUpdateCheckIntervalHours = 12;
+    public const int MinUpdateCheckIntervalHours = 1;
+    public const int MaxUpdateCheckIntervalHours = 168;
+
     // ── Account naming ───────────────────────────────────────────────
     public const string AccountPrefix = "MultiSeatSeat";  // e.g., MultiSeatSeat01
     public const string AccountGroup = "Users";
