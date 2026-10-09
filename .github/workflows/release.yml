@@ -182,6 +182,7 @@ jobs:
           $root = "publish/MultiSeat"
           $problems = @()
           if (-not (Test-Path "$root/scripts/install-service.ps1")) { $problems += "scripts/install-service.ps1 missing - the asset cannot install itself" }
+          if (-not (Test-Path "$root/scripts/lib/install-lib.ps1")) { $problems += "scripts/lib/install-lib.ps1 missing - install-service.ps1 dot-sources it and would fail on the first step" }
           if (-not (Test-Path "$root/prerequisites/install-prerequisites.ps1")) { $problems += "prerequisites/install-prerequisites.ps1 missing" }
           if (-not (Test-Path "$root/MultiSeat.Service.exe")) { $problems += "MultiSeat.Service.exe missing" }
           if (-not (Test-Path "$root/wwwroot/index.html"))    { $problems += "wwwroot/index.html missing (dashboard not staged)" }

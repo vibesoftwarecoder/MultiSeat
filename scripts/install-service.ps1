@@ -3,8 +3,9 @@
 .SYNOPSIS
     Installs the MultiSeat Service as a Windows Service.
 .DESCRIPTION
-    Publishes the MultiSeat.Service project, copies the InputHook DLL,
-    creates the required data directories, and registers the Windows service.
+    Builds MultiSeat.Service (or unpacks a release asset) into a staging directory, verifies it,
+    then replaces the install folder as a whole and registers the Windows service.
+    Nothing publishes straight into the live install folder.
 .PARAMETER Uninstall
     Remove the service and clean up.
 #>
@@ -32,6 +33,10 @@ $ProjectDir = Join-Path $PSScriptRoot "..\src\MultiSeat.Service"
 $InputHookBuild = Join-Path $PSScriptRoot "..\src\MultiSeat.InputHook\build\Release\MultiSeatInputHook.dll"
 
 function Write-Step($msg) { Write-Host "[MultiSeat] $msg" -ForegroundColor Cyan }
+
+# Pure helpers (payload checks, runtime checks, the install-folder replace). Dot-sourcing defines
+# functions only; tests load the same file without running any installer step.
+. (Join-Path $PSScriptRoot "lib\install-lib.ps1")
 
 # -- Uninstall -------------------------------------------------------
 if ($Uninstall) {
@@ -481,58 +486,45 @@ if ($vmExe) {
 # alone — it is NOT stopped or disabled.
 Write-Host "  OK: leaving any standalone ApolloService untouched (MultiSeat uses its own Apollo + ports)" -ForegroundColor DarkGray
 
-# -- Stop service before publish so its DLLs are not locked ----------
-$svcBeforePublish = Get-Service $ServiceName -ErrorAction SilentlyContinue
-if ($svcBeforePublish -and $svcBeforePublish.Status -eq 'Running') {
-    Write-Step "Stopping service before publish..."
-    Stop-Service $ServiceName -Force
-    try { $svcBeforePublish.WaitForStatus('Stopped', (New-TimeSpan -Seconds 15)) }
-    catch { Write-Warning "SCM stop timed out -- will force-kill the process" }
-}
-
-# Kill any surviving process running the service exe by path
-# (handles cases where the process outlives the SCM status change)
-$serviceExe = Join-Path $InstallDir "MultiSeat.Service.exe"
-$lingering = Get-Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -eq $serviceExe }
-foreach ($proc in $lingering) {
-    Write-Step "Force-killing lingering process PID $($proc.Id)..."
-    $proc | Stop-Process -Force
-    $proc.WaitForExit(10000)
-}
-
-# Brief pause to let the OS release all file handles before publish
-Start-Sleep -Milliseconds 500
-Write-Step "Service stopped and file handles released"
-
-# -- Deploy: extract a release zip, or build from source --------------
+# -- Stage, verify, replace -------------------------------------------
 #
-# -FromZip installs the published asset from a MultiSeat release instead of building. That
-# is the whole point of issue #32: a release zip is self-contained, so this path needs no
-# .NET SDK, no .NET runtime and no Node on the target. The build path below is unchanged and
-# is still what a developer gets by default.
-if ($FromZip) {
-    $srcFull = (Resolve-Path $FromZip -ErrorAction Stop).Path
-    Write-Step "Installing from $srcFull"
+# Both ways of getting a payload (a release zip, or a build from source) now produce it in a
+# STAGING directory first. Nothing touches $InstallDir until the staged payload has been checked,
+# and then ONE routine (Install-Payload, scripts\lib\install-lib.ps1) replaces the install folder
+# as a whole. The two paths differ only in how the stage is produced.
+#
+# Why the source build no longer publishes straight into $InstallDir: `dotnet publish` copies
+# runtimeconfig.json only when the source is NEWER than the destination. Onto a folder that was
+# once self-contained that left a framework-dependent runtimeconfig.json beside a leftover
+# hostfxr.dll (measured 2026-10-08), and the service failed with "No frameworks were found".
+# Replacing the folder whole makes the result the same whatever the folder looked like before.
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$configBackupRoot = Join-Path $env:ProgramData "MultiSeat\config-backups"
+$folderBackupRoot = Join-Path $env:ProgramData "MultiSeat\install-backups"
+$stage = $null
+$stageIsUserDir = $false
 
-    # Accept EITHER the .zip or an already-extracted folder. The asset now carries scripts\ , so
-    # the natural flow is to extract it and run the installer from inside - at which point asking
-    # the user to point back at the .zip would be circular, and would extract it a second time.
-    $isDir = (Test-Path $srcFull -PathType Container)
+try {
+    if ($FromZip) {
+        # -FromZip installs the published asset from a MultiSeat release instead of building. That
+        # is the whole point of issue #32: a release zip is self-contained, so this path needs no
+        # .NET SDK, no .NET runtime and no Node on the target.
+        $srcFull = (Resolve-Path $FromZip -ErrorAction Stop).Path
+        Write-Step "Installing from $srcFull"
 
-    # Verify the payload BEFORE clearing the install directory. Extracting a bad zip over a
-    # working install would leave the host with neither.
-    $stage = Join-Path ([IO.Path]::GetTempPath()) ("multiseat-stage-" + [guid]::NewGuid().ToString("N").Substring(0,8))
-    New-Item -ItemType Directory -Path $stage -Force | Out-Null
-    try {
-        if ($isDir) {
+        # Accept EITHER the .zip or an already-extracted folder. The asset carries scripts\ , so
+        # the natural flow is to extract it and run the installer from inside - at which point asking
+        # the user to point back at the .zip would be circular, and would extract it a second time.
+        if (Test-Path $srcFull -PathType Container) {
             $stage = $srcFull          # already extracted; read it in place
+            $stageIsUserDir = $true
         } else {
+            $stage = Join-Path ([IO.Path]::GetTempPath()) ("multiseat-stage-" + [guid]::NewGuid().ToString("N").Substring(0,8))
+            New-Item -ItemType Directory -Path $stage -Force | Out-Null
             Expand-Archive -Path $srcFull -DestinationPath $stage -Force
         }
 
-        $required = @("MultiSeat.Service.exe", "appsettings.json", "wwwroot\index.html")
-        $absent = @($required | Where-Object { -not (Test-Path (Join-Path $stage $_)) })
+        $absent = @(Get-MissingPayloadFiles -Dir $stage)
         if ($absent.Count -gt 0) {
             throw "This zip is missing $($absent -join ', '). It is not a MultiSeat release asset -- nothing was installed."
         }
@@ -542,215 +534,206 @@ if ($FromZip) {
         if (-not (Test-Path (Join-Path $stage "hostfxr.dll"))) {
             throw "This zip is not self-contained (no hostfxr.dll), so it would need a .NET runtime on this host. Refusing to install it."
         }
-
-        # ⛔ Preserve host-local configuration BEFORE the wipe below.
-        #
-        # That wipe deletes everything in the install directory, so an upgrade used to destroy
-        # appsettings.json AND appsettings.local.json and then drop the shipped defaults in their
-        # place. Nothing was backed up and nothing said so. The API survived only by accident,
-        # because ResolveApiKey falls back to a file in ProgramData that this never touches;
-        # every setting without such a fallback was simply gone. See issue #45.
-        #
-        # ⚠️ appsettings.local.json is the documented place for host-local settings precisely
-        # because a deploy cannot overwrite it — true of `dotnet publish`, and NOT true here
-        # until now. Read that advice as conditional on this block existing.
-        # ⭐ Preserve the FILES, byte for byte — never their text.
-        #
-        # Round-tripping through Get-Content/Set-Content rewrites the file: Set-Content appends a
-        # trailing newline and can change the encoding, so a "preserved" file came back two bytes
-        # different from the one the user wrote. Harmless for JSON today, wrong in principle for a
-        # step whose entire job is to leave the user's file alone, and a trap the moment anything
-        # here is not JSON.
-        $preserveNames = @('appsettings.json', 'appsettings.local.json')
-        $preserved = @{}
-        $backupDir = $null
-        foreach ($name in $preserveNames) {
-            $existing = Join-Path $InstallDir $name
-            if (Test-Path $existing) {
-                if (-not $backupDir) {
-                    $backupDir = Join-Path $env:ProgramData ("MultiSeat\config-backups\" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-                    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-                }
-                # The backup doubles as the staging copy: one byte-exact copy, used for both.
-                # It lives outside the install directory because the wipe below is the very thing
-                # being protected against.
-                $kept = Join-Path $backupDir $name
-                Copy-Item $existing $kept -Force
-                $preserved[$name] = $kept
-            }
-        }
-        if ($preserved.Count -gt 0) {
-            Write-Host "  Backed up $($preserved.Count) config file(s) to $backupDir" -ForegroundColor DarkGray
-        }
-
-        if (Test-Path $InstallDir) {
-            Get-ChildItem $InstallDir -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-        } else {
-            New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-        }
-
-        # The asset carries scripts\ , prerequisites\ and README.md so it can install itself
-        # without a clone. They are NOT part of the deployed service - copying them would put a
-        # stale copy of the installer inside Program Files, which is exactly the kind of thing
-        # someone later runs by mistake.
-        $skip = @('scripts', 'prerequisites', 'README.md')
-        Get-ChildItem $stage -Force |
-            Where-Object { $skip -notcontains $_.Name } |
-            ForEach-Object { Copy-Item $_.FullName $InstallDir -Recurse -Force }
-
-        # -- Put host configuration back over the shipped defaults --------------
-        #
-        # An upgrade must not silently change how this host is configured. The shipped
-        # appsettings.json is what a FIRST install needs; on an upgrade the host's own copy wins.
-        if ($preserved.ContainsKey('appsettings.local.json')) {
-            Copy-Item $preserved['appsettings.local.json'] `
-                      (Join-Path $InstallDir 'appsettings.local.json') -Force
-            Write-Host "  Restored appsettings.local.json" -ForegroundColor DarkGray
-        }
-
-        if ($preserved.ContainsKey('appsettings.json')) {
-            $shippedPath = Join-Path $InstallDir 'appsettings.json'
-
-            # Report settings this release added that the host's file does not carry. Keeping the
-            # host's file is right, but doing it silently would hide a new option forever — the
-            # one real cost of preserving over replacing, so it is surfaced rather than ignored.
-            try {
-                $shippedKeys  = ((Get-Content $shippedPath -Raw | ConvertFrom-Json).MultiSeat |
-                                 Get-Member -MemberType NoteProperty).Name
-                $hostKeys     = ((Get-Content $preserved['appsettings.json'] -Raw | ConvertFrom-Json).MultiSeat |
-                                 Get-Member -MemberType NoteProperty).Name
-                $newKeys      = @($shippedKeys | Where-Object { $hostKeys -notcontains $_ })
-                if ($newKeys.Count -gt 0) {
-                    Write-Host ""
-                    Write-Host "  This release adds $($newKeys.Count) setting(s) your appsettings.json does not have:" -ForegroundColor Yellow
-                    $newKeys | ForEach-Object { Write-Host "      MultiSeat:$_" -ForegroundColor Yellow }
-                    Write-Host "  Your file was kept as-is, so these run at their built-in defaults." -ForegroundColor Yellow
-                    Write-Host ""
-                }
-            } catch {
-                Write-Host "  NOTE: could not compare settings against the shipped file ($_)" -ForegroundColor Yellow
-            }
-
-            Copy-Item $preserved['appsettings.json'] $shippedPath -Force
-            Write-Host "  Kept your existing appsettings.json (shipped defaults not applied)" -ForegroundColor DarkGray
-        }
-
-        $ver = "unknown"
-        try {
-            $ver = (& "$InstallDir\MultiSeat.Service.exe" --config 2>&1 |
-                    Select-String "version\s*:" | Select-Object -First 1) -replace ".*:\s*", ""
-        } catch { }
-        Write-Step "Extracted release $ver -- no SDK, runtime or Node needed"
     }
-    finally {
-        # ONLY remove a staging dir we created. When -FromZip was given an already-extracted
-        # folder, $stage IS the user's own directory and deleting it would destroy the thing they
-        # just downloaded - along with the installer they are currently running from.
-        if (-not $isDir) {
-            Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+    else {
+        # -- Publish into a fresh staging directory -----------------------------------------
+        $stage = Join-Path ([IO.Path]::GetTempPath()) ("multiseat-build-" + [guid]::NewGuid().ToString("N").Substring(0,8))
+        New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
+        Write-Step "Publishing MultiSeat.Service..."
+        dotnet publish $ProjectDir -c Release -o "$stage" --no-self-contained 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "dotnet publish failed"
         }
+
+        # -- Build InputHook DLL ----------------------------------------------
+        # OPTIONAL component. MSYS2 is a developer dependency, not a MultiSeat prerequisite, and
+        # EnableKeyboardMouseIsolation is OFF by default (the hook is a no-op as architected - see
+        # MultiSeatOptions.EnableKeyboardMouseIsolation). A missing DLL changes nothing about how
+        # MultiSeat runs, so these are informational notes, NOT warnings: emitting WARNING here made
+        # a normal install look broken and got reported as a bug (issue #14).
+        $InputHookSrc = Join-Path $PSScriptRoot "..\src\MultiSeat.InputHook"
+        $Bash = "C:\msys64\usr\bin\bash.exe"
+        if (Test-Path $Bash) {
+            Write-Step "Building MultiSeatInputHook.dll..."
+
+            # Windows path -> MSYS path, without a scriptblock -replace: scriptblock substitution is
+            # PowerShell 7 only and does NOT fail loudly on 5.1 - it stringifies the block into the
+            # result, producing a path like ' "/$(([string]C:/...[0]).ToLower())" /Users/...' and a
+            # CMake error about a directory that does not exist. Resolve-Path also drops the '..'.
+            $hookFull = (Resolve-Path $InputHookSrc).Path
+            $srcUnix = '/' + $hookFull.Substring(0, 1).ToLower() + ($hookFull.Substring(2) -replace '\\', '/')
+
+            $buildScript = "export PATH='/ucrt64/bin:`$PATH'; cmake -B '$srcUnix/build/Release' -S '$srcUnix' -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/ucrt64/bin/g++.exe -DCMAKE_MAKE_PROGRAM=/ucrt64/bin/ninja.exe && cmake --build '$srcUnix/build/Release'"
+
+            # This step is optional and must never abort the install. With $ErrorActionPreference =
+            # 'Stop' at the top of the file, anything the compiler writes to stderr surfaces as a
+            # NativeCommandError and kills the whole script. Contain it here.
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                & $Bash -lc $buildScript 2>&1 | Out-Null
+            }
+            catch {
+                $global:LASTEXITCODE = 1
+            }
+            finally {
+                $ErrorActionPreference = $prevEap
+            }
+
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "  Note: InputHook build failed -- skipping (optional, off by default)" -ForegroundColor DarkGray
+            }
+        } else {
+            Write-Host "  Note: MSYS2 not present at C:\msys64 -- skipping optional InputHook build" -ForegroundColor DarkGray
+        }
+
+        # -- Carry the InputHook DLL into the stage ------------------------------
+        if (Test-Path $InputHookBuild) {
+            Copy-Item $InputHookBuild (Join-Path $stage "MultiSeatInputHook.dll") -Force
+            Write-Step "Copied MultiSeatInputHook.dll"
+        } else {
+            Write-Host "  Note: MultiSeatInputHook.dll not built -- keyboard/mouse isolation stays unavailable." -ForegroundColor DarkGray
+            Write-Host "        This is expected and safe: the feature is off by default and currently inert." -ForegroundColor DarkGray
+        }
+
+        # -- Build the dashboard into the stage's wwwroot -------------------------
+        $DashboardDir = Join-Path $PSScriptRoot "..\src\MultiSeat.Dashboard"
+        if (Test-Path (Join-Path $DashboardDir "package.json")) {
+            Write-Step "Building dashboard..."
+            Push-Location $DashboardDir
+            try {
+                # Install npm dependencies if node_modules is missing or incomplete
+                $nodeModules = Join-Path $DashboardDir "node_modules"
+                $viteMarker  = Join-Path $nodeModules "vite\bin\vite.js"
+                if (-not (Test-Path $viteMarker)) {
+                    Write-Step "Installing dashboard npm dependencies..."
+                    # Not (Get-Command ...)?.Source - the null-conditional operator is PowerShell 7 only,
+                    # and a parse error is fatal for the WHOLE file, so this one line made the documented
+                    # ".\scripts\install-service.ps1" fail on Windows PowerShell 5.1 before it ran a
+                    # single step. Keep this script 5.1-clean; that is the shell the docs imply.
+                    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+                    $nodeExe = if ($nodeCmd) { $nodeCmd.Source } else { $null }
+                    if (-not $nodeExe) { $nodeExe = "C:\Program Files\nodejs\node.exe" }
+                    if (-not (Test-Path $nodeExe)) { throw "node.exe not found. Install Node.js first." }
+                    $result = Start-Process $nodeExe -ArgumentList "install.cjs" `
+                        -Wait -NoNewWindow -PassThru -WorkingDirectory $DashboardDir
+                    if ($result.ExitCode -ne 0) { throw "npm install failed (exit $($result.ExitCode))" }
+                }
+
+                & cmd /c "$DashboardDir\build.bat"
+                if ($LASTEXITCODE -ne 0) { throw "Dashboard build failed" }
+                $distDir = Join-Path $DashboardDir "dist"
+                if (Test-Path $distDir) {
+                    $wwwroot = Join-Path $stage "wwwroot"
+                    if (Test-Path $wwwroot) { Remove-Item $wwwroot -Recurse -Force }
+                    Copy-Item $distDir $wwwroot -Recurse
+                    Write-Step "Dashboard staged in $wwwroot"
+                } else {
+                    Write-Warning "Dashboard dist/ not found after build"
+                }
+            } finally {
+                Pop-Location
+            }
+        } else {
+            Write-Warning "Dashboard not found -- skipping"
+        }
+
+        $absent = @(Get-MissingPayloadFiles -Dir $stage)
+        if ($absent.Count -gt 0) {
+            throw "The build did not produce $($absent -join ', '). Nothing was installed and the running service was not touched."
+        }
+    }
+
+    # -- Verify the staged payload BEFORE the service or the install folder is touched ------
+    #
+    # A runtime layout that contradicts itself (a self-contained config beside no bundled runtime,
+    # or the reverse) is the 2026-10-08 failure, so it is refused here, by name, and again on the
+    # installed folder inside Install-Payload.
+    $payloadCheck = Test-PayloadConsistency -Dir $stage
+    if (-not $payloadCheck.Ok) {
+        throw "The staged payload is inconsistent -- nothing was installed and the service was not touched. $($payloadCheck.Problems -join ' ')"
+    }
+    Write-Step "Staged payload verified ($($payloadCheck.Mode))"
+
+    # A framework-dependent payload runs on the host's shared runtimes. Check they exist NOW,
+    # while the service is still running: a host that lacks them must never be left with a
+    # stopped service and a folder that cannot start.
+    if ($payloadCheck.Mode -eq 'framework-dependent') {
+        $requirements = @(Get-RuntimeRequirements -RuntimeConfigPath (Join-Path $stage "MultiSeat.Service.runtimeconfig.json"))
+        $runtimeCheck = Test-HostHasRuntimes -Requirements $requirements -RuntimeLines @(Get-HostDotnetRuntimes)
+        if (-not $runtimeCheck.Ok) {
+            throw ("This build needs shared .NET runtimes this host does not have:`n  - " +
+                   ($runtimeCheck.Missing -join "`n  - ") +
+                   "`nNothing was installed and the service was not touched. Fix: install the .NET 9 " +
+                   "runtime that matches (the ASP.NET Core Runtime and the .NET Runtime, from " +
+                   "https://dotnet.microsoft.com/download/dotnet/9.0 ), or deploy a self-contained " +
+                   "release asset with: .\scripts\install-service.ps1 -FromZip <multiseat-windows-x64.zip>")
+        }
+        Write-Host "  OK: host has the shared runtimes this build needs" -ForegroundColor DarkGray
+    }
+
+    # -- Stop service so its DLLs are not locked --------------------------
+    # Only now: the payload is verified and the host can run it.
+    $svcBeforePublish = Get-Service $ServiceName -ErrorAction SilentlyContinue
+    $serviceWasRunning = ($svcBeforePublish -and $svcBeforePublish.Status -eq 'Running')
+    if ($serviceWasRunning) {
+        Write-Step "Stopping service before the install..."
+        Stop-Service $ServiceName -Force
+        try { $svcBeforePublish.WaitForStatus('Stopped', (New-TimeSpan -Seconds 15)) }
+        catch { Write-Warning "SCM stop timed out -- will force-kill the process" }
+    }
+
+    # Kill any surviving process running the service exe by path
+    # (handles cases where the process outlives the SCM status change)
+    $serviceExe = Join-Path $InstallDir "MultiSeat.Service.exe"
+    $lingering = Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq $serviceExe }
+    foreach ($proc in $lingering) {
+        Write-Step "Force-killing lingering process PID $($proc.Id)..."
+        $proc | Stop-Process -Force
+        $proc.WaitForExit(10000)
+    }
+
+    # Brief pause to let the OS release all file handles before the folder is replaced
+    Start-Sleep -Milliseconds 500
+    Write-Step "Service stopped and file handles released"
+
+    # -- Replace the install folder ----------------------------------------
+    # A failure in here has already put the previous folder back (Install-Payload restores it from
+    # the full-folder backup it made first). Start the service again so a failed deploy leaves the
+    # host as it found it, then let the error through.
+    try {
+        $null = Install-Payload -Stage $stage -InstallDir $InstallDir `
+                    -ConfigBackupRoot $configBackupRoot -FolderBackupRoot $folderBackupRoot -Stamp $stamp
+    }
+    catch {
+        $restored = $_.Exception.Data['Restored']
+        if ($serviceWasRunning -and $restored -ne $false) {
+            Write-Step "Install failed -- starting the previous service again..."
+            try { Start-Service $ServiceName -ErrorAction Stop }
+            catch { Write-Warning "Could not start $ServiceName again: $($_.Exception.Message)" }
+        }
+        throw
+    }
+
+    $ver = "unknown"
+    try {
+        $ver = (& "$InstallDir\MultiSeat.Service.exe" --config 2>&1 |
+                Select-String "version\s*:" | Select-Object -First 1) -replace ".*:\s*", ""
+    } catch { }
+    if ($FromZip) {
+        Write-Step "Extracted release $ver -- no SDK, runtime or Node needed"
+    } else {
+        Write-Step "Installed build $ver ($($payloadCheck.Mode))"
     }
 }
-else {
-    # -- Publish ----------------------------------------------------------
-    Write-Step "Publishing MultiSeat.Service..."
-    dotnet publish $ProjectDir -c Release -o "$InstallDir" --no-self-contained 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "dotnet publish failed"
-    }
-
-    # -- Build InputHook DLL ----------------------------------------------
-    # OPTIONAL component. MSYS2 is a developer dependency, not a MultiSeat prerequisite, and
-    # EnableKeyboardMouseIsolation is OFF by default (the hook is a no-op as architected — see
-    # MultiSeatOptions.EnableKeyboardMouseIsolation). A missing DLL changes nothing about how
-    # MultiSeat runs, so these are informational notes, NOT warnings: emitting WARNING here made
-    # a normal install look broken and got reported as a bug (issue #14).
-    $InputHookSrc = Join-Path $PSScriptRoot "..\src\MultiSeat.InputHook"
-    $Bash = "C:\msys64\usr\bin\bash.exe"
-    if (Test-Path $Bash) {
-        Write-Step "Building MultiSeatInputHook.dll..."
-
-        # Windows path -> MSYS path, without a scriptblock -replace: scriptblock substitution is
-        # PowerShell 7 only and does NOT fail loudly on 5.1 - it stringifies the block into the
-        # result, producing a path like ' "/$(([string]C:/...[0]).ToLower())" /Users/...' and a
-        # CMake error about a directory that does not exist. Resolve-Path also drops the '..'.
-        $srcFull = (Resolve-Path $InputHookSrc).Path
-        $srcUnix = '/' + $srcFull.Substring(0, 1).ToLower() + ($srcFull.Substring(2) -replace '\\', '/')
-
-        $buildScript = "export PATH='/ucrt64/bin:`$PATH'; cmake -B '$srcUnix/build/Release' -S '$srcUnix' -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/ucrt64/bin/g++.exe -DCMAKE_MAKE_PROGRAM=/ucrt64/bin/ninja.exe && cmake --build '$srcUnix/build/Release'"
-
-        # This step is optional and must never abort the install. With $ErrorActionPreference =
-        # 'Stop' at the top of the file, anything the compiler writes to stderr surfaces as a
-        # NativeCommandError and kills the whole script - which on 5.1 left the service STOPPED
-        # mid-deploy, publish done and nothing restarted. Contain it here.
-        $prevEap = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            & $Bash -lc $buildScript 2>&1 | Out-Null
-        }
-        catch {
-            $global:LASTEXITCODE = 1
-        }
-        finally {
-            $ErrorActionPreference = $prevEap
-        }
-
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "  Note: InputHook build failed -- skipping (optional, off by default)" -ForegroundColor DarkGray
-        }
-    } else {
-        Write-Host "  Note: MSYS2 not present at C:\msys64 -- skipping optional InputHook build" -ForegroundColor DarkGray
-    }
-
-    # -- Copy InputHook DLL -----------------------------------------------
-    if (Test-Path $InputHookBuild) {
-        Copy-Item $InputHookBuild "$InstallDir\MultiSeatInputHook.dll" -Force
-        Write-Step "Copied MultiSeatInputHook.dll"
-    } else {
-        Write-Host "  Note: MultiSeatInputHook.dll not built -- keyboard/mouse isolation stays unavailable." -ForegroundColor DarkGray
-        Write-Host "        This is expected and safe: the feature is off by default and currently inert." -ForegroundColor DarkGray
-    }
-
-    # -- Build and deploy Dashboard ---------------------------------------
-    $DashboardDir = Join-Path $PSScriptRoot "..\src\MultiSeat.Dashboard"
-    if (Test-Path (Join-Path $DashboardDir "package.json")) {
-        Write-Step "Building dashboard..."
-        Push-Location $DashboardDir
-        try {
-            # Install npm dependencies if node_modules is missing or incomplete
-            $nodeModules = Join-Path $DashboardDir "node_modules"
-            $viteMarker  = Join-Path $nodeModules "vite\bin\vite.js"
-            if (-not (Test-Path $viteMarker)) {
-                Write-Step "Installing dashboard npm dependencies..."
-                # Not (Get-Command ...)?.Source - the null-conditional operator is PowerShell 7 only,
-                # and a parse error is fatal for the WHOLE file, so this one line made the documented
-                # ".\scripts\install-service.ps1" fail on Windows PowerShell 5.1 before it ran a
-                # single step. Keep this script 5.1-clean; that is the shell the docs imply.
-                $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
-                $nodeExe = if ($nodeCmd) { $nodeCmd.Source } else { $null }
-                if (-not $nodeExe) { $nodeExe = "C:\Program Files\nodejs\node.exe" }
-                if (-not (Test-Path $nodeExe)) { throw "node.exe not found. Install Node.js first." }
-                $result = Start-Process $nodeExe -ArgumentList "install.cjs" `
-                    -Wait -NoNewWindow -PassThru -WorkingDirectory $DashboardDir
-                if ($result.ExitCode -ne 0) { throw "npm install failed (exit $($result.ExitCode))" }
-            }
-
-            & cmd /c "$DashboardDir\build.bat"
-            if ($LASTEXITCODE -ne 0) { throw "Dashboard build failed" }
-            $distDir = Join-Path $DashboardDir "dist"
-            if (Test-Path $distDir) {
-                $wwwroot = Join-Path $InstallDir "wwwroot"
-                if (Test-Path $wwwroot) { Remove-Item $wwwroot -Recurse -Force }
-                Copy-Item $distDir $wwwroot -Recurse
-                Write-Step "Dashboard deployed to $wwwroot"
-            } else {
-                Write-Warning "Dashboard dist/ not found after build"
-            }
-        } finally {
-            Pop-Location
-        }
-    } else {
-        Write-Warning "Dashboard not found -- skipping"
+finally {
+    # ONLY remove a staging dir we created. When -FromZip was given an already-extracted
+    # folder, $stage IS the user's own directory and deleting it would destroy the thing they
+    # just downloaded - along with the installer they are currently running from.
+    if ($stage -and -not $stageIsUserDir) {
+        Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 

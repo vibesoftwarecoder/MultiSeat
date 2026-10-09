@@ -121,6 +121,11 @@ provisioning that nobody is there to dismiss — which usually shows up as a sea
 - `accounts.json` (seat passwords) and `api-key.txt` carry an explicit DACL of SYSTEM +
   Administrators with inheritance disabled. They previously inherited `ProgramData`'s ACL, which
   grants `BUILTIN\Users` read.
+- The installer's backups (`config-backups\` and `install-backups\` under `ProgramData\MultiSeat`) hold
+  copies of `appsettings.json` and `appsettings.local.json`, which can carry the API key. Both folders
+  get the same SYSTEM + Administrators DACL (plus the installing account), inheritance disabled.
+  `config-backups\` existed before `install-backups\` and inherited `ProgramData`'s `BUILTIN\Users`
+  read until this change.
 - Seat passwords are DPAPI-protected at **CurrentUser** scope, which for this service is SYSTEM.
   The previous `LocalMachine` scope could be decrypted by any process on the machine regardless of
   which user it ran as.
