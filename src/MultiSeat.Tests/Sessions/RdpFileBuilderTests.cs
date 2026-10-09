@@ -160,6 +160,98 @@ public class RdpFileBuilderTests
         Assert.Equal(new[] { 100, 125, 150, 175, 200, 250, 300, 400, 500 }, RdpGeometry.AllowedScales);
     }
 
+    // ── Does mstsc actually SEND the scale? (issue #93) ────────────────
+    //
+    // Writing desktopscalefactor is not the same as the session getting it. mstsc forwards the
+    // scale from the file only under rules read from its own code (mstsc.exe and mstscax.dll
+    // 10.0.26100.9444):
+    //
+    //   1. The file loader reads "DesktopScaleFactor" and "DeviceScaleFactor" as integers that
+    //      default to 0 when the key is absent.
+    //   2. Before connecting, mstsc sets the control's DeviceScaleFactor and DesktopScaleFactor
+    //      only when BOTH are non-zero. Otherwise it sets neither, and the control sends the
+    //      scale of the console monitor its window is on.
+    //   3. The control rejects (E_INVALIDARG) a DeviceScaleFactor other than 100, 140 or 180,
+    //      and a DesktopScaleFactor below 100. Since mstsc sets the device scale first and only
+    //      sets the desktop scale when that succeeded, a bad device scale drops both.
+    //   4. MS-RDPBCGR 2.2.1.3.2: the server ignores desktopScaleFactor above 500%.
+    //
+    // MstscSendsScale models exactly that, and returns the scale the server receives, or null
+    // when mstsc falls back to the console's. Master before this fix wrote no devicescalefactor,
+    // so rule 2 dropped every requested scale; that is what the live seat showed.
+
+    /// <summary>The desktop scale mstsc would send for this file, or null for "the console's".</summary>
+    private static int? MstscSendsScale(string rdp)
+    {
+        var values = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in rdp.Split("\r\n", StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = line.Split(':', 3);
+            if (parts.Length == 3 && parts[1] == "i" && int.TryParse(parts[2], out var v))
+                values[parts[0]] = v;
+        }
+
+        var desktop = values.GetValueOrDefault("desktopscalefactor");   // rule 1: absent = 0
+        var device = values.GetValueOrDefault("devicescalefactor");
+
+        if (desktop == 0 || device == 0) return null;                     // rule 2
+        if (device is not (100 or 140 or 180)) return null;               // rule 3, device first
+        if (desktop < 100) return null;                                    // rule 3
+        if (desktop > 500) return null;                                    // rule 4
+        return desktop;
+    }
+
+    // The model has to reproduce what the live seat did, or it proves nothing. This is the file
+    // master wrote for the 150% test on 2026-10-08 (audio PerSession), as read back from the
+    // Default.rdp mstsc loaded. It carried desktopscalefactor:i:150, and the session, even when
+    // created fresh, ran at 100%, the console's scale.
+    [Fact]
+    public void TheModelReproducesTheLiveFailure()
+    {
+        const string fileMasterWrote =
+            "authentication level:i:0\r\nprompt for credentials:i:0\r\naudiomode:i:0\r\n" +
+            "session bpp:i:8\r\nconnection type:i:1\r\ndisable wallpaper:i:1\r\n" +
+            "disable full window drag:i:1\r\ndisable menu anims:i:1\r\ndisable themes:i:1\r\n" +
+            "allow font smoothing:i:0\r\nallow desktop composition:i:0\r\n" +
+            "desktopwidth:i:1920\r\ndesktopheight:i:1080\r\ndesktopscalefactor:i:150\r\n" +
+            "smart sizing:i:0\r\ndynamic resolution:i:0\r\nscreen mode id:i:1\r\n";
+
+        Assert.Null(MstscSendsScale(fileMasterWrote));
+        Assert.Equal(150, MstscSendsScale(fileMasterWrote + "devicescalefactor:i:100\r\n"));
+        Assert.Null(MstscSendsScale(fileMasterWrote + "devicescalefactor:i:120\r\n"));   // rule 3
+    }
+
+    [Fact]
+    public void EveryAllowedScale_IsActuallySentByMstsc()
+    {
+        foreach (var scale in RdpGeometry.AllowedScales)
+        {
+            var rdp = RdpFileBuilder.Build(AudioMode.PerSession, RdpGeometry.ForSeat(1920, 1080, scale, null));
+            Assert.Equal(scale, MstscSendsScale(rdp));
+        }
+    }
+
+    [Theory]
+    [InlineData(AudioMode.SharedHost)]
+    [InlineData(AudioMode.PerSession)]
+    public void TheDeviceScaleIsTheNeutralOne(AudioMode mode)
+    {
+        var rdp = RdpFileBuilder.Build(mode, RdpGeometry.ForClient(1920, 1080));
+
+        Assert.Equal(100, RdpFileBuilder.DeviceScaleFactor);
+        Assert.Contains("devicescalefactor:i:100\r\n", rdp);
+    }
+
+    // Without a geometry mstsc is meant to pick its own size AND scale, as it always has.
+    [Fact]
+    public void NoGeometry_LeavesTheScaleToMstsc()
+    {
+        var rdp = RdpFileBuilder.Build(AudioMode.PerSession, geometry: null);
+
+        Assert.DoesNotContain("scalefactor", rdp);
+        Assert.Null(MstscSendsScale(rdp));
+    }
+
     [Fact]
     public void TheErrorNamesTheValuesThatWouldWork()
     {
