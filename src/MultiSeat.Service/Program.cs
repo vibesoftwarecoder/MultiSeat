@@ -342,6 +342,19 @@ builder.Services.AddSingleton<SeatManager>();
 // ── Background workers ──────────────────────────────────────────────
 builder.Services.AddHostedService<MultiSeatWorker>();
 
+// ── Update notifications (off by default) ────────────────────────────
+// Its own hosted service, so nothing on the seat path can wait on it. One long-lived HttpClient
+// built from the client's own handler: no cookies, no automatic redirects, default proxy, normal
+// certificate validation. With UpdateCheckEnabled false (the default) the service makes no call.
+builder.Services.AddSingleton(sp => new MultiSeat.Service.Updates.UpdateStateStore(
+    MultiSeat.Shared.Constants.DefaultUpdateStatePath,
+    warn: m => sp.GetRequiredService<ILoggerFactory>().CreateLogger("MultiSeat.Service.Updates").LogWarning("{Message}", m)));
+builder.Services.AddSingleton<MultiSeat.Service.Updates.UpdateStatusProvider>();
+builder.Services.AddSingleton(_ => new MultiSeat.Service.Updates.GitHubReleaseClient(
+    new HttpClient(MultiSeat.Service.Updates.GitHubReleaseClient.CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) }));
+builder.Services.AddSingleton<MultiSeat.Service.Updates.UpdateCheckService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<MultiSeat.Service.Updates.UpdateCheckService>());
+
 // ── Embedded API server ──────────────────────────────────────────────
 ApiServer.ConfigureServices(builder.Services, builder.Configuration);
 
