@@ -118,16 +118,32 @@ public static class UpdateEndpoints
     /// replaced file's ACL and attributes into the replacement. A target that does not exist yet
     /// is created by a plain move. On any failure the staging file is deleted and the target is
     /// left as it was.
+    ///
+    /// The swap can fail briefly while another process has the target open without sharing delete
+    /// (the configuration reload, an antivirus or backup scan). It is retried a few times with a
+    /// growing pause before the failure is reported, so the switch does not fail at random.
     /// </summary>
-    internal static void WriteReplacingKeepingAcl(string path, string contents)
+    internal static async Task WriteReplacingKeepingAclAsync(string path, string contents)
     {
         var full = Path.GetFullPath(path);
         var tmp = Path.Combine(Path.GetDirectoryName(full)!, Path.GetFileName(full) + "." + Guid.NewGuid().ToString("N") + ".tmp");
-        File.WriteAllText(tmp, contents, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        await File.WriteAllTextAsync(tmp, contents, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         try
         {
-            if (File.Exists(full)) File.Replace(tmp, full, null);
-            else File.Move(tmp, full);
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    if (File.Exists(full)) File.Replace(tmp, full, null);
+                    else File.Move(tmp, full);
+                    return;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt <= SwapRetries)
+                {
+                    OnSwapRetry.Value?.Invoke(attempt);
+                    await Task.Delay(TimeSpan.FromMilliseconds(20 * Math.Pow(2, attempt - 1)));
+                }
+            }
         }
         catch
         {
@@ -135,6 +151,11 @@ public static class UpdateEndpoints
             throw;
         }
     }
+
+    private const int SwapRetries = 6;
+
+    /// <summary>Test seam: called with the attempt number each time the swap failed and is about to be retried.</summary>
+    internal static readonly AsyncLocal<Action<int>?> OnSwapRetry = new();
 
     /// <summary>
     /// Write <c>MultiSeat:UpdateCheckEnabled</c> into <paramref name="settingsPath"/>, creating it
@@ -162,7 +183,7 @@ public static class UpdateEndpoints
 
             var dir = Path.GetDirectoryName(Path.GetFullPath(settingsPath));
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            WriteReplacingKeepingAcl(settingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            await WriteReplacingKeepingAclAsync(settingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

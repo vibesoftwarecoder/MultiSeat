@@ -61,7 +61,7 @@ public class UpdateCheckServiceTests
         await rig.RunAsync(TimeSpan.FromHours(1));
         Assert.Equal(0, rig.Handler.Count);
 
-        rig.Options.Set(new MultiSeatOptions { UpdateCheckEnabled = true, ApolloExePath = rig.ApolloExe });
+        await rig.SetOptionsAsync(new MultiSeatOptions { UpdateCheckEnabled = true, ApolloExePath = rig.ApolloExe });
         await rig.RunAsync(TimeSpan.FromMinutes(1));
 
         Assert.Equal(3, rig.Handler.Count);
@@ -77,7 +77,7 @@ public class UpdateCheckServiceTests
         var after = rig.Handler.Count;
         Assert.Equal(3, after);
 
-        rig.Options.Set(new MultiSeatOptions { UpdateCheckEnabled = false });
+        await rig.SetOptionsAsync(new MultiSeatOptions { UpdateCheckEnabled = false });
         await rig.RunAsync(TimeSpan.FromHours(48));
 
         Assert.Equal(after, rig.Handler.Count);
@@ -243,7 +243,7 @@ public class UpdateCheckServiceTests
         };
 
         var running = rig.Service.RequestCheckAsync(CancellationToken.None);
-        while (rig.Handler.InFlight == 0) await Task.Delay(2);
+        await ServiceRig.WaitUntilAsync(() => rig.Handler.InFlight > 0, "the first request never reached the handler");
 
         // A second request while one is running does not start another.
         var second = await rig.Service.RequestCheckAsync(CancellationToken.None);
@@ -306,9 +306,9 @@ public class UpdateCheckServiceTests
         rig.Handler.Respond = async (_, _, ct) => { await Task.Delay(Timeout.Infinite, ct); return new HttpResponseMessage(); };
 
         // Throws TimeoutException (a failure) if StartAsync does not return.
-        await rig.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
-        await rig.RunAsync(TimeSpan.FromMinutes(16)); // the first check is due at 15 minutes and hangs
-        Assert.True(rig.Handler.Count >= 1); // a request went out and hung; startup was never waiting on it
+        await rig.StartAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        await rig.RunUntilRequestInFlightAsync(TimeSpan.FromMinutes(16)); // due at 15 minutes; the handler proves it arrived and hangs
+        Assert.True(rig.Handler.Count >= 1); // startup was never waiting on it
     }
 
     [Theory(Timeout = 60_000)]
@@ -321,11 +321,10 @@ public class UpdateCheckServiceTests
         if (where == "mid-request")
             rig.Handler.Respond = async (_, _, ct) => { await Task.Delay(Timeout.Infinite, ct); return new HttpResponseMessage(); };
         await rig.StartAsync();
-        if (where == "mid-request") await rig.RunAsync(TimeSpan.FromMinutes(16));
-        else await rig.SettleAsync();
+        if (where == "mid-request") await rig.RunUntilRequestInFlightAsync(TimeSpan.FromMinutes(16));
 
         // Throws TimeoutException (a failure) if StopAsync does not return.
-        await rig.Service.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        await rig.Service.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(30));
         Assert.True(ServiceStopped(rig.Service));
     }
 

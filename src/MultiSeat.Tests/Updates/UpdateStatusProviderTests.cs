@@ -314,12 +314,23 @@ public class UpdateStatusProviderTests : IDisposable
     {
         var (p, _) = Make();
         var stop = false;
+        var reads = 0;
         var failures = new System.Collections.Concurrent.ConcurrentBag<string>();
+        var deadline = Environment.TickCount64 + 60_000;
 
+        // The overlap is proved, not hoped for: the writer waits until the readers have read, and
+        // keeps publishing until they have read 2000 snapshots (60 s limit, then a clear failure).
         var writer = Task.Run(() =>
         {
-            for (var i = 0; i < 3000 && failures.IsEmpty; i++)
+            while (Volatile.Read(ref reads) < 1)
             {
+                if (Environment.TickCount64 > deadline) { failures.Add("the reader threads never ran"); stop = true; return; }
+                Thread.Yield();
+            }
+            var floor = Volatile.Read(ref reads) + 2000;
+            for (var i = 0; (i < 3000 || Volatile.Read(ref reads) < floor) && failures.IsEmpty; i++)
+            {
+                if (Environment.TickCount64 > deadline) { failures.Add($"no overlap: only {reads} reads during {i} publishes"); break; }
                 Seed(p, UpdateComponent.MultiSeat, i % 2 == 0 ? "v0.6.19" : "v0.6.20");
                 p.Publish(i % 3 == 0 ? UnknownApollo() : null, DateTimeOffset.UnixEpoch.AddSeconds(i), null);
             }
@@ -332,6 +343,7 @@ public class UpdateStatusProviderTests : IDisposable
                 try
                 {
                     var s = p.GetSnapshot();
+                    Interlocked.Increment(ref reads);
                     if (s.Components.Count != 3) failures.Add("count " + s.Components.Count);
                     if (s.Components.Any(c => c.Latest is { } l && l.Tag.Length == 0)) failures.Add("torn latest");
                 }

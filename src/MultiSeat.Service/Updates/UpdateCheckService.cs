@@ -59,6 +59,7 @@ public sealed class UpdateCheckService : BackgroundService
     private DateTimeOffset? _nextCheckAt;
     private DateTimeOffset? _lastCheckStartedAt;
     private int _lastIntervalHours = -1;
+    private long _blocked;
     private bool _wasEnabled;
 
     public UpdateCheckService(
@@ -78,6 +79,13 @@ public sealed class UpdateCheckService : BackgroundService
         _startedAt = _time.GetUtcNow();
         _options.OnChange(_ => Signal());
     }
+
+    /// <summary>
+    /// How many times the loop has reached a point where it waits for the clock or for a change.
+    /// Tests use it to know, without sleeping, that the loop has finished reacting and is parked
+    /// again; it has no other use.
+    /// </summary>
+    internal long BlockedCount => Interlocked.Read(ref _blocked);
 
     private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -123,6 +131,7 @@ public sealed class UpdateCheckService : BackgroundService
                 try
                 {
                     _provider.Publish(null, _nextCheckAt, "internal error (" + ex.GetType().Name + ")");
+                    Interlocked.Increment(ref _blocked);
                     await Task.Delay(BackoffFor(failures, IntervalNow()), _time, stoppingToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
@@ -151,6 +160,7 @@ public sealed class UpdateCheckService : BackgroundService
             _lastIntervalHours = 0;
             _nextCheckAt = null;
             _provider.SetNextCheck(null);
+            Interlocked.Increment(ref _blocked);
             await change.WaitAsync(ct).ConfigureAwait(false);
             return;
         }
@@ -182,6 +192,7 @@ public sealed class UpdateCheckService : BackgroundService
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var delay = Task.Delay(wait, _time, linked.Token);
+            Interlocked.Increment(ref _blocked);
             var first = await Task.WhenAny(delay, change).ConfigureAwait(false);
             linked.Cancel();
             try { await delay.ConfigureAwait(false); } catch (OperationCanceledException) { }

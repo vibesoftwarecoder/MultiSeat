@@ -357,21 +357,41 @@ public class UpdateEndpointsTests
             File.WriteAllText(local, """{"MultiSeat":{"ApiKey":"k","UpdateCheckEnabled":false}}""");
             var stop = false;
             var bad = 0;
+            var goodReads = 0;
             var reader = Task.Run(() =>
             {
                 while (!Volatile.Read(ref stop))
                 {
-                    try { using var _ = JsonDocument.Parse(File.ReadAllText(local)); }
+                    try { using var _ = JsonDocument.Parse(File.ReadAllText(local)); Interlocked.Increment(ref goodReads); }
                     catch (IOException) { /* the swap moment; a torn file is the JsonException below */ }
                     catch (JsonException) { Interlocked.Increment(ref bad); }
                 }
             });
 
-            for (var i = 0; i < 150; i++) await Post(i % 2 == 0 ? """{"enabled":true}""" : """{"enabled":false}""", local);
+            // The overlap is proved, not hoped for: nothing is written until the reader has read,
+            // and writing goes on until the reader has seen the file 200 more times (60 s limit).
+            var started = Environment.TickCount64;
+            while (Volatile.Read(ref goodReads) < 1)
+            {
+                if (Environment.TickCount64 - started > 60_000) { stop = true; Assert.Fail("the reader thread never ran"); }
+                await Task.Delay(1);
+            }
+            var floor = Volatile.Read(ref goodReads) + 200;
+            var writes = 0;
+            while (writes < 150 || Volatile.Read(ref goodReads) < floor)
+            {
+                if (Environment.TickCount64 - started > 60_000)
+                {
+                    stop = true;
+                    Assert.Fail($"no overlap: the reader saw the file {goodReads} times in 60 s while {writes} writes ran");
+                }
+                await Post(writes++ % 2 == 0 ? """{"enabled":true}""" : """{"enabled":false}""", local);
+            }
             stop = true;
             await reader;
 
             Assert.Equal(0, bad);
+            Assert.True(goodReads >= floor);
             Assert.Single(Directory.GetFiles(dir)); // no stray temp files
         }
         finally { Directory.Delete(dir, true); }
@@ -471,6 +491,61 @@ public class UpdateEndpointsTests
     }
 
     [Fact]
+    public async Task Persist_RetriesWhileAnotherProcessHasTheFileOpen_ThenSucceeds()
+    {
+        // A configuration reload (or a scanner) can hold the file open without sharing delete,
+        // which fails the swap for a moment. The hook releases the file on the first retry, so
+        // the test proves a retry happened rather than hoping for a timing.
+        var dir = TempDir();
+        try
+        {
+            var local = Path.Combine(dir, "appsettings.local.json");
+            File.WriteAllText(local, """{"MultiSeat":{"ApiKey":"k","UpdateCheckEnabled":false}}""");
+            var holder = new FileStream(local, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var retries = new List<int>();
+            UpdateEndpoints.OnSwapRetry.Value = attempt => { retries.Add(attempt); holder.Dispose(); };
+            try
+            {
+                var result = await Post("""{"enabled":true}""", local);
+
+                Assert.Equal(200, ((Microsoft.AspNetCore.Http.IStatusCodeHttpResult)result).StatusCode);
+                Assert.Equal([1], retries);
+                Assert.Contains("true", File.ReadAllText(local));
+                Assert.Equal([local], Directory.GetFiles(dir));
+            }
+            finally { UpdateEndpoints.OnSwapRetry.Value = null; holder.Dispose(); }
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task Persist_GivesUpAfterTheRetries_Returns500_ChangesNothing_AndLeavesNoTempFile()
+    {
+        var dir = TempDir();
+        try
+        {
+            var local = Path.Combine(dir, "appsettings.local.json");
+            const string original = """{"MultiSeat":{"ApiKey":"k","UpdateCheckEnabled":false}}""";
+            File.WriteAllText(local, original);
+            using var holder = new FileStream(local, FileMode.Open, FileAccess.Read, FileShare.Read); // never released
+            var attempts = 0;
+            UpdateEndpoints.OnSwapRetry.Value = _ => attempts++;
+            try
+            {
+                var result = await Post("""{"enabled":true}""", local);
+
+                Assert.Equal(500, ((Microsoft.AspNetCore.Http.IStatusCodeHttpResult)result).StatusCode);
+                Assert.Equal(6, attempts);
+            }
+            finally { UpdateEndpoints.OnSwapRetry.Value = null; }
+            holder.Dispose();
+            Assert.Equal(original, File.ReadAllText(local));
+            Assert.Equal([local], Directory.GetFiles(dir));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public async Task Persist_LeavesAFileWithCommentsUntouched_AndReportsIt()
     {
         var dir = TempDir();
@@ -510,9 +585,15 @@ public class UpdateEndpointsTests
             var changed = new TaskCompletionSource();
             using var _ = monitor.OnChange((o, _) => { if (o.UpdateCheckEnabled) changed.TrySetResult(); });
 
-            await Post("""{"enabled":true}""", local);
+            var posted = await Post("""{"enabled":true}""", local);
+            Assert.Equal(200, ((Microsoft.AspNetCore.Http.IStatusCodeHttpResult)posted).StatusCode);
 
-            await changed.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            try { await changed.Task.WaitAsync(TimeSpan.FromSeconds(Environment.GetEnvironmentVariable("MS_RELOAD_WAIT") is { } w ? int.Parse(w) : 60)); }
+            catch (TimeoutException)
+            {
+                throw new Xunit.Sdk.XunitException(
+                    $"the running configuration never saw the change. monitor: enabled={monitor.CurrentValue.UpdateCheckEnabled}, apiKey='{monitor.CurrentValue.ApiKey}'; file: {File.ReadAllText(local).ReplaceLineEndings(" ")}");
+            }
             Assert.True(monitor.CurrentValue.UpdateCheckEnabled);
             Assert.Equal("k", monitor.CurrentValue.ApiKey);
         }

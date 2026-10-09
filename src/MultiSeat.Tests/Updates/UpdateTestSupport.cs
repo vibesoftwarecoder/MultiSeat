@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using MultiSeat.Service.Configuration;
 using MultiSeat.Service.Updates;
+using Xunit;
 
 namespace MultiSeat.Tests.Updates;
 
@@ -210,44 +211,75 @@ internal sealed class ServiceRig : IDisposable
             NullLogger<UpdateCheckService>.Instance, Time, random ?? (() => 0.5));
     }
 
-    public Task StartAsync() => Service.StartAsync(CancellationToken.None);
+    /// <summary>Start the service and wait until its loop is parked on the clock or on a change. No sleeping: it is the loop itself that says so.</summary>
+    public async Task StartAsync()
+    {
+        await Service.StartAsync(CancellationToken.None);
+        await WaitBlockedAsync(0);
+    }
 
     /// <summary>
-    /// Wait until the service has nothing left to do at the current time: no request in flight and
-    /// nothing changing for a few polls. Real time is spent only on these short polls.
+    /// Wait until the loop has parked again after <paramref name="above"/> earlier parks, with no
+    /// request in flight. This is how a test knows the service has finished reacting to the last
+    /// clock step or option change; nothing here guesses with a quiet period. Fails with a clear
+    /// message instead of hanging.
     /// </summary>
-    public async Task SettleAsync()
+    public Task WaitBlockedAsync(long above) =>
+        WaitUntilAsync(() => Service.BlockedCount > above && Handler.InFlight == 0,
+            $"the service never parked again after {above} parks (blocked={Service.BlockedCount}, in flight={Handler.InFlight})");
+
+    /// <summary>Poll a condition with short yields until it holds, or fail after 30 s of real time with <paramref name="failure"/>.</summary>
+    public static async Task WaitUntilAsync(Func<bool> condition, string failure)
     {
-        var stable = 0;
-        long last = -1;
-        var deadline = Environment.TickCount64 + 10_000;
-        while (stable < 4)
+        var deadline = Environment.TickCount64 + 30_000;
+        while (!condition())
         {
-            await Task.Delay(3);
-            var v = Time.Version * 1000 + Handler.Count + Handler.InFlight * 100_000;
-            stable = v == last ? stable + 1 : 0;
-            last = v;
-            if (Environment.TickCount64 > deadline) throw new TimeoutException("service never settled");
+            if (Environment.TickCount64 > deadline) throw new TimeoutException(failure);
+            await Task.Delay(1);
         }
     }
 
-    /// <summary>Run simulated time forward, letting the service act at every timer on the way.</summary>
+    /// <summary>Replace the options and wait until the loop has reacted and parked again.</summary>
+    public async Task SetOptionsAsync(MultiSeatOptions options)
+    {
+        var before = Service.BlockedCount;
+        Options.Set(options);
+        await WaitBlockedAsync(before);
+    }
+
+    /// <summary>Run simulated time forward one timer at a time, waiting after each until the service has parked again.</summary>
     public async Task RunAsync(TimeSpan by)
     {
         var target = Time.GetUtcNow() + by;
-        await SettleAsync();
         while (Time.NextDue is { } due && due <= target)
         {
+            var before = Service.BlockedCount;
             Time.Advance(due - Time.GetUtcNow());
-            await SettleAsync();
+            await WaitBlockedAsync(before);
         }
         Time.Advance(target - Time.GetUtcNow());
-        await SettleAsync();
+    }
+
+    /// <summary>
+    /// Like <see cref="RunAsync"/> for a handler that never answers: steps the clock until a
+    /// request is in flight (proved by the handler, not assumed), and fails if none ever starts.
+    /// </summary>
+    public async Task RunUntilRequestInFlightAsync(TimeSpan by)
+    {
+        var target = Time.GetUtcNow() + by;
+        while (Handler.InFlight == 0 && Time.NextDue is { } due && due <= target)
+        {
+            var before = Service.BlockedCount;
+            Time.Advance(due - Time.GetUtcNow());
+            await WaitUntilAsync(() => Service.BlockedCount > before || Handler.InFlight > 0,
+                "neither a park nor a request followed a clock step");
+        }
+        Assert.True(Handler.InFlight > 0, "no request went out within the simulated time");
     }
 
     public void Dispose()
     {
-        try { Service.StopAsync(CancellationToken.None).Wait(TimeSpan.FromSeconds(5)); } catch { }
+        try { Service.StopAsync(CancellationToken.None).Wait(TimeSpan.FromSeconds(30)); } catch { }
         try { Directory.Delete(Dir, true); } catch { }
     }
 }
