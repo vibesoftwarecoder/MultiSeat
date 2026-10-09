@@ -21,11 +21,14 @@ function state(over: Partial<UpdatesState> = {}): UpdatesState {
 let calls: string[];
 let checkReply: (r: Response | Error) => void;
 let serverEnabled = true;
+let inits: Record<string, RequestInit | undefined>;
 let scrollSpy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.useFakeTimers();
   calls = [];
+  inits = {};
+  localStorage.clear();
   serverEnabled = true;
   scrollSpy = vi.fn();
   Element.prototype.scrollIntoView = scrollSpy as unknown as typeof Element.prototype.scrollIntoView;
@@ -34,9 +37,11 @@ beforeEach(() => {
     vi.fn((url: string, init?: RequestInit) => {
       const key = `${init?.method ?? "GET"} ${url}`;
       calls.push(key);
+      inits[key] = init;
       if (key === "POST /api/system/updates/check") {
         // The service runs the check inside this request; the test decides when it answers.
         return new Promise<Response>((resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
           checkReply = (r) => (r instanceof Error ? reject(r) : resolve(r));
         });
       }
@@ -146,6 +151,51 @@ describe("Check now while the service works", () => {
     await act(async () => { checkReply(new Response(JSON.stringify(state()), { status: 202 })); });
     await advance(120_000);
     expect(errors).not.toHaveBeenCalled();
+  });
+});
+
+describe("Check now gives up after 45 seconds", () => {
+  const CHECK = "POST /api/system/updates/check";
+
+  it("does not abort before 45 s, and aborts at 45 s", async () => {
+    await startCheck();
+    await advance(44_999);
+    expect(inits[CHECK]!.signal!.aborted).toBe(false);
+    expect(checkBtn().textContent).toBe("Checking…");
+    await advance(1);
+    expect(inits[CHECK]!.signal!.aborted).toBe(true);
+  });
+
+  it("shows a plain message, re-enables the button and starts no cooldown", async () => {
+    await startCheck();
+    await advance(45_000);
+    expect(screen.getByText("The check took too long. Try again in a minute.")).toBeTruthy();
+    expect(checkBtn().textContent).toBe("Check now");
+    expect(checkBtn().disabled).toBe(false);
+    expect(screen.queryByText(/You can check again in a minute/)).toBeNull();
+    await act(async () => { checkBtn().click(); });
+    expect(posts()).toBe(2);
+  });
+
+  it("an abort after unmount is silent", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { unmount } = mountCard();
+    await flush();
+    await act(async () => { checkBtn().click(); });
+    unmount();
+    await advance(60_000);
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  it("still sends the API key header", async () => {
+    localStorage.setItem("multiseat-api-key", "k123");
+    await startCheck();
+    expect((inits[CHECK]!.headers as Record<string, string>)["X-MultiSeat-Key"]).toBe("k123");
+  });
+
+  it("puts no timeout on other calls", async () => {
+    await startCheck();
+    expect(inits["GET /api/system/updates"]!.signal).toBeUndefined();
   });
 });
 

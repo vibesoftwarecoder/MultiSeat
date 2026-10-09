@@ -22,9 +22,19 @@ import type {
 
 const BASE = "/api";
 
+/** Status carried by the ApiError thrown when a request with a timeout ran out of time. */
+export const REQUEST_TIMED_OUT = 0;
+
+/**
+ * The service runs a manual update check inside its request (about 30 s at most), so that one
+ * call gets a client-side limit. Other calls pass no timeout and behave exactly as before.
+ */
+export const CHECK_TIMEOUT_MS = 45_000;
+
 async function request<T>(
   path: string,
-  init?: RequestInit
+  init?: RequestInit,
+  timeoutMs?: number
 ): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -36,18 +46,31 @@ async function request<T>(
     headers["X-MultiSeat-Key"] = apiKey;
   }
 
-  const res = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers: { ...headers, ...init?.headers },
-  });
+  const controller = timeoutMs ? new AbortController() : undefined;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
 
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, body?.error ?? res.statusText);
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      ...init,
+      headers: { ...headers, ...init?.headers },
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new ApiError(res.status, body?.error ?? res.statusText);
+    }
+
+    if (res.status === 204) return undefined as T;
+    return await res.json();
+  } catch (e) {
+    if (controller?.signal.aborted && !(e instanceof ApiError)) {
+      throw new ApiError(REQUEST_TIMED_OUT, "The request timed out");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-
-  if (res.status === 204) return undefined as T;
-  return res.json();
 }
 
 export class ApiError extends Error {
@@ -188,7 +211,7 @@ export const system = {
   getUpdates: () => request<UpdatesState>("/system/updates"),
   // 202 with the new state; 409 when update checks are off; 429 inside the 60 s cooldown.
   checkUpdates: () =>
-    request<UpdatesState>("/system/updates/check", { method: "POST" }),
+    request<UpdatesState>("/system/updates/check", { method: "POST" }, CHECK_TIMEOUT_MS),
   setUpdatesEnabled: (enabled: boolean) =>
     request<UpdatesState>("/system/updates/settings", {
       method: "POST",

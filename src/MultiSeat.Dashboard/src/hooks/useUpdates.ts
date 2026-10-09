@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, system } from "../api/client";
+import { ApiError, REQUEST_TIMED_OUT, system } from "../api/client";
 import type { UpdatesState } from "../api/types";
 import { loadDismissed, loadOffNoticeDismissed, saveDismissed, saveOffNoticeDismissed } from "../components/updateUtils";
 
@@ -10,7 +10,7 @@ const FOCUS_MIN_GAP_MS = 10_000;
 
 export type ActionResult =
   | { ok: true }
-  | { ok: false; kind: "off" | "cooldown" | "error"; message: string };
+  | { ok: false; kind: "off" | "cooldown" | "timeout" | "error"; message: string };
 
 function looksLikeState(value: unknown): value is UpdatesState {
   return (
@@ -24,6 +24,13 @@ function toResult(e: unknown): ActionResult {
   if (e instanceof ApiError) {
     if (e.status === 409) {
       return { ok: false, kind: "off", message: "Update checks are off. Turn them on first." };
+    }
+    if (e.status === REQUEST_TIMED_OUT) {
+      return {
+        ok: false,
+        kind: "timeout",
+        message: "The check took too long. Try again in a minute.",
+      };
     }
     if (e.status === 429) {
       return {
