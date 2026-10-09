@@ -33,6 +33,20 @@ public class PublicEndpointTests
         Assert.False(ApiServer.IsAlwaysPublic(new PathString("/api/system/auth"), method));
     }
 
+    // The update routes report installed versions and one of them can trigger a connection to the
+    // internet, so all of them need the key (and the settings one writes a config file).
+    [Theory]
+    [InlineData("/api/system/updates", "GET")]
+    [InlineData("/api/system/updates", "POST")]
+    [InlineData("/api/system/updates/check", "POST")]
+    [InlineData("/api/system/updates/check", "GET")]
+    [InlineData("/api/system/updates/settings", "POST")]
+    [InlineData("/api/system/updates/settings", "GET")]
+    public void TheUpdateRoutes_AreNotPublic(string path, string method)
+    {
+        Assert.False(ApiServer.IsAlwaysPublic(new PathString(path), method));
+    }
+
     [Theory]
     [InlineData("/api/seats", "GET")]
     [InlineData("/api/accounts", "GET")]

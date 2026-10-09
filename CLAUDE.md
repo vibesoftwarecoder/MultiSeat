@@ -25,6 +25,11 @@ MultiSeat runs multiple simultaneous Moonlight game-streaming sessions on one Wi
 | `InputHookManager` | Keyboard/mouse session isolation (InputHook DLL) |
 | `AccountManager` | Windows local account CRUD |
 | `ApiServer` | ASP.NET Core HTTP API + WebSocket |
+| `UpdateCheckService` | Background check for newer MultiSeat / ApolloVibe / MoonlightVibe releases. Its own hosted service, off by default |
+| `UpdateStatusProvider` | In-memory result of the last check; computes `status` and `announce` for `GET /api/system/updates`. Never calls GitHub |
+| `GitHubReleaseClient` | The only code that would talk to the internet: unauthenticated GET of three release lists, every failure returned not thrown |
+| `UpdateStateStore` | `C:\ProgramData\MultiSeat\update-check.json` cache (ETags, candidates, baseline, backoff, hash cache) |
+| `UpdateEndpoints` | `GET /api/system/updates`, `POST .../updates/check`, `POST .../updates/settings` |
 
 ## Port Layout
 
@@ -130,6 +135,35 @@ The parts most likely to surprise you:
 - **`AllowAnonymous()` grants nothing** in this API — there is no `UseAuthorization()` in the
   pipeline. `ApiServer.IsAlwaysPublic` is the entire rule, and it exempts only **GET**
   `/api/system/auth`; POST on that path disables authentication and stays gated.
+
+## Update notifications (off by default)
+
+`MultiSeat:UpdateCheckEnabled` is `false` out of the box, and then the service makes **no** connection to the
+internet: `UpdateCheckService` logs one line and idles on an options-change token (it reads `IOptionsMonitor`,
+so editing `appsettings.local.json` takes effect without a restart). When on, it asks `api.github.com` for the
+release lists of the three repos (names and host are constants in `Constants.cs`, deliberately not settings)
+about every `UpdateCheckIntervalHours` (default 12, clamped 1..168, +/-10% jitter). The first check comes
+10 min + 0..10 min after start (sooner only if the option is switched on later, and later if the cache is fresh).
+Failures back off 15 min, 1 h, 4 h, then the normal interval, and a rate-limit reply holds until its reset time.
+One check runs at a time; the loop catches everything except cancellation (an exception out of `ExecuteAsync`
+would stop the host). All time goes through `TimeProvider` and randomness through one function, so tests drive a
+simulated day in milliseconds.
+
+- **It only reads.** Nothing downloads, installs or runs. `html_url` and release notes are never forwarded to the
+  dashboard: `releaseUrl` is built from the repo constant and the parsed tag (`UpdateRepos.ReleaseUrl`).
+- **Installed versions:** MultiSeat from its running assembly; ApolloVibe by hashing `sunshine.exe` against the
+  hash in release notes (its PE version says `2026.6.1` for ms3 to ms6, so it cannot be used); MoonlightVibe
+  cannot be detected from the host, so it is `latestOnly`. Unknown never raises an alarm.
+- **`announce`** (what the banner uses): known installed version means `updateAvailable`; unknown means only a
+  release newer than the **baseline** recorded at the first successful check. A failed check keeps the
+  last good result (and shows the error beside it); with no good result there is nothing to announce.
+- **The three routes** sit under `/api/system`, need the API key when auth is on, and are **not** in
+  `IsAlwaysPublic`. `POST .../updates/settings` writes `UpdateCheckEnabled` into `appsettings.local.json` (the
+  file that wins, the #61 lesson), atomically, and accepts exactly `{ "enabled": bool }`.
+- Tests: `Tests/Updates/` (the service on a manual clock with a counting fake handler; endpoints over loopback
+  HTTP through the real `ApiServer.UseApiKeyAuth` and `ConfigureApiJson`). `ApiServer.Build` itself needs the
+  whole host, so the tests map `UpdateEndpoints` into a small host of their own.
+- Policy text: `docs/security-posture.md`, "Outbound connections". Manual update steps: README, "Updating".
 
 ## Install / Deploy
 

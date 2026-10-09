@@ -42,6 +42,10 @@ public static class ApiServer
         // The SAME instance the seat manager reads, so a change made through the API is what the
         // next provision sees. A second instance here would change nothing but this container.
         builder.Services.AddSingleton(hostServices.GetRequiredService<Configuration.DwmFrameIntervalSetting>());
+        // Update notices: the provider holds the last result (the API only reads it) and the
+        // service runs the manual "check now". Same instances the host runs, not copies.
+        builder.Services.AddSingleton(hostServices.GetRequiredService<Updates.UpdateStatusProvider>());
+        builder.Services.AddSingleton(hostServices.GetRequiredService<Updates.UpdateCheckService>());
 
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
@@ -51,11 +55,7 @@ public static class ApiServer
                 kestrel.ListenAnyIP(options.ApiPort);
         });
 
-        builder.Services.ConfigureHttpJsonOptions(opts =>
-        {
-            opts.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
-            opts.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-        });
+        builder.Services.ConfigureHttpJsonOptions(opts => ConfigureApiJson(opts.SerializerOptions));
 
         // Register CORS services (required before UseCors)
         builder.Services.AddCors();
@@ -103,37 +103,7 @@ public static class ApiServer
         // broadcasts whole SeatInfo objects — account names, session ids, ports, Apollo PIDs,
         // audio device ids — so with authentication switched on, anyone who could reach the
         // port could still stream all of it by opening a socket instead of calling the API.
-        app.Use(async (context, next) =>
-        {
-            var isProtected = context.Request.Path.StartsWithSegments("/api")
-                              || context.Request.Path.StartsWithSegments("/ws");
-
-            if (!authState.IsEnabled ||
-                !isProtected ||
-                IsAlwaysPublic(context.Request.Path, context.Request.Method))
-            {
-                await next();
-                return;
-            }
-
-            // Browsers cannot set headers on a WebSocket handshake, so the key may also arrive
-            // as ?key=. That does put a secret in a URL; it is accepted because the alternative
-            // for a browser client is a post-upgrade handshake, and because this API is
-            // loopback/LAN with no request logging of query strings. Header is preferred and
-            // checked first — non-browser clients should use it.
-            var presented = context.Request.Headers.TryGetValue(Constants.ApiKeyHeader, out var header)
-                ? header.ToString()
-                : context.Request.Query["key"].ToString();
-
-            if (string.IsNullOrEmpty(presented) || presented != authState.ApiKey)
-            {
-                context.Response.StatusCode = 401;
-                await context.Response.WriteAsJsonAsync(new { error = "Unauthorized" });
-                return;
-            }
-
-            await next();
-        });
+        UseApiKeyAuth(app, authState);
 
         // State the network posture rather than leaving it to be discovered. The API is plaintext
         // HTTP; bound beyond loopback that means the key (and everything it protects) crosses the
@@ -196,6 +166,7 @@ public static class ApiServer
         SeatEndpoints.Map(app);
         AccountEndpoints.Map(app);
         SystemEndpoints.Map(app);
+        UpdateEndpoints.Map(app);
         HostEndpoints.Map(app);
         InputEndpoints.Map(app);
         WebSocketHub.Map(app);
@@ -207,6 +178,52 @@ public static class ApiServer
         }
 
         return app;
+    }
+
+    /// <summary>The JSON options every API response is written with: camelCase, enums as strings.</summary>
+    internal static void ConfigureApiJson(JsonSerializerOptions options)
+    {
+        options.Converters.Add(new JsonStringEnumConverter());
+        options.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+    }
+
+    /// <summary>
+    /// The API key middleware, split out of <see cref="Build"/> unchanged so tests run the real
+    /// rule against the real routes.
+    /// </summary>
+    internal static void UseApiKeyAuth(WebApplication app, ApiAuthState authState)
+    {
+        app.Use(async (context, next) =>
+        {
+            var isProtected = context.Request.Path.StartsWithSegments("/api")
+                              || context.Request.Path.StartsWithSegments("/ws");
+
+            if (!authState.IsEnabled ||
+                !isProtected ||
+                IsAlwaysPublic(context.Request.Path, context.Request.Method))
+            {
+                await next();
+                return;
+            }
+
+            // Browsers cannot set headers on a WebSocket handshake, so the key may also arrive
+            // as ?key=. That does put a secret in a URL; it is accepted because the alternative
+            // for a browser client is a post-upgrade handshake, and because this API is
+            // loopback/LAN with no request logging of query strings. Header is preferred and
+            // checked first — non-browser clients should use it.
+            var presented = context.Request.Headers.TryGetValue(Constants.ApiKeyHeader, out var header)
+                ? header.ToString()
+                : context.Request.Query["key"].ToString();
+
+            if (string.IsNullOrEmpty(presented) || presented != authState.ApiKey)
+            {
+                context.Response.StatusCode = 401;
+                await context.Response.WriteAsJsonAsync(new { error = "Unauthorized" });
+                return;
+            }
+
+            await next();
+        });
     }
 
     /// <summary>
