@@ -21,6 +21,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Real release notes and a real releases response for the update-check tests. -->
+    <Content Include="Updates\Fixtures\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- The shipped default config, so LoggingFilterTests can assert against the real file
          rather than a copy of it that could drift. -->
     <Content Include="..\MultiSeat.Service\appsettings.json"
