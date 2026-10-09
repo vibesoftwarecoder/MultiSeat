@@ -377,6 +377,33 @@ public class UpdateEndpointsTests
         finally { Directory.Delete(dir, true); }
     }
 
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateHardLinkW(string newFile, string existingFile, IntPtr reserved);
+
+    [Fact]
+    public async Task Persist_ReplacesTheFile_RatherThanRewritingItInPlace()
+    {
+        // Atomic means a new file takes the name and the old one is left whole. A second name (hard
+        // link) for the old file proves which happened: an in-place rewrite would change what the
+        // link shows, a replace leaves it untouched.
+        var dir = TempDir();
+        try
+        {
+            var local = Path.Combine(dir, "appsettings.local.json");
+            var link = Path.Combine(dir, "old-view.json");
+            const string old = """{"MultiSeat":{"ApiKey":"k","UpdateCheckEnabled":false}}""";
+            File.WriteAllText(local, old);
+            Assert.True(CreateHardLinkW(link, local, IntPtr.Zero));
+
+            await Post("""{"enabled":true}""", local);
+
+            Assert.Equal(old, File.ReadAllText(link));
+            Assert.Contains("true", File.ReadAllText(local));
+            Assert.DoesNotContain("false", File.ReadAllText(local));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
     [Fact]
     public async Task Persist_LeavesAFileWithCommentsUntouched_AndReportsIt()
     {
