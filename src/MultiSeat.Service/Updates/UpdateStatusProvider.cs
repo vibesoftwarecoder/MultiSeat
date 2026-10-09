@@ -42,7 +42,13 @@ internal sealed record ProviderData(
 /// version announces only when an update is available; one without (ApolloVibe unidentified,
 /// MoonlightVibe always) announces only when the newest release is newer than the baseline
 /// recorded when checks first worked. Nothing announces on upToDate, ahead, notInstalled,
-/// unavailable, disabled, or any check error.
+/// unavailable or disabled.
+///
+/// A failed check does NOT switch an announcement off. The last good result stays (a failure
+/// never clears it), the status is recomputed from the CURRENT installed version, and the error
+/// is returned beside it. So an update that was announced stays announced through an outage and
+/// stops once it is installed; a component that never had a good result has no latest release
+/// and so never announces.
 /// </summary>
 public sealed class UpdateStatusProvider
 {
@@ -164,7 +170,7 @@ public sealed class UpdateStatusProvider
         else status = UpdateStatus.UnknownInstalled;
 
         bool announce;
-        if (data.Error is not null || latestVersion is null) announce = false;
+        if (latestVersion is null) announce = false;
         else if (status == UpdateStatus.UpdateAvailable) announce = true;
         else if (status is UpdateStatus.UnknownInstalled or UpdateStatus.LatestOnly)
         {

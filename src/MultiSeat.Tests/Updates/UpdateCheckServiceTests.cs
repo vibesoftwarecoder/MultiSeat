@@ -189,7 +189,7 @@ public class UpdateCheckServiceTests
     }
 
     [Fact(Timeout = 60_000)]
-    public async Task Offline_KeepsTheLastGoodResult_AndSaysSoWithoutRaisingAnAlert()
+    public async Task Offline_KeepsTheLastGoodResult_KeepsAnnouncingTheKnownUpdate_AndShowsTheError()
     {
         using var rig = new ServiceRig(enabled: true, random: () => 0.5);
         await rig.StartAsync();
@@ -203,7 +203,7 @@ public class UpdateCheckServiceTests
         var now = rig.Provider.GetSnapshot().Components.Single(c => c.Id == "multiseat");
         Assert.Equal("0.6.19", now.Latest!.Version);
         Assert.NotNull(now.Error);
-        Assert.False(now.Announce);
+        Assert.True(now.Announce); // installed 0.6.18 is still behind the last good 0.6.19
     }
 
     // ── Manual check ─────────────────────────────────────────────────
@@ -305,9 +305,8 @@ public class UpdateCheckServiceTests
         using var rig = new ServiceRig(enabled: true);
         rig.Handler.Respond = async (_, _, ct) => { await Task.Delay(Timeout.Infinite, ct); return new HttpResponseMessage(); };
 
-        var start = rig.StartAsync();
-
-        Assert.True(start.Wait(TimeSpan.FromSeconds(5)));
+        // Throws TimeoutException (a failure) if StartAsync does not return.
+        await rig.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
         await rig.RunAsync(TimeSpan.FromMinutes(16)); // the first check is due at 15 minutes and hangs
         Assert.True(rig.Handler.Count >= 1); // a request went out and hung; startup was never waiting on it
     }
@@ -325,9 +324,8 @@ public class UpdateCheckServiceTests
         if (where == "mid-request") await rig.RunAsync(TimeSpan.FromMinutes(16));
         else await rig.SettleAsync();
 
-        var stop = rig.Service.StopAsync(CancellationToken.None);
-
-        Assert.True(stop.Wait(TimeSpan.FromSeconds(5)), "StopAsync did not return");
+        // Throws TimeoutException (a failure) if StopAsync does not return.
+        await rig.Service.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
         Assert.True(ServiceStopped(rig.Service));
     }
 

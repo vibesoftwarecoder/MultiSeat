@@ -440,7 +440,7 @@ public class UpdateEndpointsTests
             Assert.Equal(before, Dacl(local));
             Assert.Contains("true", File.ReadAllText(local));
             Assert.Contains("\"ApiKey\": \"k\"", File.ReadAllText(local));
-            Assert.Equal(["appsettings.local.json", "probe.json"], Directory.GetFiles(dir).Select(Path.GetFileName).Order().ToArray());
+            Assert.Equal(["appsettings.local.json", "probe.json"], Directory.GetFiles(dir).Select(f => Path.GetFileName(f)!).Order().ToArray());
         }
         finally { Directory.Delete(dir, true); }
     }

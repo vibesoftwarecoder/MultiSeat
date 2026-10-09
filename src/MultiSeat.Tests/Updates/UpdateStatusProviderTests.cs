@@ -77,7 +77,7 @@ public class UpdateStatusProviderTests : IDisposable
     }
 
     [Fact]
-    public void ACheckError_NeverAnnounces_EvenWhenAnUpdateIsKnown()
+    public void ACheckErrorAfterAGoodResult_KeepsAnnouncingTheKnownUpdate_AndShowsTheError()
     {
         var (p, _) = Make();
         Seed(p, UpdateComponent.MultiSeat, "v0.6.19", error: "network error (ConnectionError)");
@@ -86,9 +86,62 @@ public class UpdateStatusProviderTests : IDisposable
         var c = Of(p, "multiseat");
 
         Assert.Equal(UpdateStatus.UpdateAvailable, c.Status);
-        Assert.False(c.Announce);
+        Assert.True(c.Announce);
+        Assert.Equal("0.6.19", c.Latest!.Version);
         Assert.Equal("network error (ConnectionError)", c.Error);
         Assert.Equal("network error (ConnectionError)", p.GetSnapshot().Error);
+    }
+
+    [Fact]
+    public void ACheckErrorWithNoGoodResultYet_NeverAnnounces()
+    {
+        var (p, _) = Make();
+        Seed(p, UpdateComponent.MultiSeat, null, error: "HTTP 500");
+        Seed(p, UpdateComponent.ApolloVibe, null, baseline: "2026.6.1-ms6", error: "HTTP 500");
+        p.Publish(UnknownApollo(), null, null);
+
+        var ms = Of(p, "multiseat");
+        var apollo = Of(p, "apollovibe");
+
+        Assert.Null(ms.Latest);
+        Assert.False(ms.Announce);
+        Assert.False(apollo.Announce);
+        Assert.Equal("HTTP 500", ms.Error);
+    }
+
+    [Fact]
+    public void OnceTheUpdateIsInstalled_TheAnnouncementStops_EvenWhileChecksKeepFailing()
+    {
+        // The installed version is read from the running assembly; after the user updates, the
+        // service restarts and reads the new one. The cache and its error survive the restart.
+        var (before, _) = Make(ms: "0.6.18+abc1234");
+        Seed(before, UpdateComponent.MultiSeat, "v0.6.19", error: "network error (ConnectionError)");
+        before.Publish(null, null, null);
+        Assert.True(Of(before, "multiseat").Announce);
+
+        var (after, _) = Make(ms: "0.6.19+def5678");
+        Seed(after, UpdateComponent.MultiSeat, "v0.6.19", error: "network error (ConnectionError)");
+        after.Publish(null, null, null);
+
+        var c = Of(after, "multiseat");
+        Assert.Equal(UpdateStatus.UpToDate, c.Status);
+        Assert.False(c.Announce);
+        Assert.NotNull(c.Error);
+    }
+
+    [Theory]
+    [InlineData("0.6.19+abc", "v0.6.19", UpdateStatus.UpToDate)]
+    [InlineData("0.6.20+abc", "v0.6.19", UpdateStatus.Ahead)]
+    public void AStaleError_NeverMakesAnUpToDateOrAheadComponentAnnounce(string installed, string latest, UpdateStatus status)
+    {
+        var (p, _) = Make(ms: installed);
+        Seed(p, UpdateComponent.MultiSeat, latest, error: "rate limited");
+        p.Publish(null, null, null);
+
+        var c = Of(p, "multiseat");
+
+        Assert.Equal(status, c.Status);
+        Assert.False(c.Announce);
     }
 
     [Fact]

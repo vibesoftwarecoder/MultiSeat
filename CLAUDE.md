@@ -155,7 +155,8 @@ simulated day in milliseconds.
   hash in release notes (its PE version says `2026.6.1` for ms3 to ms6, so it cannot be used); MoonlightVibe
   cannot be detected from the host, so it is `latestOnly`. Unknown never raises an alarm.
 - **`announce`** (what the banner uses): known installed version means `updateAvailable`; unknown means only a
-  release newer than the **baseline** recorded at the first successful check. Never on an error.
+  release newer than the **baseline** recorded at the first successful check. A failed check keeps the
+  last good result (and shows the error beside it); with no good result there is nothing to announce.
 - **The three routes** sit under `/api/system`, need the API key when auth is on, and are **not** in
   `IsAlwaysPublic`. `POST .../updates/settings` writes `UpdateCheckEnabled` into `appsettings.local.json` (the
   file that wins, the #61 lesson), atomically, and accepts exactly `{ "enabled": bool }`.
