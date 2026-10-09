@@ -110,6 +110,33 @@ public static class UpdateEndpoints
     private static IResult Bad(string message) => Results.BadRequest(new { error = message });
 
     /// <summary>
+    /// Replace <paramref name="path"/> atomically WITHOUT losing its permissions. The target can
+    /// hold the API key and an administrator may have tightened its ACL, so this must not widen it.
+    /// <see cref="AtomicFile"/> cannot be used here: it renames a staging file over the target, and
+    /// the result is a new file that inherits the folder's ACL (its callers re-grant on purpose).
+    /// <see cref="File.Replace(string, string, string?)"/> swaps the same way but merges the
+    /// replaced file's ACL and attributes into the replacement. A target that does not exist yet
+    /// is created by a plain move. On any failure the staging file is deleted and the target is
+    /// left as it was.
+    /// </summary>
+    internal static void WriteReplacingKeepingAcl(string path, string contents)
+    {
+        var full = Path.GetFullPath(path);
+        var tmp = Path.Combine(Path.GetDirectoryName(full)!, Path.GetFileName(full) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+        File.WriteAllText(tmp, contents, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        try
+        {
+            if (File.Exists(full)) File.Replace(tmp, full, null);
+            else File.Move(tmp, full);
+        }
+        catch
+        {
+            try { File.Delete(tmp); } catch { /* best effort; never mask the real error */ }
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Write <c>MultiSeat:UpdateCheckEnabled</c> into <paramref name="settingsPath"/>, creating it
     /// when absent and keeping every other key. Always appsettings.local.json, which Program.cs
     /// loads last so it outranks appsettings.json (the #61 lesson). The write is atomic. A file
@@ -135,9 +162,7 @@ public static class UpdateEndpoints
 
             var dir = Path.GetDirectoryName(Path.GetFullPath(settingsPath));
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            AtomicFile.WriteAllText(settingsPath,
-                root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }),
-                new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            WriteReplacingKeepingAcl(settingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

@@ -404,6 +404,72 @@ public class UpdateEndpointsTests
         finally { Directory.Delete(dir, true); }
     }
 
+    private static string Dacl(string path) =>
+        new FileInfo(path).GetAccessControl().GetSecurityDescriptorSddlForm(System.Security.AccessControl.AccessControlSections.Access);
+
+    [Fact]
+    public async Task Persist_KeepsTheFilesPermissions_ExplicitAcesAndNoInheritance()
+    {
+        // The file can hold the API key and an administrator may have tightened it. Flipping the
+        // update switch must not widen it back to what the folder grants.
+        var dir = TempDir();
+        try
+        {
+            var local = Path.Combine(dir, "appsettings.local.json");
+            File.WriteAllText(local, """{"MultiSeat":{"ApiKey":"k","UpdateCheckEnabled":false}}""");
+
+            var me = System.Security.Principal.WindowsIdentity.GetCurrent().User!;
+            var guests = new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinGuestsSid, null);
+            var fi = new FileInfo(local);
+            var sec = fi.GetAccessControl();
+            sec.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            foreach (var r in sec.GetAccessRules(true, false, typeof(System.Security.Principal.SecurityIdentifier)).Cast<System.Security.AccessControl.FileSystemAccessRule>().ToList())
+                sec.RemoveAccessRuleAll(r);
+            sec.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(me, System.Security.AccessControl.FileSystemRights.FullControl, System.Security.AccessControl.AccessControlType.Allow));
+            sec.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(guests, System.Security.AccessControl.FileSystemRights.ReadData, System.Security.AccessControl.AccessControlType.Deny));
+            fi.SetAccessControl(sec);
+            var before = Dacl(local);
+            Assert.Contains("D:P", before);          // inheritance is off
+            Assert.Contains(";;;BG)", before);       // the distinct deny for Guests
+            var folderDefault = Path.Combine(dir, "probe.json");
+            File.WriteAllText(folderDefault, "x");
+            Assert.NotEqual(before, Dacl(folderDefault)); // the folder would not have granted this
+
+            await Post("""{"enabled":true}""", local);
+
+            Assert.Equal(before, Dacl(local));
+            Assert.Contains("true", File.ReadAllText(local));
+            Assert.Contains("\"ApiKey\": \"k\"", File.ReadAllText(local));
+            Assert.Equal(["appsettings.local.json", "probe.json"], Directory.GetFiles(dir).Select(Path.GetFileName).Order().ToArray());
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public async Task Persist_WhenTheSwapFails_Returns500_ChangesNothing_AndLeavesNoTempFile()
+    {
+        var dir = TempDir();
+        try
+        {
+            var local = Path.Combine(dir, "appsettings.local.json");
+            const string original = """{"MultiSeat":{"ApiKey":"k","UpdateCheckEnabled":false}}""";
+            File.WriteAllText(local, original);
+            File.SetAttributes(local, FileAttributes.ReadOnly); // makes the replace fail
+
+            var result = await Post("""{"enabled":true}""", local);
+
+            File.SetAttributes(local, FileAttributes.Normal);
+            Assert.Equal(500, ((Microsoft.AspNetCore.Http.IStatusCodeHttpResult)result).StatusCode);
+            Assert.Equal(original, File.ReadAllText(local));
+            Assert.Equal([local], Directory.GetFiles(dir));
+        }
+        finally
+        {
+            try { File.SetAttributes(Path.Combine(dir, "appsettings.local.json"), FileAttributes.Normal); } catch { }
+            Directory.Delete(dir, true);
+        }
+    }
+
     [Fact]
     public async Task Persist_LeavesAFileWithCommentsUntouched_AndReportsIt()
     {
