@@ -428,6 +428,13 @@ public sealed class MultiSeatOptions
     // at login run before any stream and never see the per-stream virtual pad.
     public LaunchOnConnectApp[] LaunchOnConnect { get; set; } = [];
 
+    /// <summary>Opt in to wrapping explicit steam.exe seat launches with the native isolation helper.</summary>
+    public bool SteamIsolationEnabled { get; set; } = false;
+
+    /// <summary>Absolute path to the supervising x64 launcher; matching hooks live beside it.</summary>
+    public string SteamIsolationLauncherPath { get; set; } =
+        @"C:\Program Files\MultiSeat\SteamIsolation\MultiSeat.SteamLauncher.exe";
+
     // Delay after the client-connect event before launching the apps, giving Apollo
     // a moment to create the virtual controller so the apps enumerate it at startup.
     public int LaunchOnConnectDelayMs { get; set; } = 4_000;

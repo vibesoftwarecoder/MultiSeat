@@ -209,6 +209,8 @@ Edit `appsettings.json` in `C:\Program Files\MultiSeat\` (restart the service af
 | `EnableKeyboardMouseIsolation` | `false` | Keyboard/mouse session isolation (no-op as architected — see Known Constraints in CLAUDE.md) |
 | `EnableSharedGameLibrary` | `true` | Create a shared games/ROMs folder all seats can use |
 | `SharedGameLibraryDir` | `C:\MultiSeatGames` | Root of the shared library (`\SteamLibrary` + `\ROMs`) |
+| `SteamIsolationEnabled` | `false` | Wrap explicit `steam.exe` seat launches with the experimental native isolation helper. See [Steam isolation setup](docs/steam-isolation.md) for binaries, Apollo commands and limitations. |
+| `SteamIsolationLauncherPath` | `C:\Program Files\MultiSeat\SteamIsolation\MultiSeat.SteamLauncher.exe` | Supervising x64 launcher; the matching x86 launcher and hooks live beside it. |
 | `EnableEmulatorNetplay` | `true` | Assign + open a per-seat RetroArch netplay port (seats connect over `127.0.0.1`) |
 | `SeedRetroArchNetplayConfig` | `false` | Auto-write each seat's `retroarch.cfg` (netplay port + shared ROM dir) |
 | `UpdateCheckEnabled` | `false` | Ask GitHub's public releases API whether newer MultiSeat, ApolloVibe and MoonlightVibe releases exist, and show the answer on the dashboard. **Off by default**: it is the only internet connection the service would make. It sends an unauthenticated GET with a generic User-Agent and nothing about your host, and never downloads or installs anything. Set it in `appsettings.local.json` or from the dashboard's System page; no restart needed. Details: `docs/security-posture.md`, "Outbound connections". |

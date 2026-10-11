@@ -14,6 +14,10 @@ PktMon.*
 # C++ InputHook DLL build output
 src/MultiSeat.InputHook/build/
 
+# Steam isolation native build products
+src/MultiSeat.SteamIsolation/build-*/
+src/MultiSeat.SteamIsolation/artifacts/
+
 # TypeScript incremental build info
 *.tsbuildinfo
 

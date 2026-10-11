@@ -1,0 +1,37 @@
+name: Steam isolation native checks
+
+on:
+  pull_request:
+    paths:
+      - 'src/MultiSeat.SteamIsolation/**'
+      - '.github/workflows/steam-isolation.yml'
+  push:
+    paths:
+      - 'src/MultiSeat.SteamIsolation/**'
+      - '.github/workflows/steam-isolation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  native-checks:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build x64 and x86 launchers, hooks, and safe fixtures
+        shell: pwsh
+        run: ./src/MultiSeat.SteamIsolation/build.ps1 -BuildFixture
+      - name: Check native isolation policies
+        shell: pwsh
+        run: |
+          foreach ($architecture in @('x64', 'Win32')) {
+            ctest --test-dir "src/MultiSeat.SteamIsolation/build-$architecture" -C Release --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "Policy checks failed for $architecture" }
+          }
+      - name: Check launch, restart, readiness, and cleanup
+        shell: pwsh
+        run: ./src/MultiSeat.SteamIsolation/tests/LauncherSmoke.ps1
+      - name: Check direct game environment and working directory
+        shell: pwsh
+        run: ./src/MultiSeat.SteamIsolation/tests/GameLauncherSmoke.ps1

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using Microsoft.Extensions.Options;
 using MultiSeat.Service.Configuration;
 using MultiSeat.Service.Interop;
@@ -66,6 +67,11 @@ public sealed class ProcessInjector
         var consoleSessionId = (int)Kernel32.WTSGetActiveConsoleSessionId();
         EnsureNotConsoleSession(sessionId, consoleSessionId, exePath, allowConsoleSession);
 
+        var launchPlan = SteamIsolationLaunchPlan.Create(exePath, arguments, _options);
+        if (launchPlan.Supervised)
+            _logger.LogInformation("Launching isolated Steam through '{Launcher}' in session {Sid}",
+                launchPlan.ExecutablePath, sessionId);
+
         // Step 1: Get a primary token for the target session
         using var token = _sessionLauncher.GetSessionToken(sessionId, accountName);
 
@@ -101,6 +107,12 @@ public sealed class ProcessInjector
                 Marshal.GetLastWin32Error(), sessionId, exePath);
         }
 
+        using var tokenIdentity = launchPlan.Supervised ? new WindowsIdentity(token.DangerousGetHandle()) : null;
+        using var readiness = launchPlan.Supervised
+            ? new SteamIsolationReadiness(tokenIdentity!.User ?? throw new InvalidOperationException("Seat token has no user SID."))
+            : null;
+        if (readiness is not null) launchPlan = launchPlan.WithReadyEvent(readiness.Name);
+
         // Step 2: Create the environment block for the user
         if (!UserEnv.CreateEnvironmentBlock(out var envBlock, token, false))
         {
@@ -112,7 +124,7 @@ public sealed class ProcessInjector
         try
         {
             // Step 3: Build the command line
-            var cmdLine = FormatCommandLine(exePath, arguments);
+            var cmdLine = FormatCommandLine(launchPlan.ExecutablePath, launchPlan.Arguments);
 
             var si = new Kernel32.StartupInfo
             {
@@ -154,12 +166,25 @@ public sealed class ProcessInjector
             // session we ASKED for, which is a claim about our intent rather than about the world —
             // so a process running in the wrong session produced a perfectly reassuring log. Seven
             // rounds of issue #18 went past exactly that line.
-            VerifyLandedInSession(pi, exePath, sessionId, consoleSessionId);
-
             try
             {
+                VerifyLandedInSession(pi, exePath, sessionId, consoleSessionId);
                 // Step 5: Wait briefly for the process to initialize
-                await WaitForProcessStartAsync(pi, ct);
+                if (readiness is not null)
+                    await readiness.WaitAsync(pi.hProcess, TimeSpan.FromSeconds(180), ct);
+                else
+                    await WaitForProcessStartAsync(pi, ct);
+            }
+            catch
+            {
+                // The supervisor owns a kill-on-close job containing Steam and its children.
+                // Terminating it also cleans up an incomplete or cancelled isolated launch.
+                if (readiness is not null &&
+                    Kernel32.WaitForSingleObject(pi.hProcess, 0) == Kernel32.WAIT_TIMEOUT &&
+                    !Kernel32.TerminateProcess(pi.hProcess, 1))
+                    _logger.LogError("Failed to terminate Steam isolation supervisor PID {Pid}: {Error}",
+                        pi.dwProcessId, Marshal.GetLastWin32Error());
+                throw;
             }
             finally
             {
