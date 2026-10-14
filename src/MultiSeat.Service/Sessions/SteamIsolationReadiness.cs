@@ -80,9 +80,11 @@ internal sealed class SteamIsolationReadiness : IDisposable
             ct.ThrowIfCancellationRequested();
             if (isReady()) return;
             if (exitCode() is { } code)
-                throw new InvalidOperationException($"Steam isolation launcher exited before initialization succeeded (code {code}).");
+                throw new LaunchFailedException($"Steam isolation launcher exited before initialization succeeded (code {code}).");
             if (elapsed.Elapsed >= timeout)
-                throw new TimeoutException("Steam isolation initialization did not signal readiness before the timeout.");
+                throw new LaunchTimedOutException(
+                    $"Steam isolation initialization did not signal readiness within {timeout.TotalSeconds:0} s. " +
+                    "A slow host can raise MultiSeat:SteamIsolationReadyTimeoutSeconds.");
             await Task.Delay(TimeSpan.FromMilliseconds(50), ct);
         }
     }

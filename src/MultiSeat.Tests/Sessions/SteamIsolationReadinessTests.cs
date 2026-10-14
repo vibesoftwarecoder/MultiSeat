@@ -1,5 +1,6 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using MultiSeat.Service;
 using MultiSeat.Service.Interop;
 using MultiSeat.Service.Sessions;
 using Xunit;
@@ -47,15 +48,24 @@ public sealed class SteamIsolationReadinessTests
     [InlineData(9u)]
     public async Task ExitWithoutReadinessFailsEvenWithZeroExitCode(uint code)
     {
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var error = await Assert.ThrowsAsync<LaunchFailedException>(() =>
             SteamIsolationReadiness.WaitCoreAsync(() => false, () => code, TimeSpan.FromSeconds(1), default));
         Assert.Contains($"code {code}", error.Message);
     }
 
     [Fact]
     public async Task MissingReadinessTimesOut() =>
-        await Assert.ThrowsAsync<TimeoutException>(() => SteamIsolationReadiness.WaitCoreAsync(
+        await Assert.ThrowsAsync<LaunchTimedOutException>(() => SteamIsolationReadiness.WaitCoreAsync(
             () => false, () => null, TimeSpan.Zero, default));
+
+    [Fact]
+    public async Task TimeoutMessageNamesTheLimitAndTheSettingThatChangesIt()
+    {
+        var error = await Assert.ThrowsAsync<LaunchTimedOutException>(() => SteamIsolationReadiness.WaitCoreAsync(
+            () => false, () => null, TimeSpan.Zero, default));
+        Assert.Contains("within 0 s", error.Message);
+        Assert.Contains("SteamIsolationReadyTimeoutSeconds", error.Message);
+    }
 
     [Fact]
     public async Task CancellationInterruptsReadinessWait()

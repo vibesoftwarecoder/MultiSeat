@@ -6,7 +6,7 @@ namespace MultiSeat.Service;
 /// condition is temporary and the same request may succeed later, unlike a conflict with a
 /// specific existing resource.
 ///
-/// ⭐ All three types here derive from <see cref="InvalidOperationException"/> deliberately. Every
+/// ⭐ Every type here derives from <see cref="InvalidOperationException"/> deliberately. Every
 /// existing non-HTTP caller — worker autostart, the smoke script, tooling — already catches that,
 /// and keeps catching these unchanged. The HTTP layer gets more precision without anything else
 /// having to learn about it.
@@ -45,13 +45,41 @@ internal sealed class SeatNotFoundException : InvalidOperationException
 }
 
 /// <summary>
+/// A launch inside a seat started but did not finish in time: the isolation helper never reported
+/// that it was ready. The API maps this to <b>504 Gateway Timeout</b>, not 400 — the request was
+/// fine, so a caller must not be told it was malformed, and a later attempt may well succeed.
+///
+/// Before this type the wait threw a bare <see cref="TimeoutException"/>, which is not an
+/// <see cref="InvalidOperationException"/>, so the launch endpoint did not catch it and the
+/// caller got an unhandled 500 with no explanation.
+/// </summary>
+internal sealed class LaunchTimedOutException : InvalidOperationException
+{
+    public LaunchTimedOutException(string message) : base(message) { }
+}
+
+/// <summary>
+/// A launch inside a seat failed on the server side after the request was accepted: the isolation
+/// helper exited before it reported ready. The API maps this to <b>500 Internal Server Error</b>.
+/// It used to surface as a plain <see cref="InvalidOperationException"/>, which means 400, and
+/// told the caller their request was malformed when nothing about it was wrong.
+///
+/// Bad Steam paths and missing helper binaries stay plain <see cref="InvalidOperationException"/>
+/// (400): those are refused before anything starts, and the caller or administrator can fix them.
+/// </summary>
+internal sealed class LaunchFailedException : InvalidOperationException
+{
+    public LaunchFailedException(string message) : base(message) { }
+}
+
+/// <summary>
 /// Maps the exception types above onto HTTP results, so every endpoint answers the same way and a
 /// new endpoint cannot quietly disagree with the others.
 /// </summary>
 internal static class ApiErrors
 {
     /// <summary>
-    /// ⚠️ Order matters: all three types derive from <see cref="InvalidOperationException"/>, so
+    /// ⚠️ Order matters: every type here derives from <see cref="InvalidOperationException"/>, so
     /// the specific cases must be tested before the fallback. A plain InvalidOperationException
     /// still means 400 — a genuinely bad request, such as an unusable resolution.
     /// </summary>
@@ -60,6 +88,8 @@ internal static class ApiErrors
         SeatNotFoundException      => Results.NotFound(new { error = ex.Message }),
         ResourceConflictException  => Results.Conflict(new { error = ex.Message }),
         CapacityExhaustedException => Results.Json(new { error = ex.Message }, statusCode: 503),
+        LaunchTimedOutException    => Results.Json(new { error = ex.Message }, statusCode: 504),
+        LaunchFailedException      => Results.Json(new { error = ex.Message }, statusCode: 500),
         _                          => Results.BadRequest(new { error = ex.Message })
     };
 
@@ -70,6 +100,8 @@ internal static class ApiErrors
         SeatNotFoundException      => StatusCodes.Status404NotFound,
         ResourceConflictException  => StatusCodes.Status409Conflict,
         CapacityExhaustedException => StatusCodes.Status503ServiceUnavailable,
+        LaunchTimedOutException    => StatusCodes.Status504GatewayTimeout,
+        LaunchFailedException      => StatusCodes.Status500InternalServerError,
         _                          => StatusCodes.Status400BadRequest
     };
 }

@@ -435,6 +435,19 @@ public sealed class MultiSeatOptions
     public string SteamIsolationLauncherPath { get; set; } =
         @"C:\Program Files\MultiSeat\SteamIsolation\MultiSeat.SteamLauncher.exe";
 
+    /// <summary>
+    /// How long a supervised Steam launch may take to report that its hook is in place, in
+    /// seconds. The wait holds the seat's lifecycle gate, so other operations on that seat queue
+    /// behind it; a shorter value fails a stuck launch sooner, a longer one suits a slow host.
+    /// Read through <see cref="UsableSteamIsolationReadyTimeout"/>, which keeps it in range.
+    /// </summary>
+    public int SteamIsolationReadyTimeoutSeconds { get; set; } = 180;
+
+    /// <summary><see cref="SteamIsolationReadyTimeoutSeconds"/> limited to 10 s .. 15 min, so a
+    /// typo cannot make every isolated launch fail at once or hold a seat for hours.</summary>
+    public TimeSpan UsableSteamIsolationReadyTimeout =>
+        TimeSpan.FromSeconds(Math.Clamp(SteamIsolationReadyTimeoutSeconds, 10, 900));
+
     // Delay after the client-connect event before launching the apps, giving Apollo
     // a moment to create the virtual controller so the apps enumerate it at startup.
     public int LaunchOnConnectDelayMs { get; set; } = 4_000;

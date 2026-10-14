@@ -171,7 +171,7 @@ public sealed class ProcessInjector
                 VerifyLandedInSession(pi, exePath, sessionId, consoleSessionId);
                 // Step 5: Wait briefly for the process to initialize
                 if (readiness is not null)
-                    await readiness.WaitAsync(pi.hProcess, TimeSpan.FromSeconds(180), ct);
+                    await readiness.WaitAsync(pi.hProcess, _options.UsableSteamIsolationReadyTimeout, ct);
                 else
                     await WaitForProcessStartAsync(pi, ct);
             }

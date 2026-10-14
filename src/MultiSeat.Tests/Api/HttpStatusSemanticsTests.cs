@@ -47,6 +47,35 @@ public class HttpStatusSemanticsTests
         Assert.Equal(StatusCodes.Status404NotFound, ApiErrors.StatusFor(new SeatNotFoundException()));
     }
 
+    // A Steam launch that never reports ready, or whose helper dies, is not a malformed request.
+    // The timeout used to be a bare TimeoutException (not an InvalidOperationException), which the
+    // launch endpoint does not catch, so the caller got an unexplained 500.
+    [Fact]
+    public void LaunchTimedOut_Is504_NotBadRequest()
+    {
+        var ex = new LaunchTimedOutException("Steam isolation initialization did not signal readiness.");
+
+        Assert.Equal(StatusCodes.Status504GatewayTimeout, ApiErrors.StatusFor(ex));
+        Assert.NotEqual(StatusCodes.Status400BadRequest, ApiErrors.StatusFor(ex));
+    }
+
+    [Fact]
+    public void LaunchFailed_Is500_NotBadRequest()
+    {
+        var ex = new LaunchFailedException("Steam isolation launcher exited before initialization succeeded (code 2).");
+
+        Assert.Equal(StatusCodes.Status500InternalServerError, ApiErrors.StatusFor(ex));
+        Assert.NotEqual(StatusCodes.Status400BadRequest, ApiErrors.StatusFor(ex));
+    }
+
+    [Fact]
+    public void LaunchErrorsAreStillInvalidOperations_SoExistingCallersKeepCatchingThem()
+    {
+        // OnConnectAppLauncher and SeatManager catch InvalidOperationException/Exception today.
+        Assert.IsAssignableFrom<InvalidOperationException>(new LaunchTimedOutException("x"));
+        Assert.IsAssignableFrom<InvalidOperationException>(new LaunchFailedException("x"));
+    }
+
     [Fact]
     public void APlainInvalidOperation_StaysBadRequest()
     {
