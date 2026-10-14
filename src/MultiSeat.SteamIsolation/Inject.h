@@ -62,10 +62,12 @@ inline bool Inject(HANDLE process, const std::wstring& dllPath, std::wstring& er
     if (!IsWow64Process(process, &targetWow) || !IsWow64Process(GetCurrentProcess(), &selfWow))
         return fail(L"Cannot inspect process architecture");
     if (targetWow != selfWow) { error = L"Injection requires matching process architecture"; return false; }
-    wchar_t absolute[32768];
-    DWORD n = GetFullPathNameW(dllPath.c_str(), 32768, absolute, nullptr);
-    if (!n || n >= 32768) return fail(L"Cannot resolve isolation DLL path");
-    std::wstring resolved(absolute, n);
+    // Path buffers live on the heap, not the stack: from the hook this runs on whichever Steam
+    // thread restarts Steam, and three 64 KB arrays would be 192 KB of that thread's stack.
+    std::vector<wchar_t> absolute(32768);
+    DWORD n = GetFullPathNameW(dllPath.c_str(), static_cast<DWORD>(absolute.size()), absolute.data(), nullptr);
+    if (!n || n >= absolute.size()) return fail(L"Cannot resolve isolation DLL path");
+    std::wstring resolved(absolute.data(), n);
     HMODULE localDll = LoadLibraryExW(resolved.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
     if (!localDll) return fail(L"Cannot inspect isolation DLL");
     auto init = GetProcAddress(localDll, "MultiSeatInitialize");
@@ -77,9 +79,10 @@ inline bool Inject(HANDLE process, const std::wstring& dllPath, std::wstring& er
     if (!load || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(load), &loadModule))
         return fail(L"Cannot locate loader");
-    wchar_t modulePath[32768];
-    if (!GetModuleFileNameW(loadModule, modulePath, 32768)) return fail(L"Cannot locate loader module");
-    std::wstring moduleName(modulePath);
+    std::vector<wchar_t> modulePath(32768);
+    const DWORD moduleLength = GetModuleFileNameW(loadModule, modulePath.data(), static_cast<DWORD>(modulePath.size()));
+    if (!moduleLength || moduleLength >= modulePath.size()) return fail(L"Cannot locate loader module");
+    std::wstring moduleName(modulePath.data(), moduleLength);
     moduleName = moduleName.substr(moduleName.find_last_of(L"\\/") + 1);
     DWORD pid = GetProcessId(process);
     uintptr_t remoteModule = FindModule(pid, moduleName, false);
@@ -95,12 +98,13 @@ inline bool Inject(HANDLE process, const std::wstring& dllPath, std::wstring& er
             // images directly instead; unlike a guessed address this handles ASLR.
             uintptr_t address = 0;
             MEMORY_BASIC_INFORMATION region{};
+            std::vector<wchar_t> mapped(32768);
             while (VirtualQueryEx(process, reinterpret_cast<void*>(address), &region, sizeof(region))) {
                 if (region.Type == MEM_IMAGE && region.BaseAddress == region.AllocationBase) {
-                    wchar_t mapped[32768];
-                    DWORD count = K32GetMappedFileNameW(process, region.AllocationBase, mapped, 32768);
-                    if (count && count < 32768) {
-                        std::wstring image(mapped, count);
+                    DWORD count = K32GetMappedFileNameW(process, region.AllocationBase, mapped.data(),
+                                                        static_cast<DWORD>(mapped.size()));
+                    if (count && count < mapped.size()) {
+                        std::wstring image(mapped.data(), count);
                         auto name = image.substr(image.find_last_of(L"\\/") + 1);
                         if (_wcsicmp(name.c_str(), L"ntdll.dll") == 0) {
                             remoteNtdll = reinterpret_cast<uintptr_t>(region.AllocationBase); break;

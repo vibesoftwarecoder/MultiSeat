@@ -8,7 +8,7 @@
 #include <iostream>
 
 int wmain(int argc, wchar_t** argv) {
-    std::wstring report, mutexName, childReport, restartReport;
+    std::wstring report, mutexName, childReport, restartReport, restartVia = L"w";
     DWORD holdMs = 0;
     DWORD childHoldMs = 0;
     bool detachChild = false;
@@ -17,6 +17,11 @@ int wmain(int argc, wchar_t** argv) {
         if (arg == L"--report" && i + 1 < argc) report = argv[++i];
         else if (arg == L"--child-report" && i + 1 < argc) childReport = argv[++i];
         else if (arg == L"--restart-report" && i + 1 < argc) restartReport = argv[++i];
+        // How the stand-in Steam starts its replacement: w = CreateProcessW with an application
+        // name (what the first version of the tests did), a = CreateProcessA, user =
+        // CreateProcessAsUserW, unquoted = CreateProcessW with no application name and a path
+        // that contains spaces, which CreateProcess has to find by trying each space in turn.
+        else if (arg == L"--restart-via" && i + 1 < argc) restartVia = argv[++i];
         else if (arg == L"--mutex" && i + 1 < argc) mutexName = argv[++i];
         else if (arg == L"--hold-ms" && i + 1 < argc) holdMs = wcstoul(argv[++i], nullptr, 10);
         else if (arg == L"--child-hold-ms" && i + 1 < argc) childHoldMs = wcstoul(argv[++i], nullptr, 10);
@@ -96,9 +101,51 @@ int wmain(int argc, wchar_t** argv) {
         wchar_t environment[] = L"FIXTURE_EXPLICIT=1\0\0";
         STARTUPINFOW startup{}; startup.cb = sizeof(startup);
         PROCESS_INFORMATION child{};
-        if (!CreateProcessW(helper.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT,
-                            environment, nullptr, &startup, &child)) {
-            std::wcerr << L"Fixture child creation failed: " << GetLastError() << L"\n";
+        BOOL created = FALSE;
+        if (restartReport.empty() || restartVia == L"w") {
+            created = CreateProcessW(helper.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT,
+                                     environment, nullptr, &startup, &child);
+        } else if (restartVia == L"unquoted") {
+            // No application name and no quotes: the program is whatever prefix of the command line,
+            // cut at a space, turns out to be a file.
+            command = helper + command.substr(command.find(L'"', 1) + 1);
+            created = CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT,
+                                     environment, nullptr, &startup, &child);
+        } else if (restartVia == L"a") {
+            auto narrow = [](const std::wstring& text) {
+                int size = WideCharToMultiByte(CP_ACP, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                std::string result(size > 0 ? size : 1, '\0');
+                if (size > 0) WideCharToMultiByte(CP_ACP, 0, text.c_str(), -1, result.data(), size, nullptr, nullptr);
+                return result;
+            };
+            std::string narrowCommand = narrow(command);
+            STARTUPINFOA narrowStartup{}; narrowStartup.cb = sizeof(narrowStartup);
+            created = CreateProcessA(nullptr, narrowCommand.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT,
+                                     environment, nullptr, &narrowStartup, &child);
+        } else if (restartVia == L"user") {
+            // CreateProcessAsUser needs SeIncreaseQuota (and may need SeAssignPrimaryToken); an
+            // administrator holds both but has them switched off. Switch them on, best effort.
+            HANDLE self = nullptr, primary = nullptr;
+            if (OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES | TOKEN_ASSIGN_PRIMARY, &self)) {
+                for (const wchar_t* privilege : {L"SeIncreaseQuotaPrivilege", L"SeAssignPrimaryTokenPrivilege"}) {
+                    TOKEN_PRIVILEGES on{}; on.PrivilegeCount = 1; on.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+                    if (LookupPrivilegeValueW(nullptr, privilege, &on.Privileges[0].Luid))
+                        AdjustTokenPrivileges(self, FALSE, &on, 0, nullptr, nullptr);
+                }
+                DuplicateTokenEx(self, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation, TokenPrimary, &primary);
+                CloseHandle(self);
+            }
+            if (primary) {
+                created = CreateProcessAsUserW(primary, nullptr, command.data(), nullptr, nullptr, FALSE,
+                                               CREATE_UNICODE_ENVIRONMENT, environment, nullptr, &startup, &child);
+                CloseHandle(primary);
+            } else SetLastError(ERROR_NO_TOKEN);
+        } else {
+            std::wcerr << L"Unknown --restart-via " << restartVia << L"\n";
+            if (mutex) CloseHandle(mutex); return 9;
+        }
+        if (!created) {
+            std::wcerr << L"Fixture child creation failed (" << restartVia << L"): " << GetLastError() << L"\n";
             if (mutex) CloseHandle(mutex); return 7;
         }
         CloseHandle(child.hThread);

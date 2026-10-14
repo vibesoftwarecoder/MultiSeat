@@ -8,6 +8,7 @@
 #include <cwctype>
 #include "IsolationPolicy.h"
 #include "Inject.h"
+#include "Log.h"
 
 namespace {
 using namespace steam_isolation;
@@ -44,8 +45,15 @@ static_assert(offsetof(Parameters, command) == 0x40 && offsetof(Parameters, envi
 using CreateUser = NTSTATUS (NTAPI*)(PHANDLE, PHANDLE, ACCESS_MASK, ACCESS_MASK,
     POBJECT_ATTRIBUTES, POBJECT_ATTRIBUTES, ULONG, ULONG, PVOID, PVOID, PVOID);
 CreateUser originalCreate = nullptr;
-decltype(&CreateProcessW) createW = nullptr;
-decltype(&CreateProcessA) createA = nullptr;
+// Every Win32 process-creation API ends in kernelbase's CreateProcessInternalW: CreateProcessW and
+// CreateProcessA, CreateProcessAsUserW and A, ShellExecute's non-elevated path. It is undocumented
+// but exported and has kept this signature from Windows 7 to 11. Hooking it, rather than the
+// CreateProcess pair, is what lets a Steam that restarts itself through CreateProcessAsUser be
+// isolated too. (CreateProcessWithTokenW and CreateProcessWithLogonW are the exception: the
+// secondary logon service creates that process, so no hook in the caller can see it.)
+using CreateInternal = BOOL (WINAPI*)(HANDLE, LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES,
+    BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION, PHANDLE);
+CreateInternal createInternal = nullptr;
 decltype(&RegQueryValueExW) queryW = nullptr;
 decltype(&RegQueryValueExA) queryA = nullptr;
 decltype(&RegSetValueExW) setW = nullptr;
@@ -106,44 +114,37 @@ LSTATUS WINAPI DeleteA(HKEY key, LPCSTR value) {
 }
 LPWSTR WINAPI CommandW() { return commandW.data(); }
 LPSTR WINAPI CommandA() { return commandA.data(); }
+// Is this call starting steam.exe? With an application name that name decides, as CreateProcess
+// does. Without one, the program is the start of the command line, which may be an unquoted path
+// that contains spaces; SplitImage reads it the way CreateProcess does.
 bool SteamLaunch(LPCWSTR application, LPCWSTR command) {
     if (application) return SteamImage(application);
     if (!command) return false;
-    int count = 0; LPWSTR* args = CommandLineToArgvW(command, &count);
-    bool result = args && count && SteamImage(args[0]); if (args) LocalFree(args); return result;
-}
-std::wstring Wide(LPCSTR value) {
-    if (!value) return {};
-    int size = MultiByteToWideChar(CP_ACP, 0, value, -1, nullptr, 0);
-    if (!size) return {};
-    std::wstring result(size, 0); MultiByteToWideChar(CP_ACP, 0, value, -1, result.data(), size);
-    result.resize(size - 1); return result;
+    return SteamImage(SplitImage(command).image);
 }
 BOOL FinishRestart(PROCESS_INFORMATION* pi, DWORD flags) {
     std::wstring error;
     try {
         if (Inject(pi->hProcess, ownDllPath, error) &&
-            ((flags & CREATE_SUSPENDED) || ResumeThread(pi->hThread) != static_cast<DWORD>(-1))) return TRUE;
+            ((flags & CREATE_SUSPENDED) || ResumeThread(pi->hThread) != static_cast<DWORD>(-1))) {
+            AppendLog(L"Steam restart isolated: replacement process " + std::to_wstring(pi->dwProcessId) +
+                      L" has the hook");
+            return TRUE;
+        }
     } catch (...) { error = L"Resource allocation failed"; }
-    OutputDebugStringW((L"MultiSeat Steam restart isolation failed: " + error).c_str());
+    // A restart that cannot be isolated is stopped, not let through unisolated. The caller sees
+    // CreateProcess fail, which Steam only reports as a failed restart, so say why here.
+    AppendLog(L"Steam restart refused, replacement not isolated: " + error);
     TerminateProcess(pi->hProcess, 1); CloseHandle(pi->hThread); CloseHandle(pi->hProcess); *pi = {};
     SetLastError(ERROR_DLL_INIT_FAILED); return FALSE;
 }
-BOOL WINAPI CreateW(LPCWSTR app, LPWSTR command, LPSECURITY_ATTRIBUTES processAttributes,
+BOOL WINAPI CreateInternalHook(HANDLE token, LPCWSTR app, LPWSTR command, LPSECURITY_ATTRIBUTES processAttributes,
     LPSECURITY_ATTRIBUTES threadAttributes, BOOL inherit, DWORD flags, LPVOID environment,
-    LPCWSTR directory, LPSTARTUPINFOW startup, LPPROCESS_INFORMATION pi) {
-    bool restart = SteamLaunch(app, command);
-    BOOL result = createW(app, command, processAttributes, threadAttributes, inherit,
-        restart ? flags | CREATE_SUSPENDED : flags, environment, directory, startup, pi);
-    return result && restart ? FinishRestart(pi, flags) : result;
-}
-BOOL WINAPI CreateA(LPCSTR app, LPSTR command, LPSECURITY_ATTRIBUTES processAttributes,
-    LPSECURITY_ATTRIBUTES threadAttributes, BOOL inherit, DWORD flags, LPVOID environment,
-    LPCSTR directory, LPSTARTUPINFOA startup, LPPROCESS_INFORMATION pi) {
-    auto wideApp = Wide(app), wideCommand = Wide(command);
-    bool restart = SteamLaunch(app ? wideApp.c_str() : nullptr, command ? wideCommand.c_str() : nullptr);
-    BOOL result = createA(app, command, processAttributes, threadAttributes, inherit,
-        restart ? flags | CREATE_SUSPENDED : flags, environment, directory, startup, pi);
+    LPCWSTR directory, LPSTARTUPINFOW startup, LPPROCESS_INFORMATION pi, PHANDLE newToken) {
+    // Decide before the call: CreateProcess is allowed to write into the command line buffer.
+    const bool restart = pi && SteamLaunch(app, command);
+    const BOOL result = createInternal(token, app, command, processAttributes, threadAttributes, inherit,
+        restart ? flags | CREATE_SUSPENDED : flags, environment, directory, startup, pi, newToken);
     return result && restart ? FinishRestart(pi, flags) : result;
 }
 NTSTATUS NTAPI CreateUserHook(PHANDLE process, PHANDLE thread, ACCESS_MASK pa, ACCESS_MASK ta,
@@ -204,12 +205,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI MultiSeatInitialize(void*) {
         for (const wchar_t* c = sid; *c; ++c) { hash ^= static_cast<uint64_t>(*c); hash *= 1099511628211ULL; }
         LocalFree(sid);
         ipcName = L"MultiSeat_" + std::to_wstring(session) + L"_" + std::to_wstring(hash);
-        wchar_t image[32768]; DWORD length = GetModuleFileNameW(nullptr, image, 32768);
-        if (!length || length >= 32768 || !SteamImage(std::wstring(image, length))) return 0;
+        std::vector<wchar_t> image(32768); DWORD length = GetModuleFileNameW(nullptr, image.data(), static_cast<DWORD>(image.size()));
+        if (!length || length >= image.size() || !SteamImage(std::wstring(image.data(), length))) return 0;
         isSteam = true;
-        wchar_t dllPath[32768]; DWORD dllLength = GetModuleFileNameW(ownModule, dllPath, 32768);
-        if (!dllLength || dllLength >= 32768) return 0;
-        ownDllPath.assign(dllPath, dllLength);
+        std::vector<wchar_t> dllPath(32768); DWORD dllLength = GetModuleFileNameW(ownModule, dllPath.data(), static_cast<DWORD>(dllPath.size()));
+        if (!dllLength || dllLength >= dllPath.size()) return 0;
+        ownDllPath.assign(dllPath.data(), dllLength);
         commandW = RewriteCommand(GetCommandLineW(), ipcName);
         int narrowSize = WideCharToMultiByte(CP_ACP, 0, commandW.c_str(), -1, nullptr, 0, nullptr, nullptr);
         if (!narrowSize) return 0;
@@ -220,8 +221,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI MultiSeatInitialize(void*) {
         bool ok = Hook(L"ntdll.dll", "NtCreateUserProcess", reinterpret_cast<void*>(CreateUserHook), &originalCreate)
             // Win32 completes subsystem registration before restart injection; doing this
             // inside NtCreateUserProcess is too early for remote loader initialization.
-            && Hook(L"kernelbase.dll", "CreateProcessW", reinterpret_cast<void*>(CreateW), &createW)
-            && Hook(L"kernelbase.dll", "CreateProcessA", reinterpret_cast<void*>(CreateA), &createA)
+            && Hook(L"kernelbase.dll", "CreateProcessInternalW", reinterpret_cast<void*>(CreateInternalHook), &createInternal)
             && Hook(L"kernelbase.dll", "GetCommandLineW", reinterpret_cast<void*>(CommandW), &originalCommandW)
             && Hook(L"kernelbase.dll", "GetCommandLineA", reinterpret_cast<void*>(CommandA), &originalCommandA)
             && Hook(L"kernelbase.dll", "RegQueryValueExW", reinterpret_cast<void*>(QueryW), &queryW)
@@ -231,7 +231,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI MultiSeatInitialize(void*) {
             && Hook(L"kernelbase.dll", "RegDeleteValueW", reinterpret_cast<void*>(DeleteW), &deleteW)
             && Hook(L"kernelbase.dll", "RegDeleteValueA", reinterpret_cast<void*>(DeleteA), &deleteA);
         if (!ok || MH_EnableHook(MH_ALL_HOOKS) != MH_OK) { MH_Uninitialize(); return 0; }
-        InterlockedExchange(&initialization, 2); return 1;
+        InterlockedExchange(&initialization, 2);
+        AppendLog(L"Steam isolation hook active in steam.exe (ipc name " + ipcName + L")");
+        return 1;
     } catch (...) { return 0; }
 }
 BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {

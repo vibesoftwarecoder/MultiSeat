@@ -19,12 +19,15 @@ foreach ($launcherName in @('MultiSeat.SteamLauncher.exe', 'MultiSeat.SteamLaunc
 }
 # Prove the probe can tell the two apart: the fixture is a console program.
 Assert-True ((Get-PeSubsystem (Join-Path $source 'SteamIsolationFixture.exe')) -eq 3) 'Subsystem probe did not read the console fixture as subsystem 3'
-function Invoke-Fixture([string]$directory, [string]$tail, [bool]$expectReady, [int]$expectExit) {
+function Invoke-Fixture([string]$directory, [string]$tail, [bool]$expectReady, [int]$expectExit, [string]$steamDirectory = '') {
+    # The launcher and its hook live in $directory; the stand-in steam.exe may live elsewhere
+    # (a folder with a space in its name, to test an unquoted program path).
+    $steamDir = if ($steamDirectory) { $steamDirectory } else { $directory }
     $name = 'Global\MultiSeatSteamReady-' + [guid]::NewGuid().ToString('N')
     $ready = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $name)
     $launcher = $null
     try {
-        $args = '--steam "' + (Join-Path $directory 'steam.exe') + '" --ready-event "' + $name + '" -- ' + $tail
+        $args = '--steam "' + (Join-Path $steamDir 'steam.exe') + '" --ready-event "' + $name + '" -- ' + $tail
         $launcher = Start-Process -FilePath (Join-Path $directory 'MultiSeat.SteamLauncher.exe') -ArgumentList $args `
             -WorkingDirectory $directory -WindowStyle Hidden -RedirectStandardError (Join-Path $directory 'stderr.txt') -PassThru
         $signaled = $ready.WaitOne(5000)
@@ -51,11 +54,28 @@ foreach ($suffix in @('', '32')) {
     Assert-True ($report -match '(?m)^steamPidNullType=0\r?$') 'SteamPID DWORD with null type was not isolated'
     Assert-True ($report -match '(?m)^steamPidString=fixture-nonDWORD\r?$') 'SteamPID string was corrupted'
     Assert-True ($report -match '(?m)^arg5=two words\r?$') 'Quoted argument was not preserved'
-    Invoke-Fixture $directory '--report first.txt --restart-report restarted.txt --child-report browser.txt --child-hold-ms 200' $true 0
-    $replacement = Get-Content -LiteralPath (Join-Path $directory 'restarted.txt') -Raw
-    $browser = Get-Content -LiteralPath (Join-Path $directory 'browser.txt') -Raw
-    Assert-True ($replacement -match '(?m)^steamPid=0\r?$') 'Replacement Steam was not hooked'
-    Assert-True ($browser -match 'htmlcache\.MultiSeat_') 'Replacement browser cache was not isolated'
+    # A Steam that restarts itself can do it through any creation API, and with an unquoted program
+    # path that contains spaces. Each way has to come back hooked, with its browser cache separated.
+    # The hook also says so in the launcher log, which is what a real-Steam test would read.
+    $restartLog = Join-Path $env:LOCALAPPDATA 'MultiSeat\SteamIsolation\launcher.log'
+    $restartLogBefore = if (Test-Path -LiteralPath $restartLog) { (Get-Item -LiteralPath $restartLog).Length } else { 0 }
+    $spaced = Join-Path $directory 'with space'
+    New-Item -ItemType Directory -Force -Path $spaced | Out-Null
+    foreach ($exe in @('steam.exe', 'steamwebhelper.exe')) {
+        Copy-Item -LiteralPath (Join-Path $source "SteamIsolationFixture$suffix.exe") -Destination (Join-Path $spaced $exe)
+    }
+    foreach ($via in @('w', 'a', 'user', 'unquoted')) {
+        $steamIn = if ($via -eq 'unquoted') { $spaced } else { '' }
+        Invoke-Fixture $directory "--report first-$via.txt --restart-via $via --restart-report restarted-$via.txt --child-report browser-$via.txt --child-hold-ms 200" $true 0 $steamIn
+        $replacement = Get-Content -LiteralPath (Join-Path $directory "restarted-$via.txt") -Raw
+        $browser = Get-Content -LiteralPath (Join-Path $directory "browser-$via.txt") -Raw
+        Assert-True ($replacement -match '(?m)^steamPid=0\r?$') "Replacement Steam was not hooked (restart via $via)"
+        Assert-True ($browser -match 'htmlcache\.MultiSeat_') "Replacement browser cache was not isolated (restart via $via)"
+    }
+    $restartLogText = [IO.File]::ReadAllText($restartLog)
+    $restartLogNew = $restartLogText.Substring([Math]::Min($restartLogBefore, $restartLogText.Length))
+    $isolatedRestarts = ([regex]::Matches($restartLogNew, 'Steam restart isolated')).Count
+    Assert-True ($isolatedRestarts -ge 4) "The hook logged $isolatedRestarts isolated restarts, expected one per way of restarting (4)"
     $supervisor = $null
     try {
         $args = '--steam "' + (Join-Path $directory 'steam.exe') + '" -- --restart-report live-restarted.txt --child-report live-browser.txt --child-hold-ms 30000'

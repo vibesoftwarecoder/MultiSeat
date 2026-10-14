@@ -1,4 +1,5 @@
 #include "Inject.h"
+#include "Log.h"
 #include <sstream>
 
 using namespace steam_isolation;
@@ -7,55 +8,22 @@ using namespace steam_isolation;
 // appears in the seat when the service starts it. A failure therefore cannot depend on a console
 // being there, and every message goes to four places:
 //   - a log file in the seat user's profile (always; this is where to look after the fact),
-//   - the debugger,
+//     and the debugger, both through AppendLog in Log.h,
 //   - stderr, when the caller redirected it (the smoke tests do),
 //   - the parent's console, when it was started from a terminal.
 static void Report(const std::wstring& message) {
     std::wstring text = message;
     while (!text.empty() && (text.back() == L'\n' || text.back() == L'\r')) text.pop_back();
-    OutputDebugStringW((L"MultiSeat.SteamLauncher: " + text + L"\n").c_str());
-
-    SYSTEMTIME now{}; GetLocalTime(&now);
-    wchar_t stamp[40];
-    swprintf_s(stamp, L"%04u-%02u-%02u %02u:%02u:%02u ", now.wYear, now.wMonth, now.wDay,
-               now.wHour, now.wMinute, now.wSecond);
-    const std::wstring line = stamp + text + L"\r\n";
-    const int bytes = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()),
-                                          nullptr, 0, nullptr, nullptr);
-    std::string utf8(bytes > 0 ? bytes : 0, '\0');
-    if (bytes > 0) WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()),
-                                       utf8.data(), bytes, nullptr, nullptr);
-
-    wchar_t base[MAX_PATH]{};
-    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
-    if (length && length < MAX_PATH && bytes > 0) {
-        std::wstring directory = std::wstring(base, length) + L"\\MultiSeat";
-        CreateDirectoryW(directory.c_str(), nullptr);
-        directory += L"\\SteamIsolation";
-        CreateDirectoryW(directory.c_str(), nullptr);
-        Handle log(CreateFileW((directory + L"\\launcher.log").c_str(), FILE_APPEND_DATA | FILE_GENERIC_WRITE,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
-                               FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (log.value != INVALID_HANDLE_VALUE) {
-            // Keep the file small: start over once it passes 256 KB rather than growing for ever.
-            LARGE_INTEGER size{};
-            if (GetFileSizeEx(log.value, &size) && size.QuadPart > 256 * 1024) {
-                SetFilePointer(log.value, 0, nullptr, FILE_BEGIN);
-                SetEndOfFile(log.value);
-            }
-            SetFilePointer(log.value, 0, nullptr, FILE_END);
-            DWORD written = 0;
-            WriteFile(log.value, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
-        }
-    }
+    AppendLog(text);  // the log file and the debugger; see Log.h
 
     const std::wstring consoleText = text + L"\r\n";
+    const std::string utf8 = Utf8(consoleText);
     HANDLE error = GetStdHandle(STD_ERROR_HANDLE);
     if (error && error != INVALID_HANDLE_VALUE) {
         DWORD mode = 0, written = 0;
         if (GetConsoleMode(error, &mode))
             WriteConsoleW(error, consoleText.c_str(), static_cast<DWORD>(consoleText.size()), &written, nullptr);
-        else if (bytes > 0)
+        else if (!utf8.empty())
             WriteFile(error, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
     } else if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         Handle console(CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr));

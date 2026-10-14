@@ -23,10 +23,57 @@ inline std::wstring Quote(const std::wstring& value) {
     }
     result.append(slashes * 2, L'\\'); return result + L"\"";
 }
-inline std::wstring RewriteCommand(const std::wstring& raw, const std::wstring& name) {
-    int count = 0; LPWSTR* parsed = CommandLineToArgvW(raw.c_str(), &count);
+inline bool RegularFileExists(const std::wstring& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+using FileExists = bool (*)(const std::wstring&);
+struct ImageSplit { std::wstring image, rest; };
+// Where the program name ends in a command line, the way CreateProcess finds it when it is given
+// no application name. A quoted first token ends at its closing quote. An unquoted one may contain
+// spaces ("C:\Program Files (x86)\Steam\steam.exe -silent"): CreateProcess tries the text up to
+// each space in turn until a file exists. CommandLineToArgvW does not, and reads that example as
+// "C:\Program", which is not Steam, so a restart written that way was neither rewritten nor given
+// the hook. Only the two programs this component acts on are searched for; anything else comes
+// back as its first word, which is all the caller needs to know it is not one of them.
+//
+// The first word is taken on its name alone: "steam.exe -silent" is found through the search path,
+// so it need not exist where we stand. A longer candidate must exist on disk, so that a folder
+// that merely contains a space and the word steam.exe is not mistaken for the program.
+inline ImageSplit SplitImage(const std::wstring& command, FileExists exists = RegularFileExists) {
+    auto blank = [](wchar_t c) { return c == L' ' || c == L'\t'; };
+    size_t start = 0;
+    while (start < command.size() && blank(command[start])) ++start;
+    if (start == command.size()) return {};
+    if (command[start] == L'"') {
+        const size_t close = command.find(L'"', start + 1);
+        if (close == std::wstring::npos) return {command.substr(start + 1), {}};
+        return {command.substr(start + 1, close - start - 1), command.substr(close + 1)};
+    }
+    size_t firstEnd = start;
+    while (firstEnd < command.size() && !blank(command[firstEnd])) ++firstEnd;
+    for (size_t end = firstEnd;;) {
+        const std::wstring candidate = command.substr(start, end - start);
+        if ((SteamImage(candidate) || BrowserImage(candidate)) && (end == firstEnd || exists(candidate)))
+            return {candidate, command.substr(end)};
+        size_t next = end;
+        while (next < command.size() && blank(command[next])) ++next;
+        if (next >= command.size()) break;
+        while (next < command.size() && !blank(command[next])) ++next;
+        end = next;
+    }
+    return {command.substr(start, firstEnd - start), command.substr(firstEnd)};
+}
+inline std::wstring RewriteCommand(const std::wstring& raw, const std::wstring& name,
+                                   FileExists exists = RegularFileExists) {
+    const ImageSplit split = SplitImage(raw, exists);
+    if (split.image.empty()) return raw;
+    // CommandLineToArgvW reads its first token by special rules, so give it a placeholder and
+    // take the arguments from what follows; the real program name comes from SplitImage.
+    int count = 0; LPWSTR* parsed = CommandLineToArgvW((L"x" + split.rest).c_str(), &count);
     if (!parsed || count == 0) { if (parsed) LocalFree(parsed); return raw; }
     std::vector<std::wstring> args(parsed, parsed + count); LocalFree(parsed);
+    args[0] = split.image;
     if (!SteamImage(args[0]) && !BrowserImage(args[0])) return raw;
     std::vector<std::wstring> output{args[0]}; bool changed = false;
     for (size_t i = 1; i < args.size(); ++i) {

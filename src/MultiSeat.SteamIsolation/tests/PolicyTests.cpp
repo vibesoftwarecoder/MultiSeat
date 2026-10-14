@@ -29,6 +29,38 @@ int main() {
         Expect(RewriteCommand(L"steamwebhelper.exe -cachedir=C:\\myhtmlcache", key) == L"steamwebhelper.exe -cachedir=C:\\myhtmlcache", "Substring changed");
         after = Args(RewriteCommand(L"steam.exe https://example.test/htmlcache --label=cef_log", key));
         Expect(after[1] == L"https://example.test/htmlcache" && after[2] == L"--label=cef_log", "URL or label changed");
+        // An unquoted path that contains spaces. CommandLineToArgvW reads its first word as
+        // "C:\Program", so before SplitImage such a command was neither rewritten nor isolated.
+        const std::wstring spaced = L"C:\\Program Files (x86)\\Steam\\steam.exe";
+        auto spacedExists = [](const std::wstring& path) { return path == L"C:\\Program Files (x86)\\Steam\\steam.exe"; };
+        auto neverExists = [](const std::wstring&) { return false; };
+        const std::wstring unquoted = spaced + L" -silent \"two words\"";
+        auto rewritten = Args(RewriteCommand(unquoted, key, spacedExists));
+        Expect(rewritten.size() == 5, "Unquoted spaced path: argument count wrong");
+        Expect(rewritten[0] == spaced && rewritten[1] == L"-silent" && rewritten[2] == L"two words", "Unquoted spaced path: arguments changed");
+        Expect(rewritten[3] == L"-master_ipc_name_override" && rewritten[4] == key, "Unquoted spaced path: IPC option missing");
+        Expect(RewriteCommand(unquoted, key, neverExists) == unquoted, "A folder that does not exist was taken for Steam");
+        const std::wstring spacedBrowser = L"C:\\Program Files (x86)\\Steam\\bin\\cef\\steamwebhelper.exe";
+        auto browserExists = [](const std::wstring& path) { return path == L"C:\\Program Files (x86)\\Steam\\bin\\cef\\steamwebhelper.exe"; };
+        auto browserArgs = Args(RewriteCommand(spacedBrowser + L" -cachedir=C:\\cache\\htmlcache", key, browserExists));
+        Expect(browserArgs[0] == spacedBrowser && browserArgs[1] == L"-cachedir=C:\\cache\\htmlcache." + key, "Unquoted spaced browser path not isolated");
+        Expect(RewriteCommand(L"C:\\Tools\\runner.exe " + spaced, key, spacedExists) == L"C:\\Tools\\runner.exe " + spaced,
+               "A program that merely has Steam in its arguments was taken for Steam");
+        // The first word is taken on its name alone: "steam.exe -silent" is found through the search path.
+        Expect(Args(RewriteCommand(L"steam.exe -silent", key, neverExists)).size() == 4, "Bare steam.exe needs no file on disk");
+
+        auto split = SplitImage(L"  \"C:\\Program Files\\x\\steam.exe\" -a -b", neverExists);
+        Expect(split.image == L"C:\\Program Files\\x\\steam.exe" && split.rest == L" -a -b", "Quoted split wrong");
+        split = SplitImage(L"steam.exe -a", neverExists);
+        Expect(split.image == L"steam.exe" && split.rest == L" -a", "First-word split wrong");
+        split = SplitImage(spaced + L" -a", spacedExists);
+        Expect(split.image == spaced && split.rest == L" -a", "Spaced split wrong");
+        split = SplitImage(L"other.exe -a", neverExists);
+        Expect(split.image == L"other.exe" && split.rest == L" -a", "Other programs come back as their first word");
+        Expect(SplitImage(L"   ", neverExists).image.empty() && SplitImage(L"", neverExists).image.empty(), "Blank command not empty");
+        split = SplitImage(L"\"C:\\unclosed\\steam.exe -a", neverExists);
+        Expect(split.image == L"C:\\unclosed\\steam.exe -a" && split.rest.empty(), "Unclosed quote handled wrong");
+
         const wchar_t environment[] = L"=C:=C:\\work\0HOME=C:\\profile\0StEaM_MaStEr_IpC_NaMe_OvErRiDe=old\0TEST=ok\0";
         auto block = RewriteEnvironment(environment, sizeof(environment) / sizeof(wchar_t), key);
         Expect(!block.empty() && block.back() == 0 && block[block.size() - 2] == 0, "Environment terminator missing");
