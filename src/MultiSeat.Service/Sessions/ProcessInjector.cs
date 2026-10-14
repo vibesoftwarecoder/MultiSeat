@@ -134,10 +134,7 @@ public sealed class ProcessInjector
                 wShowWindow = Kernel32.SW_SHOW  // games should be visible
             };
 
-            var creationFlags =
-                Kernel32.CREATE_UNICODE_ENVIRONMENT |
-                Kernel32.CREATE_NEW_CONSOLE |
-                Kernel32.NORMAL_PRIORITY_CLASS;
+            var creationFlags = CreationFlagsFor(launchPlan.Supervised);
 
             // Step 4: Launch the process
             if (!AdvApi.CreateProcessAsUserW(
@@ -199,6 +196,18 @@ public sealed class ProcessInjector
                 UserEnv.DestroyEnvironmentBlock(envBlock);
         }
     }
+
+    /// <summary>
+    /// Process creation flags for a launch in a seat. An ordinary launch gets a new console, as it
+    /// always did. A supervised Steam launch never does: it starts the isolation launcher, which
+    /// has no console of its own, and a console created for it anyway would be one more window
+    /// in the seat that nobody asked for. The helper's own children are Steam, which is a
+    /// windowed program.
+    /// </summary>
+    internal static uint CreationFlagsFor(bool supervised) =>
+        Kernel32.CREATE_UNICODE_ENVIRONMENT |
+        (supervised ? Kernel32.CREATE_NO_WINDOW : Kernel32.CREATE_NEW_CONSOLE) |
+        Kernel32.NORMAL_PRIORITY_CLASS;
 
     /// <summary>
     /// Launch Apollo streaming server inside a target session.

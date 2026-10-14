@@ -1,7 +1,78 @@
 #include "Inject.h"
-#include <iostream>
+#include <sstream>
 
 using namespace steam_isolation;
+
+// This launcher is a Windows-subsystem program: it never has a console of its own, so no window
+// appears in the seat when the service starts it. A failure therefore cannot depend on a console
+// being there, and every message goes to four places:
+//   - a log file in the seat user's profile (always; this is where to look after the fact),
+//   - the debugger,
+//   - stderr, when the caller redirected it (the smoke tests do),
+//   - the parent's console, when it was started from a terminal.
+static void Report(const std::wstring& message) {
+    std::wstring text = message;
+    while (!text.empty() && (text.back() == L'\n' || text.back() == L'\r')) text.pop_back();
+    OutputDebugStringW((L"MultiSeat.SteamLauncher: " + text + L"\n").c_str());
+
+    SYSTEMTIME now{}; GetLocalTime(&now);
+    wchar_t stamp[40];
+    swprintf_s(stamp, L"%04u-%02u-%02u %02u:%02u:%02u ", now.wYear, now.wMonth, now.wDay,
+               now.wHour, now.wMinute, now.wSecond);
+    const std::wstring line = stamp + text + L"\r\n";
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()),
+                                          nullptr, 0, nullptr, nullptr);
+    std::string utf8(bytes > 0 ? bytes : 0, '\0');
+    if (bytes > 0) WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()),
+                                       utf8.data(), bytes, nullptr, nullptr);
+
+    wchar_t base[MAX_PATH]{};
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+    if (length && length < MAX_PATH && bytes > 0) {
+        std::wstring directory = std::wstring(base, length) + L"\\MultiSeat";
+        CreateDirectoryW(directory.c_str(), nullptr);
+        directory += L"\\SteamIsolation";
+        CreateDirectoryW(directory.c_str(), nullptr);
+        Handle log(CreateFileW((directory + L"\\launcher.log").c_str(), FILE_APPEND_DATA | FILE_GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (log.value != INVALID_HANDLE_VALUE) {
+            // Keep the file small: start over once it passes 256 KB rather than growing for ever.
+            LARGE_INTEGER size{};
+            if (GetFileSizeEx(log.value, &size) && size.QuadPart > 256 * 1024) {
+                SetFilePointer(log.value, 0, nullptr, FILE_BEGIN);
+                SetEndOfFile(log.value);
+            }
+            SetFilePointer(log.value, 0, nullptr, FILE_END);
+            DWORD written = 0;
+            WriteFile(log.value, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+        }
+    }
+
+    const std::wstring consoleText = text + L"\r\n";
+    HANDLE error = GetStdHandle(STD_ERROR_HANDLE);
+    if (error && error != INVALID_HANDLE_VALUE) {
+        DWORD mode = 0, written = 0;
+        if (GetConsoleMode(error, &mode))
+            WriteConsoleW(error, consoleText.c_str(), static_cast<DWORD>(consoleText.size()), &written, nullptr);
+        else if (bytes > 0)
+            WriteFile(error, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    } else if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        Handle console(CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr));
+        DWORD written = 0;
+        if (console.value != INVALID_HANDLE_VALUE)
+            WriteConsoleW(console.value, consoleText.c_str(), static_cast<DWORD>(consoleText.size()), &written, nullptr);
+        FreeConsole();
+    }
+}
+// Stands in for the std::wcerr the launcher used when it was a console program: the message is
+// collected across the << chain and reported once, when the temporary goes away.
+class Log {
+    std::wostringstream text_;
+public:
+    template <class T> Log& operator<<(const T& value) { text_ << value; return *this; }
+    ~Log() { Report(text_.str()); }
+};
 
 // Decode only the launcher prefix. The application's argument tail remains byte-for-byte intact.
 static bool NextToken(const std::wstring& raw, size_t& cursor, std::wstring& token) {
@@ -35,28 +106,28 @@ static DWORD Run(const std::wstring& executable, std::wstring command, const std
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!job.value || !SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
-        std::wcerr << L"Cannot create isolation process supervisor: " << GetLastError() << L"\n"; return 1;
+        Log() << L"Cannot create isolation process supervisor: " << GetLastError() << L"\n"; return 1;
     }
     STARTUPINFOW startup{}; startup.cb = sizeof(startup);
     PROCESS_INFORMATION info{};
     if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED,
                         nullptr, workingDirectory.c_str(), &startup, &info)) {
-        std::wcerr << L"Cannot start Steam isolation process: " << GetLastError() << L"\n"; return 1;
+        Log() << L"Cannot start Steam isolation process: " << GetLastError() << L"\n"; return 1;
     }
     Handle process(info.hProcess), thread(info.hThread);
     auto stop = [&]() { TerminateProcess(process.value, 1); WaitForSingleObject(process.value, 5000); return DWORD{1}; };
     if (!AssignProcessToJobObject(job.value, process.value)) {
-        std::wcerr << L"Cannot supervise isolation process: " << GetLastError() << L"\n"; return stop();
+        Log() << L"Cannot supervise isolation process: " << GetLastError() << L"\n"; return stop();
     }
     std::wstring error;
     if (!hook.empty() && !Inject(process.value, hook, error)) {
-        std::wcerr << L"Steam isolation failed: " << error << L"\n"; return stop();
+        Log() << L"Steam isolation failed: " << error << L"\n"; return stop();
     }
     if (ResumeThread(thread.value) == static_cast<DWORD>(-1)) {
-        std::wcerr << L"Cannot resume isolated process: " << GetLastError() << L"\n"; return stop();
+        Log() << L"Cannot resume isolated process: " << GetLastError() << L"\n"; return stop();
     }
     if (readyEvent && !SetEvent(readyEvent)) {
-        std::wcerr << L"Cannot signal Steam isolation readiness: " << GetLastError() << L"\n"; return stop();
+        Log() << L"Cannot signal Steam isolation readiness: " << GetLastError() << L"\n"; return stop();
     }
     if (WaitForSingleObject(process.value, INFINITE) != WAIT_OBJECT_0) return stop();
     DWORD exitCode = 1; GetExitCodeProcess(process.value, &exitCode);
@@ -66,7 +137,7 @@ static DWORD Run(const std::wstring& executable, std::wstring command, const std
         JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
         if (!QueryInformationJobObject(job.value, JobObjectBasicAccountingInformation,
                                      &accounting, sizeof(accounting), nullptr)) {
-            std::wcerr << L"Cannot monitor isolation process tree: " << GetLastError() << L"\n"; return 1;
+            Log() << L"Cannot monitor isolation process tree: " << GetLastError() << L"\n"; return 1;
         }
         if (!accounting.ActiveProcesses) return exitCode;
         Sleep(250);
@@ -88,21 +159,21 @@ int wmain() {
         (steam.size() > 2 && steam[0] == L'\\' && steam[1] == L'\\');
     const auto basename = steam.substr(steam.find_last_of(L"\\/") + 1);
     if (!valid || !absolutePath || steam.find(L'"') != std::wstring::npos || _wcsicmp(basename.c_str(), L"steam.exe") != 0) {
-        std::wcerr << L"Usage: MultiSeat.SteamLauncher.exe --steam <absolute steam.exe> [--ready-event <name>] -- <Steam arguments>\n"; return 2;
+        Log() << L"Usage: MultiSeat.SteamLauncher.exe --steam <absolute steam.exe> [--ready-event <name>] -- <Steam arguments>\n"; return 2;
     }
     Handle readyEvent(readyEventName.empty() ? nullptr : OpenEventW(EVENT_MODIFY_STATE, FALSE, readyEventName.c_str()));
     if (!readyEventName.empty() && !readyEvent.value) {
-        std::wcerr << L"Cannot open Steam isolation readiness event: " << GetLastError() << L"\n"; return 2;
+        Log() << L"Cannot open Steam isolation readiness event: " << GetLastError() << L"\n"; return 2;
     }
     std::wstring directory = ExecutableDirectory();
     WORD machine = TargetMachine(steam);
     if (machine != IMAGE_FILE_MACHINE_I386 && machine != IMAGE_FILE_MACHINE_AMD64) {
-        std::wcerr << L"Steam executable is missing, invalid, or uses an unsupported architecture\n"; return 2;
+        Log() << L"Steam executable is missing, invalid, or uses an unsupported architecture\n"; return 2;
     }
     std::vector<wchar_t> currentDirectory(32768);
     DWORD cwdLength = GetCurrentDirectoryW(static_cast<DWORD>(currentDirectory.size()), currentDirectory.data());
     if (!cwdLength || cwdLength >= currentDirectory.size()) {
-        std::wcerr << L"Cannot resolve launch working directory\n"; return 2;
+        Log() << L"Cannot resolve launch working directory\n"; return 2;
     }
     std::wstring workingDirectory(currentDirectory.data(), cwdLength);
 #ifdef _WIN64
@@ -113,7 +184,7 @@ int wmain() {
     std::wstring hook = directory + L"\\MultiSeat.SteamHook.dll";
 #else
     if (machine != IMAGE_FILE_MACHINE_I386) {
-        std::wcerr << L"Use the 64-bit isolation launcher for 64-bit Steam\n"; return 2;
+        Log() << L"Use the 64-bit isolation launcher for 64-bit Steam\n"; return 2;
     }
     std::wstring hook = directory + L"\\MultiSeat.SteamHook32.dll";
 #endif

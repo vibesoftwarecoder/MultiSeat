@@ -6,6 +6,19 @@ $ErrorActionPreference = 'Stop'
 $source = [IO.Path]::GetFullPath($Artifacts)
 $runRoot = Join-Path ([IO.Path]::GetFullPath($TestRoot)) ([guid]::NewGuid().ToString('N'))
 function Assert-True($condition, [string]$message) { if (-not $condition) { throw $message } }
+# OptionalHeader.Subsystem sits at the same offset (68) in PE32 and PE32+ images; 2 = Windows GUI, 3 = console.
+function Get-PeSubsystem([string]$path) {
+    $bytes = [IO.File]::ReadAllBytes($path)
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    [int][BitConverter]::ToUInt16($bytes, $peOffset + 24 + 68)
+}
+# The service starts this launcher inside a seat; as a console program it opened a window there.
+foreach ($launcherName in @('MultiSeat.SteamLauncher.exe', 'MultiSeat.SteamLauncher32.exe')) {
+    $subsystem = Get-PeSubsystem (Join-Path $source $launcherName)
+    Assert-True ($subsystem -eq 2) "$launcherName is subsystem $subsystem, expected 2 (Windows GUI) so it opens no console window"
+}
+# Prove the probe can tell the two apart: the fixture is a console program.
+Assert-True ((Get-PeSubsystem (Join-Path $source 'SteamIsolationFixture.exe')) -eq 3) 'Subsystem probe did not read the console fixture as subsystem 3'
 function Invoke-Fixture([string]$directory, [string]$tail, [bool]$expectReady, [int]$expectExit) {
     $name = 'Global\MultiSeatSteamReady-' + [guid]::NewGuid().ToString('N')
     $ready = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $name)
@@ -69,6 +82,14 @@ $failureDirectory = Join-Path $runRoot 'missing-hook'
 New-Item -ItemType Directory -Force -Path $failureDirectory | Out-Null
 Copy-Item -LiteralPath (Join-Path $source 'MultiSeat.SteamLauncher.exe') -Destination $failureDirectory
 Copy-Item -LiteralPath (Join-Path $source 'SteamIsolationFixture.exe') -Destination (Join-Path $failureDirectory 'steam.exe')
+$launcherLog = Join-Path $env:LOCALAPPDATA 'MultiSeat\SteamIsolation\launcher.log'
+$logBefore = if (Test-Path -LiteralPath $launcherLog) { (Get-Item -LiteralPath $launcherLog).Length } else { 0 }
 Invoke-Fixture $failureDirectory '--report unexpected.txt' $false 1
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $failureDirectory 'unexpected.txt'))) 'Unisolated child ran after a hook failure'
+# With no console, a failure has to be findable afterwards: in the log file, and on stderr when it was redirected.
+Assert-True (Test-Path -LiteralPath $launcherLog) "The launcher wrote no log file at $launcherLog"
+$logText = [IO.File]::ReadAllText($launcherLog)
+Assert-True ($logText.Substring([Math]::Min($logBefore, $logText.Length)) -match 'Steam isolation failed') 'The hook failure was not written to the launcher log'
+$stderrText = Get-Content -LiteralPath (Join-Path $failureDirectory 'stderr.txt') -Raw
+Assert-True ($stderrText -match 'Steam isolation failed') 'The hook failure was not written to the redirected stderr'
 Write-Host "Native launcher smoke tests passed. Fixture reports: $runRoot"

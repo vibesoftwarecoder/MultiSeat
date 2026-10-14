@@ -1,4 +1,6 @@
 using MultiSeat.Service.Configuration;
+using MultiSeat.Service.Interop;
+using MultiSeat.Service.Sessions;
 using Xunit;
 
 namespace MultiSeat.Tests.Sessions;
@@ -43,5 +45,28 @@ public sealed class SteamIsolationOptionsTests
         var shipped = document.RootElement.GetProperty("MultiSeat")
             .GetProperty("SteamIsolationReadyTimeoutSeconds").GetInt32();
         Assert.Equal(new MultiSeatOptions().SteamIsolationReadyTimeoutSeconds, shipped);
+    }
+
+    // The supervised launcher must not get a console window in the seat; every other launch
+    // keeps the new console it always had.
+    [Fact]
+    public void SupervisedLaunchGetsNoConsoleWindow()
+    {
+        var flags = ProcessInjector.CreationFlagsFor(supervised: true);
+        Assert.True((flags & Kernel32.CREATE_NO_WINDOW) != 0);
+        Assert.True((flags & Kernel32.CREATE_NEW_CONSOLE) == 0);
+        Assert.True((flags & Kernel32.CREATE_UNICODE_ENVIRONMENT) != 0);
+        Assert.True((flags & Kernel32.NORMAL_PRIORITY_CLASS) != 0);
+    }
+
+    [Fact]
+    public void OrdinaryLaunchKeepsItsNewConsole()
+    {
+        var flags = ProcessInjector.CreationFlagsFor(supervised: false);
+        Assert.True((flags & Kernel32.CREATE_NEW_CONSOLE) != 0);
+        Assert.True((flags & Kernel32.CREATE_NO_WINDOW) == 0);
+        Assert.Equal(
+            Kernel32.CREATE_UNICODE_ENVIRONMENT | Kernel32.CREATE_NEW_CONSOLE | Kernel32.NORMAL_PRIORITY_CLASS,
+            flags);
     }
 }

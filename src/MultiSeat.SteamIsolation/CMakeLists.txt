@@ -10,7 +10,13 @@ set(BUILD_SHARED_LIBS OFF)
 add_subdirectory(third_party/minhook)
 add_library(MultiSeatSteamHook SHARED Hook.cpp)
 target_link_libraries(MultiSeatSteamHook PRIVATE minhook advapi32 shell32 user32)
-add_executable(MultiSeatSteamLauncher Launcher.cpp)
+# A Windows-subsystem program, so the service starting it never opens a console window in the
+# seat. It keeps the wmain entry point, which the linker does not look for under /SUBSYSTEM:WINDOWS
+# unless told to. Launcher.cpp reports failures to a log file because there is no console.
+add_executable(MultiSeatSteamLauncher WIN32 Launcher.cpp)
+if(MSVC)
+    target_link_options(MultiSeatSteamLauncher PRIVATE /ENTRY:wmainCRTStartup)
+endif()
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     set_target_properties(MultiSeatSteamHook PROPERTIES OUTPUT_NAME "MultiSeat.SteamHook" PREFIX "")
     set_target_properties(MultiSeatSteamLauncher PROPERTIES OUTPUT_NAME "MultiSeat.SteamLauncher")
