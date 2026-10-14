@@ -21,10 +21,13 @@ internal sealed record SteamIsolationLaunchPlan(string ExecutablePath, string? A
     internal static SteamIsolationLaunchPlan Create(string executablePath, string? arguments,
         MultiSeatOptions options)
     {
-        if (!options.SteamIsolationEnabled ||
-            !string.Equals(Path.GetFileName(executablePath), "steam.exe", StringComparison.OrdinalIgnoreCase))
+        if (!options.SteamIsolationEnabled || !TryNormalizeSteamPath(executablePath, out var steamPath))
             return new(executablePath, arguments, false);
 
+        // From here on the normalized path is the only one used: it is what the launcher is told
+        // to start and what is checked on disk, so the name Windows would resolve is the name
+        // that gets wrapped.
+        executablePath = steamPath;
         RequireFile(executablePath, "Steam executable");
         var launcher = options.SteamIsolationLauncherPath;
         RequireFile(launcher, "Steam isolation launcher");
@@ -48,6 +51,44 @@ internal sealed record SteamIsolationLaunchPlan(string ExecutablePath, string? A
         // Steam arguments are already a Windows command-line tail. Do not split/requote them.
         return new(launcher, BuildArguments(executablePath, arguments, null), true)
         { SteamPath = executablePath, SteamArguments = arguments };
+    }
+
+    /// <summary>
+    /// True when Windows would start <c>steam.exe</c> for this path, with the path rewritten to the
+    /// name it resolves to. Comparing the raw file name is not enough: Windows drops trailing dots
+    /// and spaces from the last path segment, and a <c>:stream</c> suffix names a stream of the same
+    /// file (only the default stream; a named one is not Steam), so <c>steam.exe.</c>,
+    /// <c>steam.exe </c> and <c>steam.exe::$DATA</c> all start Steam and
+    /// would otherwise be launched unwrapped, with no error. Only the last segment is touched;
+    /// the directory part and the name's own casing are kept.
+    /// </summary>
+    internal static bool TryNormalizeSteamPath(string path, out string normalized)
+    {
+        normalized = path;
+        if (string.IsNullOrWhiteSpace(path)) return false;
+
+        var prefixLength = path.LastIndexOfAny(['\\', '/']) + 1;
+        // A drive-relative path ("C:steam.exe") has no separator, but its drive prefix is not
+        // part of the name and must not be mistaken for a stream suffix.
+        if (prefixLength == 0 && path.Length >= 2 && path[1] == ':') prefixLength = 2;
+
+        var name = path[prefixLength..];
+        var colon = name.IndexOf(':');
+        if (colon >= 0)
+        {
+            // Only the default data stream is the file itself. A named stream is something else.
+            var stream = name[(colon + 1)..];
+            if (stream.Length != 0 &&
+                !stream.Equals(":$DATA", StringComparison.OrdinalIgnoreCase) &&
+                !stream.Equals("$DATA", StringComparison.OrdinalIgnoreCase))
+                return false;
+            name = name[..colon];
+        }
+        name = name.TrimEnd('.', ' ');
+
+        if (!string.Equals(name, "steam.exe", StringComparison.OrdinalIgnoreCase)) return false;
+        normalized = path[..prefixLength] + name;
+        return true;
     }
 
     private static string BuildArguments(string steam, string? arguments, string? readyEvent)

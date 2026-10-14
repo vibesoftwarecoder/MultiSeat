@@ -39,6 +39,79 @@ public sealed class SteamIsolationLaunchPlanTests : IDisposable
     public void EnabledRefusesRelativeSteamPath(string executable) =>
         Assert.Throws<InvalidOperationException>(() => SteamIsolationLaunchPlan.Create(executable, null, Enabled()));
 
+    // Windows drops trailing dots and spaces from the last path segment and reads ":stream" as a
+    // stream of the same file, so each of these starts the real steam.exe. They must be wrapped
+    // like the plain name, and the launcher must be told the name Windows resolves to.
+    [Theory]
+    [InlineData("steam.exe.", "steam.exe")]
+    [InlineData("steam.exe ", "steam.exe")]
+    [InlineData("steam.exe. .", "steam.exe")]
+    [InlineData("STEAM.EXE...", "STEAM.EXE")]
+    [InlineData("steam.exe::$DATA", "steam.exe")]
+    public void WindowsEquivalentNamesOfSteamAreStillWrapped(string given, string resolved)
+    {
+        Fixture("steam.exe", Machine.Amd64);
+        var options = CompleteComponents(Machine.Amd64);
+        var plan = SteamIsolationLaunchPlan.Create(Path.Combine(_directory, given), "-bigpicture", options);
+        Assert.True(plan.Supervised);
+        Assert.Equal(options.SteamIsolationLauncherPath, plan.ExecutablePath);
+        Assert.Equal($"--steam \"{Path.Combine(_directory, resolved)}\" -- -bigpicture", plan.Arguments);
+    }
+
+    [Fact]
+    public void ForwardSlashPathsAreRecognizedToo()
+    {
+        Fixture("steam.exe", Machine.Amd64);
+        var plan = SteamIsolationLaunchPlan.Create(
+            _directory.Replace('\\', '/') + "/steam.exe.", null, CompleteComponents(Machine.Amd64));
+        Assert.True(plan.Supervised);
+    }
+
+    // A name that only Windows would normalize into steam.exe must not slip past as "not Steam"
+    // when the path is unusable: it is refused like any other bad Steam path.
+    [Theory]
+    [InlineData("steam.exe.")]
+    [InlineData(".\\steam.exe ")]
+    [InlineData("C:steam.exe.")]
+    public void EnabledRefusesRelativeSteamPathWithTrailingDotsOrSpaces(string executable) =>
+        Assert.Throws<InvalidOperationException>(() => SteamIsolationLaunchPlan.Create(executable, null, Enabled()));
+
+    [Theory]
+    [InlineData("steam.exe.bak")]
+    [InlineData("steam.exe.exe")]
+    [InlineData("steam .exe")]
+    [InlineData("xsteam.exe.")]
+    [InlineData("steamwebhelper.exe.")]
+    [InlineData("steam.exe:alt.exe")]
+    public void LookalikeNamesAreNotWrapped(string name)
+    {
+        var executable = Path.Combine(_directory, name);
+        var plan = SteamIsolationLaunchPlan.Create(executable, "--unchanged", Enabled());
+        Assert.Equal(executable, plan.ExecutablePath);
+        Assert.Equal("--unchanged", plan.Arguments);
+        Assert.False(plan.Supervised);
+    }
+
+    [Theory]
+    [InlineData(@"C:\Steam\steam.exe", @"C:\Steam\steam.exe")]
+    [InlineData(@"C:\Steam\Steam.EXE. ", @"C:\Steam\Steam.EXE")]
+    [InlineData(@"C:\Program Files (x86)\Steam\steam.exe::$DATA", @"C:\Program Files (x86)\Steam\steam.exe")]
+    [InlineData(@"steam.exe", @"steam.exe")]
+    [InlineData(@"C:steam.exe.", @"C:steam.exe")]
+    public void NormalizationOnlyRewritesTheLastSegment(string given, string expected)
+    {
+        Assert.True(SteamIsolationLaunchPlan.TryNormalizeSteamPath(given, out var normalized));
+        Assert.Equal(expected, normalized);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(@"C:\Steam.exe\game.exe")]
+    [InlineData(@"C:\Steam\steam.exe\readme.txt")]
+    public void NormalizationRejectsEverythingThatIsNotASteamExecutable(string given) =>
+        Assert.False(SteamIsolationLaunchPlan.TryNormalizeSteamPath(given, out _));
+
     [Theory]
     [InlineData(Machine.Amd64)]
     [InlineData(Machine.I386)]
