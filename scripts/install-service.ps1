@@ -20,7 +20,14 @@ param(
     # The asset is self-contained, so this path needs NO .NET SDK, NO .NET runtime and NO
     # Node on the target - which is the entire point of issue #32. Everything after the
     # deploy step (RDP setup, certificates, service registration) is identical either way.
-    [string]$FromZip
+    [string]$FromZip,
+
+    # Source build only: also build the native Steam isolation helpers (Visual Studio 2022 C++
+    # tools and CMake are required) and install them into SteamIsolation\ beside the service.
+    # Off by default, like the feature itself. They are built fresh on every run that asks for
+    # them and never taken from an earlier build's output, so what gets installed is what the
+    # checkout contains. A release asset already carries them, so -FromZip does not need this.
+    [switch]$BuildSteamIsolation
 )
 
 $ErrorActionPreference = "Stop"
@@ -595,6 +602,21 @@ try {
         } else {
             Write-Host "  Note: MultiSeatInputHook.dll not built -- keyboard/mouse isolation stays unavailable." -ForegroundColor DarkGray
             Write-Host "        This is expected and safe: the feature is off by default and currently inert." -ForegroundColor DarkGray
+        }
+
+        # -- Build the Steam isolation helpers into the stage (only when asked) ----
+        # A failure here is fatal on purpose: the switch is an explicit request, and a quiet
+        # skip would leave a host with SteamIsolationEnabled refusing every Steam launch.
+        if ($BuildSteamIsolation) {
+            $steamSrc = Join-Path $PSScriptRoot "..\src\MultiSeat.SteamIsolation"
+            $steamOut = Join-Path $stage "SteamIsolation"
+            Write-Step "Building the Steam isolation helpers (x64 and x86)..."
+            & (Join-Path $steamSrc "build.ps1") -OutputDirectory $steamOut
+            $steamMissing = @(Get-MissingSteamIsolationFiles -Dir $steamOut)
+            if ($steamMissing.Count -gt 0) {
+                throw "The Steam isolation build did not produce $($steamMissing -join ', ')."
+            }
+            Write-Step "Steam isolation helpers staged in $steamOut"
         }
 
         # -- Build the dashboard into the stage's wwwroot -------------------------

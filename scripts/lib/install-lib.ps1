@@ -32,6 +32,21 @@ function Get-MissingPayloadFiles {
     return @(Get-PayloadRequiredFiles | Where-Object { -not (Test-Path (Join-Path $Dir $_)) })
 }
 
+# The native Steam isolation helpers (issue/PR #110). They live in SteamIsolation\ beside the
+# service, where MultiSeat:SteamIsolationLauncherPath points by default. They are all or nothing:
+# the service picks the launcher and the hook by the architecture of the Steam it is about to
+# start, so a folder holding only some of them works for one Steam and fails for the other.
+function Get-SteamIsolationFiles {
+    return @('MultiSeat.SteamLauncher.exe', 'MultiSeat.SteamLauncher32.exe',
+             'MultiSeat.SteamHook.dll', 'MultiSeat.SteamHook32.dll')
+}
+
+function Get-MissingSteamIsolationFiles {
+    param([Parameter(Mandatory = $true)][string]$Dir)
+    return @(Get-SteamIsolationFiles | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $Dir $_) -PathType Leaf) })
+}
+
 function Read-RuntimeConfig {
     # Returns the runtimeOptions object, or throws a message that names the file.
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -331,6 +346,15 @@ function Install-Payload {
     if (-not $check.Ok) {
         throw "The staged payload is inconsistent -- nothing was installed. $($check.Problems -join ' ')"
     }
+    # A payload that carries SteamIsolation\ must carry all of it. Half a set would replace a
+    # working folder with one that fails for one Steam architecture, and say nothing.
+    $stagedSteam = Join-Path $Stage 'SteamIsolation'
+    if (Test-Path -LiteralPath $stagedSteam) {
+        $lacking = @(Get-MissingSteamIsolationFiles -Dir $stagedSteam)
+        if ($lacking.Count -gt 0) {
+            throw "The staged SteamIsolation folder is missing $($lacking -join ', ') -- nothing was installed."
+        }
+    }
 
     # 2. Preserve host-local configuration BEFORE the wipe. See issue #45: this wipe once
     #    deleted both files with no backup. Preserve the FILES, byte for byte, never their text:
@@ -378,6 +402,18 @@ function Install-Payload {
         # The asset carries scripts\ , prerequisites\ and README.md so it can install itself
         # without a clone. They are NOT part of the deployed service.
         Copy-DirectoryContents -From $Stage -To $InstallDir -SkipNames $SkipNames
+
+        # SteamIsolation\ is part of the install, not host configuration, so the wipe above
+        # removed it. A payload that ships its own replaces the old copy. One that does not (an
+        # older release, a source build run without -BuildSteamIsolation) must not delete a copy
+        # that was placed by hand: with MultiSeat:SteamIsolationEnabled on, every Steam launch
+        # would then be refused for want of the helper.
+        $keptSteam = if ($folderBackup) { Join-Path $folderBackup 'SteamIsolation' } else { $null }
+        if (-not (Test-Path -LiteralPath $stagedSteam) -and $keptSteam -and (Test-Path -LiteralPath $keptSteam)) {
+            Copy-Item -LiteralPath $keptSteam -Destination (Join-Path $InstallDir 'SteamIsolation') `
+                      -Recurse -Force -ErrorAction Stop
+            Write-Host "  Kept the existing SteamIsolation folder (this payload does not ship one)" -ForegroundColor DarkGray
+        }
 
         # Put host configuration back over the shipped defaults. An upgrade must not silently
         # change how this host is configured.

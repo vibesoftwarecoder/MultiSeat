@@ -30,8 +30,70 @@ permissions:
   contents: write         # required to create the release
 
 jobs:
+  # The native Steam isolation helpers ship in the asset, under SteamIsolation\, so an upgrade
+  # replaces them together with the service. Without that, the installer's wipe of the install
+  # folder deleted any copy a host had placed there by hand, and with the feature switched on
+  # every Steam launch was then refused.
+  #
+  # Its own job, on windows-2022, because build.ps1 asks for Visual Studio 2022 and
+  # windows-latest is free to move to a newer Visual Studio. The same smoke tests that run on
+  # every push to src/MultiSeat.SteamIsolation run again here, so a shipped binary has passed
+  # them, rather than relying on the last push having been green.
+  steam-isolation:
+    name: Build Steam isolation helpers (x64 and x86)
+    runs-on: windows-2022
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build launchers, hooks and the safe fixtures
+        shell: pwsh
+        run: ./src/MultiSeat.SteamIsolation/build.ps1 -BuildFixture
+
+      - name: Check native isolation policies
+        shell: pwsh
+        run: |
+          foreach ($architecture in @('x64', 'Win32')) {
+            ctest --test-dir "src/MultiSeat.SteamIsolation/build-$architecture" -C Release --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "Policy checks failed for $architecture" }
+          }
+
+      - name: Check launch, restart, readiness, and cleanup
+        shell: pwsh
+        run: ./src/MultiSeat.SteamIsolation/tests/LauncherSmoke.ps1
+
+      - name: Check direct game environment and working directory
+        shell: pwsh
+        run: ./src/MultiSeat.SteamIsolation/tests/GameLauncherSmoke.ps1
+
+      - name: Require all four helper binaries
+        shell: pwsh
+        # Half a set is worse than none: the service picks the launcher and hook by the
+        # architecture of the Steam it starts, so a missing one fails for one Steam only.
+        run: |
+          $dir = 'src/MultiSeat.SteamIsolation/artifacts'
+          $names = @('MultiSeat.SteamLauncher.exe', 'MultiSeat.SteamLauncher32.exe',
+                     'MultiSeat.SteamHook.dll', 'MultiSeat.SteamHook32.dll')
+          $missing = @($names | Where-Object { -not (Test-Path (Join-Path $dir $_)) })
+          if ($missing.Count) { throw "build.ps1 did not produce: $($missing -join ', ')" }
+          $names | ForEach-Object { Get-Item (Join-Path $dir $_) | Select-Object Name, Length | Format-Table -HideTableHeaders }
+
+      - name: Upload the helper binaries for the release job
+        uses: actions/upload-artifact@v6
+        with:
+          name: steam-isolation-binaries
+          # Listed one by one so the test fixtures built beside them never reach the asset.
+          path: |
+            src/MultiSeat.SteamIsolation/artifacts/MultiSeat.SteamLauncher.exe
+            src/MultiSeat.SteamIsolation/artifacts/MultiSeat.SteamLauncher32.exe
+            src/MultiSeat.SteamIsolation/artifacts/MultiSeat.SteamHook.dll
+            src/MultiSeat.SteamIsolation/artifacts/MultiSeat.SteamHook32.dll
+          if-no-files-found: error
+
   release:
     name: Publish windows-x64 asset
+    needs: steam-isolation
     runs-on: windows-latest
 
     steps:
@@ -174,6 +236,12 @@ jobs:
           Copy-Item 'README.md' 'publish/MultiSeat/README.md' -Force
           Write-Host "staged scripts/, prerequisites/ and README.md into the asset"
 
+      - name: Download the Steam isolation helpers into the payload
+        uses: actions/download-artifact@v6
+        with:
+          name: steam-isolation-binaries
+          path: publish/MultiSeat/SteamIsolation
+
       - name: Verify the payload before zipping it
         shell: pwsh
         # A release that extracts to a broken tree is worse than no release, because it looks
@@ -190,6 +258,11 @@ jobs:
           # Self-contained means the runtime must be inside. If this is absent the zip would
           # silently require a .NET install, which is the entire thing this release fixes.
           if (-not (Test-Path "$root/hostfxr.dll"))           { $problems += "hostfxr.dll missing - build is NOT self-contained" }
+          # The installer replaces the whole install folder, so the helpers have to ride in the
+          # asset or an upgrade removes them. All four or nothing; see the steam-isolation job.
+          foreach ($n in @('MultiSeat.SteamLauncher.exe', 'MultiSeat.SteamLauncher32.exe', 'MultiSeat.SteamHook.dll', 'MultiSeat.SteamHook32.dll')) {
+            if (-not (Test-Path "$root/SteamIsolation/$n")) { $problems += "SteamIsolation/$n missing - an upgrade would remove the Steam isolation helpers" }
+          }
           if ($problems.Count) {
             $problems | ForEach-Object { Write-Host "::error::$_" }
             throw "payload verification failed"

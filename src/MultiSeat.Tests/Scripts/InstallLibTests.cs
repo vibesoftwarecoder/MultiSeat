@@ -656,6 +656,134 @@ public class InstallLibTests
         Assert.Equal(new[] { "20260103-000000", "20260104-000000", "20261009-120000" }, left);
     }
 
+    // -- Steam isolation helpers (PR #110) --------------------------------------------
+    //
+    // The installer wipes the install folder on every deploy. SteamIsolation\ holds native
+    // helpers the service needs when MultiSeat:SteamIsolationEnabled is on, so an upgrade has to
+    // either bring a new set with it or leave the old one alone. Deleting it silently is the bug.
+
+    private static readonly string[] SteamFiles =
+    {
+        "MultiSeat.SteamLauncher.exe", "MultiSeat.SteamLauncher32.exe",
+        "MultiSeat.SteamHook.dll", "MultiSeat.SteamHook32.dll",
+    };
+
+    private static void PutSteamIsolation(string root, string tag)
+    {
+        foreach (var f in SteamFiles) Put(root, "SteamIsolation/" + f, tag + ":" + f);
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Names_every_steam_isolation_file_a_folder_lacks(string engine)
+    {
+        using var t = new Temp();
+        var dir = t.Sub("steam");
+        Put(dir, "MultiSeat.SteamLauncher.exe", "x");
+        var j = J(Ps(engine, "$r = @(Get-MissingSteamIsolationFiles -Dir " + Q(dir) + ")"));
+        Assert.Equal(SteamFiles.Skip(1).OrderBy(x => x), Strings(j).OrderBy(x => x));
+
+        // A folder holding all four, and one that does not exist, are told apart.
+        var full = t.Sub("full");
+        foreach (var f in SteamFiles) Put(full, f, "x");
+        Assert.Empty(Strings(J(Ps(engine, "$r = @(Get-MissingSteamIsolationFiles -Dir " + Q(full) + ")"))));
+        Assert.Equal(SteamFiles.Length,
+            Strings(J(Ps(engine, "$r = @(Get-MissingSteamIsolationFiles -Dir " + Q(Path.Combine(t.Root, "nope")) + ")"))).Length);
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Keeps_an_existing_steam_isolation_folder_when_the_new_payload_ships_none(string engine)
+    {
+        using var t = new Temp();
+        var install = PopulatedSelfContainedInstall(t);
+        PutSteamIsolation(install, "old");
+        Put(install, "SteamIsolation/extra-note.txt", "placed by hand");
+        var stage = SelfContained(t.Sub("stage"), "new");
+
+        var res = Ps(engine, InstallCall(stage, install, t.Root) + "$r = 1");
+        Assert.Equal(0, res.ExitCode);
+        foreach (var f in SteamFiles)
+            Assert.Equal("old:" + f, File.ReadAllText(Path.Combine(install, "SteamIsolation", f)));
+        Assert.Equal("placed by hand", File.ReadAllText(Path.Combine(install, "SteamIsolation", "extra-note.txt")));
+        Assert.Contains("Kept the existing SteamIsolation folder", res.Stdout);
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void A_payload_that_ships_steam_isolation_replaces_the_old_copy(string engine)
+    {
+        using var t = new Temp();
+        var install = PopulatedSelfContainedInstall(t);
+        PutSteamIsolation(install, "old");
+        Put(install, "SteamIsolation/old-only.dll", "gone after the upgrade");
+        var stage = SelfContained(t.Sub("stage"), "new");
+        PutSteamIsolation(stage, "new");
+
+        var res = Ps(engine, InstallCall(stage, install, t.Root) + "$r = 1");
+        Assert.Equal(0, res.ExitCode);
+        foreach (var f in SteamFiles)
+            Assert.Equal("new:" + f, File.ReadAllText(Path.Combine(install, "SteamIsolation", f)));
+        Assert.False(File.Exists(Path.Combine(install, "SteamIsolation", "old-only.dll")));
+        Assert.DoesNotContain("Kept the existing SteamIsolation folder", res.Stdout);
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void A_payload_without_steam_isolation_does_not_invent_a_folder(string engine)
+    {
+        using var t = new Temp();
+        var install = PopulatedSelfContainedInstall(t);
+        var stage = SelfContained(t.Sub("stage"), "new");
+
+        Assert.Equal(0, Ps(engine, InstallCall(stage, install, t.Root) + "$r = 1").ExitCode);
+        Assert.False(Directory.Exists(Path.Combine(install, "SteamIsolation")));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void A_partial_steam_isolation_set_in_the_stage_is_refused_before_anything_is_touched(string engine)
+    {
+        using var t = new Temp();
+        var install = PopulatedSelfContainedInstall(t);
+        PutSteamIsolation(install, "old");
+        var before = Hashes(install);
+        var stage = SelfContained(t.Sub("stage"), "new");
+        PutSteamIsolation(stage, "new");
+        File.Delete(Path.Combine(stage, "SteamIsolation", "MultiSeat.SteamHook32.dll"));
+
+        var res = Ps(engine, InstallCall(stage, install, t.Root) + "$r = 'unreachable'");
+        Assert.NotEqual(0, res.ExitCode);
+        Assert.Contains("staged SteamIsolation folder is missing", res.Stdout + res.Stderr);
+        Assert.Contains("MultiSeat.SteamHook32.dll", res.Stdout + res.Stderr);
+        Assert.Equal(before, Hashes(install));
+        Assert.False(Directory.Exists(Path.Combine(t.Root, "install-backups")), "no backup should be made for a refused stage");
+    }
+
+    // -- Wiring: where the helpers come from -------------------------------------------
+
+    [Fact]
+    public void The_source_build_builds_the_helpers_only_when_asked_and_never_reuses_old_output()
+    {
+        var text = string.Join("\n", InstallerLines());
+        Assert.Contains("[switch]$BuildSteamIsolation", text);
+        var iGate = text.IndexOf("if ($BuildSteamIsolation)", StringComparison.Ordinal);
+        Assert.True(iGate > 0, "the build must sit behind the switch");
+        var iBuild = text.IndexOf("build.ps1", iGate, StringComparison.Ordinal);
+        var iStaged = text.IndexOf("Get-MissingSteamIsolationFiles", iGate, StringComparison.Ordinal);
+        Assert.True(iBuild > iGate && iStaged > iBuild, "build first, then check all four files arrived");
+        // Built straight into the stage: no artifacts\ folder that an earlier run could have left.
+        Assert.DoesNotContain("artifacts", text);
+    }
+
+    [Fact]
+    public void The_release_workflow_ships_all_four_helpers_in_the_asset()
+    {
+        var yml = File.ReadAllText(Path.Combine(RepoRoot, ".github", "workflows", "release.yml"));
+        Assert.Contains("needs: steam-isolation", yml);
+        // Uploaded by one job and downloaded by the next, under one name.
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(yml, "name: steam-isolation-binaries").Count);
+        Assert.Contains("path: publish/MultiSeat/SteamIsolation", yml);
+        // The payload check is what stops a release that would delete the helpers on upgrade.
+        foreach (var f in SteamFiles) Assert.Contains(f, yml);
+        Assert.Contains("an upgrade would remove the Steam isolation helpers", yml);
+    }
+
     // -- Wiring of install-service.ps1 itself ----------------------------------------
 
     private static string[] InstallerLines() => File.ReadAllLines(Path.Combine(RepoRoot, "scripts", "install-service.ps1"));

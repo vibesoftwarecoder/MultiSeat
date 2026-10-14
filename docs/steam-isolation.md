@@ -2,7 +2,13 @@
 
 MultiSeat can launch Steam through its own native isolation launcher inside a seat's existing Windows user and session. This feature does not change Steam installations, replace system DLLs, or affect unrelated applications.
 
-Build and place the native launcher and hooks in `C:\Program Files\MultiSeat\SteamIsolation`. The folder must contain the x64 `MultiSeat.SteamLauncher.exe` and `MultiSeat.SteamHook.dll`, and for 32-bit Steam also `MultiSeat.SteamLauncher32.exe` and `MultiSeat.SteamHook32.dll`. Keep these binaries in a directory standard seat accounts cannot modify, while granting them read/execute access.
+The native launcher and hooks live in `C:\Program Files\MultiSeat\SteamIsolation`, and you do not normally build or place them yourself:
+
+- **A release asset (`multiseat-windows-x64.zip`) already contains them.** `install-service.ps1 -FromZip` installs them beside the service. The release build runs the same native smoke tests that run on every push to `src/MultiSeat.SteamIsolation`, and refuses to publish an asset that lacks any of the four files.
+- **A source install builds them only when asked:** `.\scripts\install-service.ps1 -BuildSteamIsolation` (Visual Studio 2022 C++ tools and CMake are required). They are built fresh on that run and never taken from an earlier build's output. If the build fails, the install fails, rather than leaving a host with the feature on and no helper.
+- **An upgrade never silently deletes them.** The installer replaces the whole install folder. A payload that ships `SteamIsolation\` replaces the old copy, and one that does not (an older release, or a source install without the switch) leaves the existing `SteamIsolation\` folder as it was. A payload that ships only some of the four files is refused before anything is touched.
+
+The folder must contain the x64 `MultiSeat.SteamLauncher.exe` and `MultiSeat.SteamHook.dll`, and for 32-bit Steam also `MultiSeat.SteamLauncher32.exe` and `MultiSeat.SteamHook32.dll`. Keep these binaries in a directory standard seat accounts cannot modify, while granting them read/execute access.
 
 Enable it in the deployed `appsettings.local.json`, then restart MultiSeat:
 
