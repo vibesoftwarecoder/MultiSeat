@@ -488,6 +488,7 @@ public sealed class ApolloConfigBuilder
         {
             var json = File.ReadAllText(source);
             var stripped = StripConsoleOnlyAppKeys(json, out var removed);
+            stripped = WrapSteamEntries(stripped);
 
             // Atomic: Apollo reads this at startup. The seat grant below targets the
             // NEW file object, so it stays after the move (a rename does not carry ACEs).
@@ -513,6 +514,65 @@ public sealed class ApolloConfigBuilder
         {
             _logger.LogWarning(ex, "Could not seed apps.json to {Dest}", dest);
         }
+    }
+
+    /// <summary>
+    /// With Steam isolation on, send the app list's Steam entries through the launcher. Apollo
+    /// starts these entries itself, so the service's own launch path never sees them.
+    ///
+    /// A host that cannot isolate (a launcher, hook or Steam missing) keeps the entries as they
+    /// are and says so at Warning. The service's explicit launch refuses instead, but an app
+    /// list that quietly lost its Steam tile would be a worse surprise than a logged gap.
+    /// </summary>
+    private string WrapSteamEntries(string json)
+    {
+        if (!_options.SteamIsolationEnabled) return json;
+
+        var steam = SteamExecutableResolver();
+        try
+        {
+            // Same checks as an explicit launch: files exist, architectures match, hook present.
+            _ = Sessions.SteamIsolationLaunchPlan.Create(steam, null, _options);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(
+                "Steam isolation is on but this seat's app list was NOT rewritten, so its Steam entries " +
+                "start without isolation: {Reason}", ex.Message);
+            return json;
+        }
+
+        var wrapped = SteamAppListRewriter.Rewrite(json, _options.SteamIsolationLauncherPath, steam, out var count);
+        if (count > 0)
+            _logger.LogInformation("Steam isolation: {Count} Steam app entr{Plural} now start through the launcher",
+                count, count == 1 ? "y" : "ies");
+        return wrapped;
+    }
+
+    /// <summary>Tests point this at a fixture; the service always uses <see cref="ResolveSteamExecutable"/>.</summary>
+    internal Func<string> SteamExecutableResolver { get; set; } = ResolveSteamExecutable;
+
+    /// <summary>Where Steam is installed: the registry's answer, else the default 32-bit path.</summary>
+    private static string ResolveSteamExecutable()
+    {
+        foreach (var view in new[] { Microsoft.Win32.RegistryView.Registry32, Microsoft.Win32.RegistryView.Registry64 })
+        {
+            try
+            {
+                using var hklm = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, view);
+                using var key = hklm.OpenSubKey(@"SOFTWARE\Valve\Steam");
+                if (key?.GetValue("InstallPath") is string dir && dir.Length > 0)
+                {
+                    var exe = Path.Combine(dir, "steam.exe");
+                    if (File.Exists(exe)) return exe;
+                }
+            }
+            catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+            {
+                // Fall through to the default path.
+            }
+        }
+        return @"C:\Program Files (x86)\Steam\steam.exe";
     }
 
     /// <summary>
