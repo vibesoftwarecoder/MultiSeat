@@ -488,6 +488,7 @@ public sealed class ApolloConfigBuilder
         {
             var json = File.ReadAllText(source);
             var stripped = StripConsoleOnlyAppKeys(json, out var removed);
+            stripped = WrapSteamEntries(stripped);
 
             // Atomic: Apollo reads this at startup. The seat grant below targets the
             // NEW file object, so it stays after the move (a rename does not carry ACEs).
@@ -513,6 +514,73 @@ public sealed class ApolloConfigBuilder
         {
             _logger.LogWarning(ex, "Could not seed apps.json to {Dest}", dest);
         }
+    }
+
+    /// <summary>
+    /// With Steam isolation on, send the app list's Steam entries through the launcher. Apollo
+    /// starts these entries itself, so the service's own launch path never sees them.
+    ///
+    /// This fails closed, like the service's explicit launch. A Steam entry whose Steam cannot be
+    /// isolated (a launcher, hook or Steam missing, or a path that cannot be checked) is left out
+    /// of the seat's list and logged at Error, so it is a missing tile and not a Steam that
+    /// starts without the hook and can hand its command to another session.
+    /// </summary>
+    private string WrapSteamEntries(string json)
+    {
+        if (!_options.SteamIsolationEnabled) return json;
+
+        var wrapped = SteamAppListRewriter.Rewrite(json, _options.SteamIsolationLauncherPath,
+            SteamExecutableResolver(), CheckSteamCanBeIsolated, out var count, out var refused);
+
+        foreach (var entry in refused)
+            _logger.LogError(
+                "Steam isolation is on, so the Steam app entry '{App}' was left out of this seat's app list: {Reason}",
+                entry.App, entry.Reason);
+        if (count > 0)
+            _logger.LogInformation("Steam isolation: {Count} Steam app entr{Plural} now start through the launcher",
+                count, count == 1 ? "y" : "ies");
+        return wrapped;
+    }
+
+    /// <summary>The reason this Steam executable cannot be isolated, or null when it can. Same checks as an explicit launch.</summary>
+    private string? CheckSteamCanBeIsolated(string steamExe)
+    {
+        try
+        {
+            return Sessions.SteamIsolationLaunchPlan.Create(steamExe, null, _options).Supervised
+                ? null
+                : $"'{steamExe}' is not recognized as Steam";
+        }
+        catch (InvalidOperationException ex)
+        {
+            return ex.Message;
+        }
+    }
+
+    /// <summary>Tests point this at a fixture; the service always uses <see cref="ResolveSteamExecutable"/>.</summary>
+    internal Func<string> SteamExecutableResolver { get; set; } = ResolveSteamExecutable;
+
+    /// <summary>Where Steam is installed: the registry's answer, else the default 32-bit path.</summary>
+    private static string ResolveSteamExecutable()
+    {
+        foreach (var view in new[] { Microsoft.Win32.RegistryView.Registry32, Microsoft.Win32.RegistryView.Registry64 })
+        {
+            try
+            {
+                using var hklm = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, view);
+                using var key = hklm.OpenSubKey(@"SOFTWARE\Valve\Steam");
+                if (key?.GetValue("InstallPath") is string dir && dir.Length > 0)
+                {
+                    var exe = Path.Combine(dir, "steam.exe");
+                    if (File.Exists(exe)) return exe;
+                }
+            }
+            catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+            {
+                // Fall through to the default path.
+            }
+        }
+        return @"C:\Program Files (x86)\Steam\steam.exe";
     }
 
     /// <summary>
