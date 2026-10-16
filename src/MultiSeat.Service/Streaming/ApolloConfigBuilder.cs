@@ -520,33 +520,41 @@ public sealed class ApolloConfigBuilder
     /// With Steam isolation on, send the app list's Steam entries through the launcher. Apollo
     /// starts these entries itself, so the service's own launch path never sees them.
     ///
-    /// A host that cannot isolate (a launcher, hook or Steam missing) keeps the entries as they
-    /// are and says so at Warning. The service's explicit launch refuses instead, but an app
-    /// list that quietly lost its Steam tile would be a worse surprise than a logged gap.
+    /// This fails closed, like the service's explicit launch. A Steam entry whose Steam cannot be
+    /// isolated (a launcher, hook or Steam missing, or a path that cannot be checked) is left out
+    /// of the seat's list and logged at Error, so it is a missing tile and not a Steam that
+    /// starts without the hook and can hand its command to another session.
     /// </summary>
     private string WrapSteamEntries(string json)
     {
         if (!_options.SteamIsolationEnabled) return json;
 
-        var steam = SteamExecutableResolver();
-        try
-        {
-            // Same checks as an explicit launch: files exist, architectures match, hook present.
-            _ = Sessions.SteamIsolationLaunchPlan.Create(steam, null, _options);
-        }
-        catch (InvalidOperationException ex)
-        {
-            _logger.LogWarning(
-                "Steam isolation is on but this seat's app list was NOT rewritten, so its Steam entries " +
-                "start without isolation: {Reason}", ex.Message);
-            return json;
-        }
+        var wrapped = SteamAppListRewriter.Rewrite(json, _options.SteamIsolationLauncherPath,
+            SteamExecutableResolver(), CheckSteamCanBeIsolated, out var count, out var refused);
 
-        var wrapped = SteamAppListRewriter.Rewrite(json, _options.SteamIsolationLauncherPath, steam, out var count);
+        foreach (var entry in refused)
+            _logger.LogError(
+                "Steam isolation is on, so the Steam app entry '{App}' was left out of this seat's app list: {Reason}",
+                entry.App, entry.Reason);
         if (count > 0)
             _logger.LogInformation("Steam isolation: {Count} Steam app entr{Plural} now start through the launcher",
                 count, count == 1 ? "y" : "ies");
         return wrapped;
+    }
+
+    /// <summary>The reason this Steam executable cannot be isolated, or null when it can. Same checks as an explicit launch.</summary>
+    private string? CheckSteamCanBeIsolated(string steamExe)
+    {
+        try
+        {
+            return Sessions.SteamIsolationLaunchPlan.Create(steamExe, null, _options).Supervised
+                ? null
+                : $"'{steamExe}' is not recognized as Steam";
+        }
+        catch (InvalidOperationException ex)
+        {
+            return ex.Message;
+        }
     }
 
     /// <summary>Tests point this at a fixture; the service always uses <see cref="ResolveSteamExecutable"/>.</summary>

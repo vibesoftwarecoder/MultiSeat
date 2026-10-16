@@ -1,6 +1,7 @@
 using System.Reflection.PortableExecutable;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
 using MultiSeat.Service.Configuration;
 using MultiSeat.Service.Streaming;
 using MultiSeat.Shared.Models;
@@ -18,6 +19,7 @@ public sealed class SeatAppsSteamIsolationTests : IDisposable
     private readonly string _apollo;
     private readonly string _isolation;
     private readonly string _steam;
+    private readonly CapturingLogger _log = new();
 
     public SeatAppsSteamIsolationTests()
     {
@@ -53,7 +55,7 @@ public sealed class SeatAppsSteamIsolationTests : IDisposable
             SteamIsolationEnabled = enabled,
             SteamIsolationLauncherPath = Launcher,
         };
-        var builder = new ApolloConfigBuilder(new TestLogger<ApolloConfigBuilder>(), Options.Create(options))
+        var builder = new ApolloConfigBuilder(_log, Options.Create(options))
         {
             SteamExecutableResolver = () => _steam,
         };
@@ -85,15 +87,23 @@ public sealed class SeatAppsSteamIsolationTests : IDisposable
         Assert.Equal("steam://open/bigpicture", (string)apps[1]!["detached"]![0]!);
     }
 
-    // The service's own launch refuses when a component is missing. For the app list the entry is
-    // kept (and a warning logged) so a seat is never left without its Steam tile.
+    // Isolation fails closed. With a component missing the Steam tile is left out of the seat's
+    // list, the same way the service's own launch refuses, so nothing starts Steam unhooked.
     [Fact]
-    public void Enabled_WithoutTheLauncher_KeepsTheEntryUnchanged()
+    public void Enabled_WithoutTheLauncher_LeavesTheSteamEntryOut()
     {
         var apps = Seed(enabled: true, withComponents: false);
 
-        Assert.Null(apps[1]!["cmd"]);
-        Assert.Equal("steam://open/bigpicture", (string)apps[1]!["detached"]![0]!);
+        var app = Assert.Single(apps);
+        Assert.Equal("Desktop", (string)app!["name"]!);
+    }
+
+    [Fact]
+    public void Enabled_WithoutTheLauncher_LogsTheRefusalAtError()
+    {
+        _ = Seed(enabled: true, withComponents: false);
+
+        Assert.Contains(_log.Entries, e => e.Level == LogLevel.Error && e.Message.Contains("Steam Big Picture"));
     }
 
     // Minimal PE headers, never executed: the preflight reads only the machine type.
@@ -117,4 +127,14 @@ public sealed class SeatAppsSteamIsolationTests : IDisposable
         File.WriteAllBytes(path, bytes);
         return path;
     }
+}
+
+internal sealed class CapturingLogger : ILogger<ApolloConfigBuilder>
+{
+    public List<(LogLevel Level, string Message)> Entries { get; } = [];
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+    public bool IsEnabled(LogLevel logLevel) => true;
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+        Exception? exception, Func<TState, Exception?, string> formatter) =>
+        Entries.Add((logLevel, formatter(state, exception)));
 }

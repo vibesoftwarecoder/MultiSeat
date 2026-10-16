@@ -16,50 +16,75 @@ namespace MultiSeat.Service.Streaming;
 /// <c>detached</c> command would leave the supervisor with nothing to watch. A <c>steam://</c> item
 /// in <c>detached</c> moves to <c>cmd</c>, and a <c>steam://</c> prep command is blanked, since it
 /// would run through the same unwrapped handler.
+///
+/// Isolation fails closed. A Steam entry that cannot be wrapped (the launcher, hook or Steam is
+/// missing, the path is relative, or there is more than one link to carry) is removed from the
+/// list and reported, never left to start Steam without the hook.
 /// </summary>
 internal static class SteamAppListRewriter
 {
-    // An optional directory part (spaces allowed, so an unquoted "C:\Program Files (x86)\..."
-    // works), then steam or steam.exe, then the end or whitespace. Anything else is not Steam.
+    // Either the bare name (steam, steam.exe), or a path that ends in steam or steam.exe. The
+    // bare name is tried first, and the path prefix is lazy, so the exe ends at the first place a
+    // steam.exe can end: "steam.exe -applaunch 1 D:\maps\steam" is the bare name plus arguments,
+    // not one long path. A directory part may hold spaces, so an unquoted
+    // "C:\Program Files (x86)\Steam\steam.exe" works. Anything else is not Steam.
     private static readonly Regex SteamCommand = new(
-        @"^\s*""?(?<exe>(?:[^""]*[\\/])?steam(?:\.exe)?)""?(?:\s+(?<rest>.*))?$",
+        @"^\s*""?(?<exe>steam(?:\.exe)?|[^""]*?[\\/]steam(?:\.exe)?)""?(?:\s+(?<rest>.*))?$",
         RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant);
 
+    /// <summary>A Steam entry that was removed instead of wrapped, and why.</summary>
+    internal sealed record Refusal(string App, string Reason);
+
     /// <summary>
-    /// Returns the app list with Steam entries wrapped. The text is returned unchanged when it
-    /// cannot be parsed, or when nothing needed wrapping.
+    /// Returns the app list with Steam entries wrapped. <paramref name="checkSteam"/> is asked,
+    /// for each Steam entry, whether the Steam executable it would run can be isolated, and returns
+    /// the reason when it cannot. An entry that cannot is removed and listed in
+    /// <paramref name="refused"/>. The text is returned unchanged when it cannot be parsed, or when
+    /// nothing was wrapped or removed.
     /// </summary>
-    internal static string Rewrite(string json, string launcherPath, string steamExePath, out int rewritten)
+    internal static string Rewrite(string json, string launcherPath, string steamExePath,
+        Func<string, string?> checkSteam, out int rewritten, out IReadOnlyList<Refusal> refused)
     {
         rewritten = 0;
+        var refusals = new List<Refusal>();
+        refused = refusals;
 
         JsonNode? root;
         try { root = JsonNode.Parse(json); }
         catch (JsonException) { return json; }
         if (root?["apps"] is not JsonArray apps) return json;
 
-        foreach (var app in apps)
+        for (var i = apps.Count - 1; i >= 0; i--)
         {
-            if (app is not JsonObject entry) continue;
-            if (!TryBuildCommand(entry, launcherPath, steamExePath, out var command, out var fromDetached))
-                continue;
+            if (apps[i] is not JsonObject entry) continue;
+            if (!TryClassify(entry, steamExePath, out var steam)) continue;
 
-            entry["cmd"] = command;
-            if (fromDetached) RemoveSteamUrls(entry);
+            var reason = steam.Problem ?? checkSteam(steam.Exe);
+            if (reason is not null)
+            {
+                refusals.Add(new Refusal((entry["name"] as JsonValue)?.TryGetValue<string>(out var n) == true ? n : "(unnamed)", reason));
+                apps.RemoveAt(i);
+                continue;
+            }
+
+            entry["cmd"] = Wrap(launcherPath, steam.Exe, steam.Arguments);
+            if (steam.FromDetached) RemoveSteamUrls(entry);
             BlankSteamPrepCommands(entry);
             rewritten++;
         }
+        refusals.Reverse(); // back in list order
 
-        return rewritten == 0
+        return rewritten == 0 && refusals.Count == 0
             ? json
             : root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
     }
 
-    private static bool TryBuildCommand(JsonObject entry, string launcher, string steamExe,
-        out string command, out bool fromDetached)
+    /// <summary>What a Steam entry would run. <see cref="Problem"/> is set when it cannot be wrapped at all.</summary>
+    private readonly record struct SteamEntry(string Exe, string Arguments, bool FromDetached, string? Problem);
+
+    private static bool TryClassify(JsonObject entry, string steamExe, out SteamEntry steam)
     {
-        command = "";
-        fromDetached = false;
+        steam = default;
 
         var cmd = (entry["cmd"] as JsonValue)?.TryGetValue<string>(out var c) == true ? c : null;
         if (!string.IsNullOrWhiteSpace(cmd))
@@ -69,23 +94,23 @@ internal static class SteamAppListRewriter
 
             var exe = match.Groups["exe"].Value;
             var hasDirectory = exe.IndexOfAny(['\\', '/']) >= 0;
-            if (hasDirectory && !Path.IsPathFullyQualified(exe)) return false;
-            command = Wrap(launcher, hasDirectory ? exe : steamExe, match.Groups["rest"].Value.Trim());
+            var problem = hasDirectory && !Path.IsPathFullyQualified(exe)
+                ? $"'{exe}' is a relative path, so the Steam it starts cannot be known"
+                : null;
+            steam = new SteamEntry(hasDirectory ? exe : steamExe, match.Groups["rest"].Value.Trim(), false, problem);
             return true;
         }
 
         // No cmd: a steam:// link in detached is how the stock "Steam Big Picture" entry starts.
         if (entry["detached"] is not JsonArray detached) return false;
-        foreach (var item in detached)
-        {
-            var text = (item as JsonValue)?.TryGetValue<string>(out var t) == true ? t : null;
-            if (text is null || !text.TrimStart().StartsWith("steam://", StringComparison.OrdinalIgnoreCase))
-                continue;
-            command = Wrap(launcher, steamExe, text.Trim());
-            fromDetached = true;
-            return true;
-        }
-        return false;
+        var links = detached.Where(IsSteamUrl).Select(item => (string)item!).ToList();
+        if (links.Count == 0) return false;
+
+        // cmd can carry one link. Wrapping the first and dropping the rest would lose work
+        // without a word, so an entry with several is refused instead.
+        steam = new SteamEntry(steamExe, links[0].Trim(), true,
+            links.Count > 1 ? $"it has {links.Count} steam:// links in detached, and the launcher can carry only one" : null);
+        return true;
     }
 
     private static string Wrap(string launcher, string steamExe, string arguments)
