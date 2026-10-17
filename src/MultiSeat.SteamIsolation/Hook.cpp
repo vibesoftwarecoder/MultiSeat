@@ -76,40 +76,56 @@ struct UserSteamKey {
     }
     ~UserSteamKey() { if (value) RegCloseKey(value); }
 };
+// SteamPID is the other value Steam shares machine-wide. It used to be read as zero, which kept a
+// seat's Steam from seeing the console's pid, but it also kept a second launch in the same account
+// from seeing the Steam that is already running there: it started a full client that logged in
+// again and replaced the first one's session (measured with Process Monitor, 2026-10-17). So it moves
+// to the user's own key like TempApp*, but only for Steam's machine-wide key; a SteamPID anywhere
+// else belongs to somebody else's key and is left alone.
+using QueryKeyName = LONG (NTAPI*)(HANDLE, int, PVOID, ULONG, PULONG);
+bool MachineSteamKey(HKEY key) {
+    // Predefined keys (HKEY_LOCAL_MACHINE and the rest) are negative pseudo-handles; none is Steam's key.
+    if (!key || static_cast<intptr_t>(reinterpret_cast<uintptr_t>(key)) < 0) return false;
+    static QueryKeyName ntQueryKey = reinterpret_cast<QueryKeyName>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryKey"));
+    if (!ntQueryKey) return false;
+    alignas(8) BYTE buffer[1024];
+    ULONG length = 0;
+    if (ntQueryKey(key, 3 /* KeyNameInformation */, buffer, sizeof(buffer), &length) < 0) return false;
+    const ULONG bytes = *reinterpret_cast<ULONG*>(buffer);
+    if (bytes > sizeof(buffer) - sizeof(ULONG)) return false;
+    return IsMachineSteamKeyPath(std::wstring(reinterpret_cast<wchar_t*>(buffer + sizeof(ULONG)), bytes / sizeof(wchar_t)));
+}
+bool UserValue(HKEY key, const wchar_t* value) {
+    if (!isSteam || !value) return false;
+    return Temporary(value) || (!_wcsicmp(value, L"SteamPID") && MachineSteamKey(key));
+}
+bool UserValue(HKEY key, const char* value) {
+    if (!isSteam || !value) return false;
+    return Temporary(value) || (!_stricmp(value, "SteamPID") && MachineSteamKey(key));
+}
 LSTATUS WINAPI QueryW(HKEY key, LPCWSTR value, LPDWORD reserved, LPDWORD type, LPBYTE data, LPDWORD size) {
-    LSTATUS result;
-    DWORD actualType = 0; auto returnedType = type ? type : &actualType;
-    if (Temporary(value)) { UserSteamKey user(KEY_QUERY_VALUE); if (!user.value) return user.status; result = queryW(user.value, value, reserved, returnedType, data, size); }
-    else result = queryW(key, value, reserved, returnedType, data, size);
-    if (result == ERROR_SUCCESS && value && !_wcsicmp(value, L"SteamPID") && data && size && *size == sizeof(DWORD) && *returnedType == REG_DWORD) {
-        DWORD zero = 0; memcpy(data, &zero, sizeof(zero));
-    }
-    return result;
+    if (!UserValue(key, value)) return queryW(key, value, reserved, type, data, size);
+    UserSteamKey user(KEY_QUERY_VALUE); return user.value ? queryW(user.value, value, reserved, type, data, size) : user.status;
 }
 LSTATUS WINAPI QueryA(HKEY key, LPCSTR value, LPDWORD reserved, LPDWORD type, LPBYTE data, LPDWORD size) {
-    LSTATUS result;
-    DWORD actualType = 0; auto returnedType = type ? type : &actualType;
-    if (Temporary(value)) { UserSteamKey user(KEY_QUERY_VALUE); if (!user.value) return user.status; result = queryA(user.value, value, reserved, returnedType, data, size); }
-    else result = queryA(key, value, reserved, returnedType, data, size);
-    if (result == ERROR_SUCCESS && value && !_stricmp(value, "SteamPID") && data && size && *size == sizeof(DWORD) && *returnedType == REG_DWORD) {
-        DWORD zero = 0; memcpy(data, &zero, sizeof(zero));
-    }
-    return result;
+    if (!UserValue(key, value)) return queryA(key, value, reserved, type, data, size);
+    UserSteamKey user(KEY_QUERY_VALUE); return user.value ? queryA(user.value, value, reserved, type, data, size) : user.status;
 }
 LSTATUS WINAPI SetW(HKEY key, LPCWSTR value, DWORD reserved, DWORD type, const BYTE* data, DWORD size) {
-    if (!Temporary(value)) return setW(key, value, reserved, type, data, size);
+    if (!UserValue(key, value)) return setW(key, value, reserved, type, data, size);
     UserSteamKey user(KEY_SET_VALUE, true); return user.value ? setW(user.value, value, reserved, type, data, size) : user.status;
 }
 LSTATUS WINAPI SetA(HKEY key, LPCSTR value, DWORD reserved, DWORD type, const BYTE* data, DWORD size) {
-    if (!Temporary(value)) return setA(key, value, reserved, type, data, size);
+    if (!UserValue(key, value)) return setA(key, value, reserved, type, data, size);
     UserSteamKey user(KEY_SET_VALUE, true); return user.value ? setA(user.value, value, reserved, type, data, size) : user.status;
 }
 LSTATUS WINAPI DeleteW(HKEY key, LPCWSTR value) {
-    if (!Temporary(value)) return deleteW(key, value);
+    if (!UserValue(key, value)) return deleteW(key, value);
     UserSteamKey user(KEY_SET_VALUE); return user.value ? deleteW(user.value, value) : user.status;
 }
 LSTATUS WINAPI DeleteA(HKEY key, LPCSTR value) {
-    if (!Temporary(value)) return deleteA(key, value);
+    if (!UserValue(key, value)) return deleteA(key, value);
     UserSteamKey user(KEY_SET_VALUE); return user.value ? deleteA(user.value, value) : user.status;
 }
 LPWSTR WINAPI CommandW() { return commandW.data(); }
@@ -211,28 +227,38 @@ extern "C" __declspec(dllexport) DWORD WINAPI MultiSeatInitialize(void*) {
         std::vector<wchar_t> dllPath(32768); DWORD dllLength = GetModuleFileNameW(ownModule, dllPath.data(), static_cast<DWORD>(dllPath.size()));
         if (!dllLength || dllLength >= dllPath.size()) return 0;
         ownDllPath.assign(dllPath.data(), dllLength);
-        commandW = RewriteCommand(GetCommandLineW(), ipcName);
-        int narrowSize = WideCharToMultiByte(CP_ACP, 0, commandW.c_str(), -1, nullptr, 0, nullptr, nullptr);
-        if (!narrowSize) return 0;
-        commandA.resize(narrowSize); WideCharToMultiByte(CP_ACP, 0, commandW.c_str(), -1, commandA.data(), narrowSize, nullptr, nullptr);
+        // Forward mode (the launcher's --forward): this steam.exe only hands its command to the Steam
+        // already running in this account. It must NOT carry -master_ipc_name_override on its command
+        // line, because that makes steam.exe start a master of its own. The name travels in the
+        // environment, which is enough to reach the running one, and the registry hooks below send its
+        // SteamPID read and TempAppCmdLine write to this account's HKCU, where that Steam looks.
+        const bool forward = GetEnvironmentVariableW(L"MULTISEAT_STEAM_FORWARD", nullptr, 0) != 0;
+        if (!forward) {
+            commandW = RewriteCommand(GetCommandLineW(), ipcName);
+            int narrowSize = WideCharToMultiByte(CP_ACP, 0, commandW.c_str(), -1, nullptr, 0, nullptr, nullptr);
+            if (!narrowSize) return 0;
+            commandA.resize(narrowSize); WideCharToMultiByte(CP_ACP, 0, commandW.c_str(), -1, commandA.data(), narrowSize, nullptr, nullptr);
+        }
         if (!SetEnvironmentVariableW(L"steam_master_ipc_name_override", ipcName.c_str())) return 0;
         if (MH_Initialize() != MH_OK) return 0;
         LPWSTR (WINAPI* originalCommandW)() = nullptr; LPSTR (WINAPI* originalCommandA)() = nullptr;
-        bool ok = Hook(L"ntdll.dll", "NtCreateUserProcess", reinterpret_cast<void*>(CreateUserHook), &originalCreate)
-            // Win32 completes subsystem registration before restart injection; doing this
-            // inside NtCreateUserProcess is too early for remote loader initialization.
-            && Hook(L"kernelbase.dll", "CreateProcessInternalW", reinterpret_cast<void*>(CreateInternalHook), &createInternal)
-            && Hook(L"kernelbase.dll", "GetCommandLineW", reinterpret_cast<void*>(CommandW), &originalCommandW)
-            && Hook(L"kernelbase.dll", "GetCommandLineA", reinterpret_cast<void*>(CommandA), &originalCommandA)
-            && Hook(L"kernelbase.dll", "RegQueryValueExW", reinterpret_cast<void*>(QueryW), &queryW)
+        const bool registryHooks = Hook(L"kernelbase.dll", "RegQueryValueExW", reinterpret_cast<void*>(QueryW), &queryW)
             && Hook(L"kernelbase.dll", "RegQueryValueExA", reinterpret_cast<void*>(QueryA), &queryA)
             && Hook(L"kernelbase.dll", "RegSetValueExW", reinterpret_cast<void*>(SetW), &setW)
             && Hook(L"kernelbase.dll", "RegSetValueExA", reinterpret_cast<void*>(SetA), &setA)
             && Hook(L"kernelbase.dll", "RegDeleteValueW", reinterpret_cast<void*>(DeleteW), &deleteW)
             && Hook(L"kernelbase.dll", "RegDeleteValueA", reinterpret_cast<void*>(DeleteA), &deleteA);
+        const bool ok = registryHooks && (forward
+            || (Hook(L"ntdll.dll", "NtCreateUserProcess", reinterpret_cast<void*>(CreateUserHook), &originalCreate)
+            // Win32 completes subsystem registration before restart injection; doing this
+            // inside NtCreateUserProcess is too early for remote loader initialization.
+            && Hook(L"kernelbase.dll", "CreateProcessInternalW", reinterpret_cast<void*>(CreateInternalHook), &createInternal)
+            && Hook(L"kernelbase.dll", "GetCommandLineW", reinterpret_cast<void*>(CommandW), &originalCommandW)
+            && Hook(L"kernelbase.dll", "GetCommandLineA", reinterpret_cast<void*>(CommandA), &originalCommandA)));
         if (!ok || MH_EnableHook(MH_ALL_HOOKS) != MH_OK) { MH_Uninitialize(); return 0; }
         InterlockedExchange(&initialization, 2);
-        AppendLog(L"Steam isolation hook active in steam.exe (ipc name " + ipcName + L")");
+        AppendLog(std::wstring(forward ? L"Steam isolation hook active in forwarding mode in steam.exe (ipc name "
+                                       : L"Steam isolation hook active in steam.exe (ipc name ") + ipcName + L")");
         return 1;
     } catch (...) { return 0; }
 }

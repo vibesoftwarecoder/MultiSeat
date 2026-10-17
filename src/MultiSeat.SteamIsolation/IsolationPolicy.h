@@ -23,6 +23,20 @@ inline std::wstring Quote(const std::wstring& value) {
     }
     result.append(slashes * 2, L'\\'); return result + L"\"";
 }
+// Is this NT key path Steam's machine-wide key, in either registry view? Steam keeps SteamPID and
+// TempAppCmdLine there, so every Steam on the host shares them: a second steam.exe reads SteamPID, and
+// if that process is alive it writes its command line to TempAppCmdLine and exits. Shared across
+// accounts, that hands a seat's launch to the console's Steam. The hook moves both values to the user's
+// own HKCU key, which keeps accounts apart and still lets two launches in one account find each other.
+inline bool IsMachineSteamKeyPath(const std::wstring& ntPath) {
+    static const wchar_t* const accepted[] = {
+        L"\\REGISTRY\\MACHINE\\SOFTWARE\\VALVE\\STEAM",
+        L"\\REGISTRY\\MACHINE\\SOFTWARE\\WOW6432NODE\\VALVE\\STEAM"};
+    std::wstring upper = ntPath;
+    std::transform(upper.begin(), upper.end(), upper.begin(), towupper);
+    for (const wchar_t* path : accepted) if (upper == path) return true;
+    return false;
+}
 inline bool RegularFileExists(const std::wstring& path) {
     const DWORD attributes = GetFileAttributesW(path.c_str());
     return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);

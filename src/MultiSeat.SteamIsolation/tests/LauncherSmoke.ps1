@@ -19,7 +19,7 @@ foreach ($launcherName in @('MultiSeat.SteamLauncher.exe', 'MultiSeat.SteamLaunc
 }
 # Prove the probe can tell the two apart: the fixture is a console program.
 Assert-True ((Get-PeSubsystem (Join-Path $source 'SteamIsolationFixture.exe')) -eq 3) 'Subsystem probe did not read the console fixture as subsystem 3'
-function Invoke-Fixture([string]$directory, [string]$tail, [bool]$expectReady, [int]$expectExit, [string]$steamDirectory = '') {
+function Invoke-Fixture([string]$directory, [string]$tail, [bool]$expectReady, [int]$expectExit, [string]$steamDirectory = '', [string]$launcherFlags = '') {
     # The launcher and its hook live in $directory; the stand-in steam.exe may live elsewhere
     # (a folder with a space in its name, to test an unquoted program path).
     $steamDir = if ($steamDirectory) { $steamDirectory } else { $directory }
@@ -27,7 +27,7 @@ function Invoke-Fixture([string]$directory, [string]$tail, [bool]$expectReady, [
     $ready = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $name)
     $launcher = $null
     try {
-        $args = '--steam "' + (Join-Path $steamDir 'steam.exe') + '" --ready-event "' + $name + '" -- ' + $tail
+        $args = '--steam "' + (Join-Path $steamDir 'steam.exe') + '" ' + $launcherFlags + ' --ready-event "' + $name + '" -- ' + $tail
         $launcher = Start-Process -FilePath (Join-Path $directory 'MultiSeat.SteamLauncher.exe') -ArgumentList $args `
             -WorkingDirectory $directory -WindowStyle Hidden -RedirectStandardError (Join-Path $directory 'stderr.txt') -PassThru
         $signaled = $ready.WaitOne(5000)
@@ -50,10 +50,24 @@ foreach ($suffix in @('', '32')) {
     Copy-Item -LiteralPath (Join-Path $source "SteamIsolationFixture$suffix.exe") -Destination (Join-Path $directory 'steamwebhelper.exe')
     Invoke-Fixture $directory '--report ready.txt --hold-ms 100 "two words" "quote\"inside"' $true 0
     $report = Get-Content -LiteralPath (Join-Path $directory 'ready.txt') -Raw
-    Assert-True ($report -match '(?m)^steamPid=0\r?$') 'SteamPID DWORD was not isolated'
-    Assert-True ($report -match '(?m)^steamPidNullType=0\r?$') 'SteamPID DWORD with null type was not isolated'
+    # SteamPID is redirected only on Steam's machine-wide key. The fixture keeps it under a key of its
+    # own, which must come back untouched: no zeroing, and no write that reaches real Steam settings.
+    Assert-True ($report -match '(?m)^steamPid=123456\r?$') 'SteamPID DWORD on a key that is not Steam''s was changed'
+    Assert-True ($report -match '(?m)^steamPidNullType=123456\r?$') 'SteamPID DWORD with null type on a key that is not Steam''s was changed'
     Assert-True ($report -match '(?m)^steamPidString=fixture-nonDWORD\r?$') 'SteamPID string was corrupted'
     Assert-True ($report -match '(?m)^arg5=two words\r?$') 'Quoted argument was not preserved'
+    Assert-True ($report -match '(?m)^command=.*-master_ipc_name_override"\s+"MultiSeat_') 'A normal launch did not get the IPC option'
+    # --forward: Steam is only handing a command to the instance already running. An explicit
+    # -master_ipc_name_override would make it start a master of its own, so the command line must come
+    # through untouched; the name still has to reach it, and the environment is where it goes.
+    Invoke-Fixture $directory '--report forward.txt --hold-ms 100 steam://open/friends' $true 0 '' '--forward'
+    $forwardReport = Get-Content -LiteralPath (Join-Path $directory 'forward.txt') -Raw
+    Assert-True ($forwardReport -notmatch '(?m)^command=.*master_ipc_name_override') 'Forwarding launch got the IPC option on its command line'
+    Assert-True ($forwardReport -match '(?m)^arg5=steam://open/friends\r?$') 'Forwarding launch changed the command it hands over'
+    Assert-True ($forwardReport -match '(?m)^steam_master_ipc_name_override=MultiSeat_') 'Forwarding launch did not carry the instance name in its environment'
+    Assert-True ($forwardReport -match '(?m)^steamPid=123456\r?$') 'Forwarding launch lost its registry behaviour'
+    Invoke-Fixture $directory '--report after-forward.txt --hold-ms 100' $true 0
+    Assert-True ((Get-Content -LiteralPath (Join-Path $directory 'after-forward.txt') -Raw) -match '(?m)^command=.*-master_ipc_name_override"\s+"MultiSeat_') 'A launch after a forwarding one lost its IPC option'
     # A Steam that restarts itself can do it through any creation API, and with an unquoted program
     # path that contains spaces. Each way has to come back hooked, with its browser cache separated.
     # The hook also says so in the launcher log, which is what a real-Steam test would read.
@@ -69,7 +83,8 @@ foreach ($suffix in @('', '32')) {
         Invoke-Fixture $directory "--report first-$via.txt --restart-via $via --restart-report restarted-$via.txt --child-report browser-$via.txt --child-hold-ms 200" $true 0 $steamIn
         $replacement = Get-Content -LiteralPath (Join-Path $directory "restarted-$via.txt") -Raw
         $browser = Get-Content -LiteralPath (Join-Path $directory "browser-$via.txt") -Raw
-        Assert-True ($replacement -match '(?m)^steamPid=0\r?$') "Replacement Steam was not hooked (restart via $via)"
+        Assert-True ($replacement -match '(?m)^steamPid=123456\r?$') "Replacement Steam did not run its registry checks (restart via $via)"
+        Assert-True ($replacement -match '(?m)^steam_master_ipc_name_override=MultiSeat_') "Replacement Steam was not hooked (restart via $via)"
         Assert-True ($browser -match 'htmlcache\.MultiSeat_') "Replacement browser cache was not isolated (restart via $via)"
     }
     $restartLogText = [IO.File]::ReadAllText($restartLog)

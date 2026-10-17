@@ -74,6 +74,15 @@ int main() {
         }
         Expect(found == 1 && drive && test, "Environment unrelated entries lost");
         Expect(RewriteEnvironment(L"broken", 6, key).empty(), "Malformed block accepted");
+        // Steam's machine-wide key, in both registry views, and nothing that merely resembles it.
+        Expect(IsMachineSteamKeyPath(L"\\REGISTRY\\MACHINE\\SOFTWARE\\WOW6432Node\\Valve\\Steam"), "32-bit view not recognised");
+        Expect(IsMachineSteamKeyPath(L"\\REGISTRY\\MACHINE\\SOFTWARE\\Valve\\Steam"), "64-bit view not recognised");
+        Expect(IsMachineSteamKeyPath(L"\\registry\\machine\\software\\valve\\steam"), "Case mattered");
+        Expect(!IsMachineSteamKeyPath(L"\\REGISTRY\\USER\\S-1-5-21-1\\Software\\Valve\\Steam"), "A user key was taken for the machine key");
+        Expect(!IsMachineSteamKeyPath(L"\\REGISTRY\\MACHINE\\SOFTWARE\\Valve\\Steam\\Apps"), "A subkey was taken for the machine key");
+        Expect(!IsMachineSteamKeyPath(L"\\REGISTRY\\MACHINE\\SOFTWARE\\Valve\\SteamService"), "A look-alike was taken for the machine key");
+        Expect(!IsMachineSteamKeyPath(L"\\REGISTRY\\USER\\S-1-5-21-1\\Software\\MultiSeat\\SteamIsolationTests\\5"), "The fixture key was taken for Steam's");
+        Expect(!IsMachineSteamKeyPath(L""), "Empty path accepted");
         std::cout << "Steam command-line and environment policy tests passed\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

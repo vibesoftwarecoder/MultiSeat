@@ -119,6 +119,12 @@ int wmain() {
     valid = valid && NextToken(raw, cursor, token) && token == L"--steam";
     valid = valid && NextToken(raw, cursor, steam) && !steam.empty();
     valid = valid && NextToken(raw, cursor, token);
+    // --forward: this steam.exe only hands its command to the Steam already running in this account.
+    // The hook then keeps the registry redirect and the instance name in the environment, and leaves
+    // the command line alone: an explicit -master_ipc_name_override makes steam.exe start a master of
+    // its own instead of handing over (measured with Process Monitor, 2026-10-17).
+    bool forward = false;
+    if (valid && token == L"--forward") { forward = true; valid = NextToken(raw, cursor, token); }
     if (valid && token == L"--ready-event") {
         valid = NextToken(raw, cursor, readyEventName) && !readyEventName.empty() && NextToken(raw, cursor, token);
     }
@@ -127,7 +133,13 @@ int wmain() {
         (steam.size() > 2 && steam[0] == L'\\' && steam[1] == L'\\');
     const auto basename = steam.substr(steam.find_last_of(L"\\/") + 1);
     if (!valid || !absolutePath || steam.find(L'"') != std::wstring::npos || _wcsicmp(basename.c_str(), L"steam.exe") != 0) {
-        Log() << L"Usage: MultiSeat.SteamLauncher.exe --steam <absolute steam.exe> [--ready-event <name>] -- <Steam arguments>\n"; return 2;
+        Log() << L"Usage: MultiSeat.SteamLauncher.exe --steam <absolute steam.exe> [--forward] [--ready-event <name>] -- <Steam arguments>\n"; return 2;
+    }
+    // The child inherits this, and the hook reads it before it hooks anything. A launcher that is not
+    // forwarding clears it, so a value left in the caller's environment cannot switch the hook's
+    // command-line isolation off.
+    if (!SetEnvironmentVariableW(L"MULTISEAT_STEAM_FORWARD", forward ? L"1" : nullptr)) {
+        Log() << L"Cannot set the forwarding mode: " << GetLastError() << L"\n"; return 2;
     }
     Handle readyEvent(readyEventName.empty() ? nullptr : OpenEventW(EVENT_MODIFY_STATE, FALSE, readyEventName.c_str()));
     if (!readyEventName.empty() && !readyEvent.value) {
