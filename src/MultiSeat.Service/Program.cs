@@ -12,6 +12,25 @@ using MultiSeat.Service.Sessions;
 using MultiSeat.Service.Storage;
 using MultiSeat.Service.Streaming;
 
+// ── Steam shim undo mode ──────────────────────────────────────────────
+// Puts every Steam shortcut, steam:// handler and Run entry the Steam shim changed back as it was,
+// from C:\ProgramData\MultiSeat\steam-shim-backup.json. Needs no running service and no options:
+// the backup holds everything. The uninstall script runs this first, because a shortcut left
+// pointing at a removed shim would stop Steam from starting at all.
+// Usage: MultiSeat.Service.exe --steam-shim-undo
+if (args.Length == 1 && args[0] == "--steam-shim-undo")
+{
+    using var undoLogs = Microsoft.Extensions.Logging.LoggerFactory.Create(b => b.AddSimpleConsole(o => o.SingleLine = true));
+    var undoInstaller = new MultiSeat.Service.SteamShim.SteamShimInstaller(
+        undoLogs.CreateLogger("SteamShim"), new MultiSeatOptions(),
+        new MultiSeat.Service.SteamShim.WScriptShortcutStore(),
+        () => new MultiSeat.Service.SteamShim.SteamShimBackup(MultiSeat.Shared.Constants.DefaultSteamShimBackupPath),
+        AccountManager.RunRegExe);
+    var restored = undoInstaller.Undo();
+    Console.WriteLine($"Steam shim: {restored} entries put back as they were.");
+    return 0;
+}
+
 // ── Click-dialog-by-PID helper mode ──────────────────────────────────
 // Finds any visible top-level window owned by <pid> that contains a child
 // button matching <buttonText>, and clicks it. Does not depend on window title.
@@ -337,6 +356,8 @@ builder.Services.AddSingleton<SeatReconciler>();
 builder.Services.AddSingleton<SharedLibraryProvisioner>();
 builder.Services.AddSingleton<IEmulatorConfigSeeder, RetroArchConfigSeeder>();
 
+builder.Services.AddSingleton<MultiSeat.Service.SteamShim.SteamShimInstaller>();
+builder.Services.AddHostedService<MultiSeat.Service.SteamShim.UnisolatedSteamWatch>();
 builder.Services.AddSingleton<SeatManager>();
 
 // ── Background workers ──────────────────────────────────────────────

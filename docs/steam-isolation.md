@@ -56,6 +56,16 @@ The four release binaries are written to `src\MultiSeat.SteamIsolation\artifacts
 dotnet test src\MultiSeat.Tests\MultiSeat.Tests.csproj --filter FullyQualifiedName~SteamIsolation
 ```
 
+## Starting Steam from a shortcut or a link
+
+With `MultiSeat:SteamIsolationEnabled` on, the service also sends the ordinary ways of starting Steam
+through `MultiSeat.SteamShim.exe`: the shared Steam shortcuts, and each seat account's `steam://`
+handler, autostart and shortcuts. The console user's entries are included by default
+(`MultiSeat:SteamShimIncludeConsole`), because a plain Steam on the console and an isolated Steam on a
+seat cannot both stay up. Set `MultiSeat:SteamShimEnabled` to `false` to turn it off; the edits are
+undone at the next service start. `MultiSeat.Service.exe --steam-shim-undo` undoes them at once and
+needs no running service. How it works, and what was measured: `docs/design/steam-shim.md`.
+
 ## Isolation behavior and limits
 
 The hook creates an IPC name from the Windows session and user SID, replaces Steam's `-master_ipc_name_override` argument and `steam_master_ipc_name_override` environment entry, and separates browser `htmlcache` and `cef_log` paths. It redirects `TempAppPath`, `TempAppCmdLine` and, on Steam's machine-wide key only, `SteamPID` registry operations to the user's own `HKCU\Software\Valve\Steam`.

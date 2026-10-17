@@ -561,7 +561,7 @@ public sealed class ApolloConfigBuilder
     internal Func<string> SteamExecutableResolver { get; set; } = ResolveSteamExecutable;
 
     /// <summary>Where Steam is installed: the registry's answer, else the default 32-bit path.</summary>
-    private static string ResolveSteamExecutable()
+    internal static string ResolveSteamExecutable()
     {
         foreach (var view in new[] { Microsoft.Win32.RegistryView.Registry32, Microsoft.Win32.RegistryView.Registry64 })
         {

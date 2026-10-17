@@ -47,6 +47,14 @@ function Write-Step($msg) { Write-Host "[MultiSeat] $msg" -ForegroundColor Cyan 
 
 # -- Uninstall -------------------------------------------------------
 if ($Uninstall) {
+    # Put the Steam shortcuts, steam:// handler and Run entry back first. They point at the shim in
+    # the install folder, and a shortcut left pointing at a removed shim stops Steam from starting.
+    $serviceExe = Join-Path $InstallDir "MultiSeat.Service.exe"
+    if (Test-Path -LiteralPath $serviceExe) {
+        Write-Step "Undoing the Steam shim's shortcut and registry edits..."
+        try { & $serviceExe --steam-shim-undo } catch { Write-Warning "Could not undo the Steam shim edits: $($_.Exception.Message)" }
+    }
+
     Write-Step "Stopping service..."
     $svc = Get-Service $ServiceName -ErrorAction SilentlyContinue
     if ($svc) {

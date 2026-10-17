@@ -72,6 +72,9 @@ public static class Constants
     // Generic on purpose: no version, no host name. GitHub rejects a request with no User-Agent.
     public const string UpdateUserAgent = "MultiSeat-update-check";
     public const string DefaultUpdateStatePath = @"C:\ProgramData\MultiSeat\update-check.json";
+
+    /// <summary>What the Steam shim installer changed and what was there before, so it can be undone.</summary>
+    public const string DefaultSteamShimBackupPath = @"C:\ProgramData\MultiSeat\steam-shim-backup.json";
     // File an ApolloVibe release package may carry beside sunshine.exe (tag, commit, sunshineSha256).
     public const string ApolloReleaseMarkerFileName = "release.json";
     public const int DefaultUpdateCheckIntervalHours = 12;

@@ -102,6 +102,12 @@ public sealed class MultiSeatWorker : BackgroundService
         // idle is corrected too. Managed accounts only; linked accounts are left alone.
         _accounts.NormalizeManagedAccountPrivileges();
 
+        // ── Step 0a-2: Send the shared Steam shortcuts and the console user's Steam entries through the shim ──
+        // Steam isolation only helps if the ordinary ways of starting Steam use it: a click on a plain
+        // shortcut starts a Steam that takes over the machine. Does nothing unless isolation and the
+        // shim are switched on; undoes earlier edits if they were switched off. Never throws.
+        _services.GetService<SteamShim.SteamShimInstaller>()?.ApplyToHost();
+
         // ── Step 0b: Set DWM frame interval for RDP sessions ────────
         // The Microsoft Remote Display Adapter's DWM composition rate defaults to ~32fps, which
         // is the ceiling on how often a seat can produce a new frame. Lowering the interval

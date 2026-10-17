@@ -69,6 +69,9 @@ public sealed class SeatManager
     private readonly IEnumerable<IEmulatorConfigSeeder> _emulatorSeeders;
     private readonly SeatLifecycleGate _lifecycleGate;
 
+    /// <summary>Sends this account's Steam shortcuts and steam:// handler through the shim. Optional: tests that never provision leave it out.</summary>
+    private readonly SteamShim.SteamShimInstaller? _steamShim;
+
     /// <summary>
     /// The host-wide DWM interval in effect now. Read at provision time rather than taken from
     /// <see cref="_options"/>, because the dashboard can change it while the service runs
@@ -97,8 +100,10 @@ public sealed class SeatManager
         Monitoring.HostApolloMonitor hostApollo,
         IEnumerable<IEmulatorConfigSeeder> emulatorSeeders,
         SeatLifecycleGate lifecycleGate,
-        DwmFrameIntervalSetting? dwmFrameInterval = null)
+        DwmFrameIntervalSetting? dwmFrameInterval = null,
+        SteamShim.SteamShimInstaller? steamShim = null)
     {
+        _steamShim = steamShim;
         _logger = logger;
         _options = options.Value;
         _accounts = accounts;
@@ -258,6 +263,11 @@ public sealed class SeatManager
         // older build stops being a local administrator and gains the Remote Desktop Users
         // membership the RDP loopback logon needs. Idempotent, and a no-op for linked accounts.
         _accounts.ApplySeatGroupMembership(request.AccountName);
+
+        // Send this account's Steam shortcuts, steam:// handler and autostart through the isolation
+        // shim before its session starts, so nothing the user clicks later starts a plain Steam.
+        // Never throws, and does nothing unless isolation and the shim are switched on.
+        _steamShim?.ApplyToAccount(request.AccountName);
 
         var seat = new SeatInfo
         {

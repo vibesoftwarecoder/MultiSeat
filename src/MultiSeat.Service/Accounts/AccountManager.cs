@@ -815,7 +815,7 @@ public sealed class AccountManager
         }
     }
 
-    private static void UnloadHive(
+    internal static void UnloadHive(
         string mount, string username, ILogger logger,
         Func<string, (int ExitCode, string Error)> runReg)
     {
@@ -841,7 +841,7 @@ public sealed class AccountManager
     /// Run <c>%SystemRoot%\System32\reg.exe</c> with the given arguments and wait up to 15 seconds.
     /// The full path is used so a <c>reg.exe</c> earlier on PATH cannot be picked up instead.
     /// </summary>
-    private static (int ExitCode, string Error) RunRegExe(string arguments)
+    internal static (int ExitCode, string Error) RunRegExe(string arguments)
     {
         var psi = new System.Diagnostics.ProcessStartInfo(
             Path.Combine(Environment.SystemDirectory, "reg.exe"), arguments)

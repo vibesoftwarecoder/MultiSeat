@@ -436,6 +436,24 @@ public sealed class MultiSeatOptions
         @"C:\Program Files\MultiSeat\SteamIsolation\MultiSeat.SteamLauncher.exe";
 
     /// <summary>
+    /// With <see cref="SteamIsolationEnabled"/>, send every ordinary way of starting Steam through the
+    /// isolation shim: the Steam shortcuts, the <c>steam://</c> handler and the Run entry of each
+    /// seat account, and of the console user when <see cref="SteamShimIncludeConsole"/> is set.
+    /// Without this, only the launches MultiSeat starts itself are isolated, and a click on a plain
+    /// Steam shortcut still starts a Steam that takes over the machine. Every change is recorded in
+    /// steam-shim-backup.json and can be undone. See docs/design/steam-shim.md.
+    /// </summary>
+    public bool SteamShimEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Also route the console user's Steam through the shim. A plain Steam on the console makes a
+    /// seat's Steam step aside, or is itself ended by it, so isolation that leaves the console out
+    /// does not isolate anything. The shared Steam shortcuts are edited either way, because they are
+    /// shared with the console.
+    /// </summary>
+    public bool SteamShimIncludeConsole { get; set; } = true;
+
+    /// <summary>
     /// How long a supervised Steam launch may take to report that its hook is in place, in
     /// seconds. The wait holds the seat's lifecycle gate, so other operations on that seat queue
     /// behind it; a shorter value fails a stuck launch sooner, a longer one suits a slow host.
