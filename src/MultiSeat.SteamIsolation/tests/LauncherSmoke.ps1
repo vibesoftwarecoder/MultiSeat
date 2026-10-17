@@ -68,6 +68,56 @@ foreach ($suffix in @('', '32')) {
     Assert-True ($forwardReport -match '(?m)^steamPid=123456\r?$') 'Forwarding launch lost its registry behaviour'
     Invoke-Fixture $directory '--report after-forward.txt --hold-ms 100' $true 0
     Assert-True ((Get-Content -LiteralPath (Join-Path $directory 'after-forward.txt') -Raw) -match '(?m)^command=.*-master_ipc_name_override"\s+"MultiSeat_') 'A launch after a forwarding one lost its IPC option'
+    # The shim: it starts an isolated Steam when the account has none, hands over when it has one, and
+    # takes a dead pid for no Steam at all. MULTISEAT_STEAM_SHIM_KEY points its pid lookup at a key of
+    # this test's own, so a real Steam on this machine is never taken for the stand-in.
+    Copy-Item -LiteralPath (Join-Path $source 'MultiSeat.SteamShim.exe') -Destination $directory
+    $shim = Join-Path $directory 'MultiSeat.SteamShim.exe'
+    $fixtureSteam = Join-Path $directory 'steam.exe'
+    $shimKeyPath = 'Software\MultiSeat\SteamShimTests\' + [guid]::NewGuid().ToString('N')
+    $env:MULTISEAT_STEAM_SHIM_KEY = $shimKeyPath
+    $shimKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($shimKeyPath)
+    function Start-Shim([string]$tailText) {
+        Start-Process -FilePath $shim -ArgumentList ('--steam "' + $fixtureSteam + '" -- ' + $tailText) `
+            -WorkingDirectory $directory -WindowStyle Hidden -PassThru
+    }
+    try {
+        # 1. No Steam in the account: it starts one, and keeps its lock until that one has registered.
+        $firstShim = Start-Shim '--report shim-first.txt --hold-ms 8000'
+        $firstSteam = $null
+        for ($i = 0; $i -lt 60 -and -not $firstSteam; $i++) {
+            Start-Sleep -Milliseconds 100
+            $firstSteam = Get-Process steam -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $fixtureSteam } | Select-Object -First 1
+        }
+        Assert-True ($null -ne $firstSteam) 'The shim did not start a Steam in an account that had none'
+        Assert-True (-not $firstShim.HasExited) 'The shim returned before the Steam it started had registered'
+        $shimKey.SetValue('SteamPID', [int]$firstSteam.Id, [Microsoft.Win32.RegistryValueKind]::DWord)
+        Assert-True ($firstShim.WaitForExit(10000)) 'The shim did not return once its Steam had registered'
+        $firstReport = Get-Content -LiteralPath (Join-Path $directory 'shim-first.txt') -Raw
+        Assert-True ($firstReport -match '(?m)^command=.*-master_ipc_name_override"\s+"MultiSeat_') 'The shim started a Steam without isolating it'
+        # 2. A live isolated Steam: it hands the command over and starts nothing of its own.
+        $secondShim = Start-Shim '--report shim-second.txt --hold-ms 100 steam://open/friends'
+        Assert-True ($secondShim.WaitForExit(15000)) 'The shim did not return after handing a command over'
+        $secondReport = Get-Content -LiteralPath (Join-Path $directory 'shim-second.txt') -Raw
+        Assert-True ($secondReport -notmatch '(?m)^command=.*master_ipc_name_override') 'The shim handed over with an IPC option on the command line'
+        Assert-True ($secondReport -match '(?m)^arg5=steam://open/friends\r?$') 'The shim changed the command it handed over'
+        Assert-True ($secondReport -match '(?m)^steam_master_ipc_name_override=MultiSeat_') 'The shim handed over without the instance name'
+        Assert-True (-not $firstSteam.HasExited) 'Handing a command over ended the running Steam'
+        # 3. Control: a pid with no process behind it is no Steam, so the shim launches instead of forwarding.
+        Assert-True ($firstSteam.WaitForExit(15000)) 'The first stand-in Steam did not finish'
+        $thirdShim = Start-Shim '--report shim-third.txt --hold-ms 100'
+        Assert-True ($thirdShim.WaitForExit(15000)) 'The shim did not return after launching beside a dead pid'
+        $thirdReport = Get-Content -LiteralPath (Join-Path $directory 'shim-third.txt') -Raw
+        Assert-True ($thirdReport -match '(?m)^command=.*-master_ipc_name_override"\s+"MultiSeat_') 'The shim forwarded to a pid that is not running'
+    } finally {
+        Remove-Item Env:\MULTISEAT_STEAM_SHIM_KEY -ErrorAction SilentlyContinue
+        $shimKey.Dispose()
+        [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($shimKeyPath, $false)
+        Get-Process steam -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $fixtureSteam } | Stop-Process -Force
+    }
+    # An input the shim must refuse instead of passing on: no Steam is started and the code says so.
+    $refused = Start-Process -FilePath $shim -ArgumentList '--steam "relative\steam.exe" -- -silent' -WorkingDirectory $directory -WindowStyle Hidden -PassThru
+    Assert-True ($refused.WaitForExit(10000) -and $refused.ExitCode -eq 2) 'The shim accepted a relative Steam path'
     # A Steam that restarts itself can do it through any creation API, and with an unquoted program
     # path that contains spaces. Each way has to come back hooked, with its browser cache separated.
     # The hook also says so in the launcher log, which is what a real-Steam test would read.

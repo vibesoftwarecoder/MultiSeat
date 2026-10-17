@@ -38,7 +38,8 @@ function Get-MissingPayloadFiles {
 # start, so a folder holding only some of them works for one Steam and fails for the other.
 function Get-SteamIsolationFiles {
     return @('MultiSeat.SteamLauncher.exe', 'MultiSeat.SteamLauncher32.exe',
-             'MultiSeat.SteamHook.dll', 'MultiSeat.SteamHook32.dll')
+             'MultiSeat.SteamHook.dll', 'MultiSeat.SteamHook32.dll',
+             'MultiSeat.SteamShim.exe')
 }
 
 function Get-MissingSteamIsolationFiles {

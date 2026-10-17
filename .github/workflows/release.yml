@@ -74,7 +74,8 @@ jobs:
         run: |
           $dir = 'src/MultiSeat.SteamIsolation/artifacts'
           $names = @('MultiSeat.SteamLauncher.exe', 'MultiSeat.SteamLauncher32.exe',
-                     'MultiSeat.SteamHook.dll', 'MultiSeat.SteamHook32.dll')
+                     'MultiSeat.SteamHook.dll', 'MultiSeat.SteamHook32.dll',
+                     'MultiSeat.SteamShim.exe')
           $missing = @($names | Where-Object { -not (Test-Path (Join-Path $dir $_)) })
           if ($missing.Count) { throw "build.ps1 did not produce: $($missing -join ', ')" }
           $names | ForEach-Object { Get-Item (Join-Path $dir $_) | Select-Object Name, Length | Format-Table -HideTableHeaders }
@@ -89,6 +90,7 @@ jobs:
             src/MultiSeat.SteamIsolation/artifacts/MultiSeat.SteamLauncher32.exe
             src/MultiSeat.SteamIsolation/artifacts/MultiSeat.SteamHook.dll
             src/MultiSeat.SteamIsolation/artifacts/MultiSeat.SteamHook32.dll
+            src/MultiSeat.SteamIsolation/artifacts/MultiSeat.SteamShim.exe
           if-no-files-found: error
 
   release:
@@ -259,8 +261,8 @@ jobs:
           # silently require a .NET install, which is the entire thing this release fixes.
           if (-not (Test-Path "$root/hostfxr.dll"))           { $problems += "hostfxr.dll missing - build is NOT self-contained" }
           # The installer replaces the whole install folder, so the helpers have to ride in the
-          # asset or an upgrade removes them. All four or nothing; see the steam-isolation job.
-          foreach ($n in @('MultiSeat.SteamLauncher.exe', 'MultiSeat.SteamLauncher32.exe', 'MultiSeat.SteamHook.dll', 'MultiSeat.SteamHook32.dll')) {
+          # asset or an upgrade removes them. All five or nothing; see the steam-isolation job.
+          foreach ($n in @('MultiSeat.SteamLauncher.exe', 'MultiSeat.SteamLauncher32.exe', 'MultiSeat.SteamHook.dll', 'MultiSeat.SteamHook32.dll', 'MultiSeat.SteamShim.exe')) {
             if (-not (Test-Path "$root/SteamIsolation/$n")) { $problems += "SteamIsolation/$n missing - an upgrade would remove the Steam isolation helpers" }
           }
           if ($problems.Count) {

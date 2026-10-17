@@ -1,3 +1,4 @@
+#include "CommandTokens.h"
 #include "Inject.h"
 #include "Log.h"
 #include <sstream>
@@ -42,32 +43,6 @@ public:
     ~Log() { Report(text_.str()); }
 };
 
-// Decode only the launcher prefix. The application's argument tail remains byte-for-byte intact.
-static bool NextToken(const std::wstring& raw, size_t& cursor, std::wstring& token) {
-    token.clear();
-    while (cursor < raw.size() && (raw[cursor] == L' ' || raw[cursor] == L'\t')) ++cursor;
-    if (cursor == raw.size()) return false;
-    bool quoted = false;
-    while (cursor < raw.size()) {
-        if (!quoted && (raw[cursor] == L' ' || raw[cursor] == L'\t')) break;
-        size_t slashes = 0;
-        while (cursor < raw.size() && raw[cursor] == L'\\') { ++slashes; ++cursor; }
-        if (cursor < raw.size() && raw[cursor] == L'"') {
-            token.append(slashes / 2, L'\\');
-            if (slashes % 2) { token.push_back(L'"'); ++cursor; }
-            else {
-                ++cursor;
-                if (quoted && cursor < raw.size() && raw[cursor] == L'"') { token.push_back(L'"'); ++cursor; }
-                else quoted = !quoted;
-            }
-        } else {
-            token.append(slashes, L'\\');
-            if (cursor < raw.size() && (quoted || (raw[cursor] != L' ' && raw[cursor] != L'\t')))
-                token.push_back(raw[cursor++]);
-        }
-    }
-    return !quoted;
-}
 static DWORD Run(const std::wstring& executable, std::wstring command, const std::wstring& hook,
                  const std::wstring& workingDirectory, HANDLE readyEvent = nullptr) {
     Handle job(CreateJobObjectW(nullptr, nullptr));

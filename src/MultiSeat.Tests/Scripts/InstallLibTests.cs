@@ -666,6 +666,7 @@ public class InstallLibTests
     {
         "MultiSeat.SteamLauncher.exe", "MultiSeat.SteamLauncher32.exe",
         "MultiSeat.SteamHook.dll", "MultiSeat.SteamHook32.dll",
+        "MultiSeat.SteamShim.exe",
     };
 
     private static void PutSteamIsolation(string root, string tag)

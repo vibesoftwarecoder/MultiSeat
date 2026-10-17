@@ -20,7 +20,9 @@ foreach ($architecture in @('x64', 'Win32')) {
     & $cmake --build $buildDirectory --config Release --parallel
     if ($LASTEXITCODE -ne 0) { throw "Build failed for $architecture" }
     $suffix = if ($architecture -eq 'Win32') { '32' } else { '' }
-    foreach ($filename in @("MultiSeat.SteamLauncher$suffix.exe", "MultiSeat.SteamHook$suffix.dll")) {
+    $outputs = @("MultiSeat.SteamLauncher$suffix.exe", "MultiSeat.SteamHook$suffix.dll")
+    if (-not $suffix) { $outputs += 'MultiSeat.SteamShim.exe' }   # one 64-bit shim serves both Steam architectures
+    foreach ($filename in $outputs) {
         Copy-Item -LiteralPath (Join-Path $buildDirectory "Release\$filename") -Destination $destination -Force
     }
     if ($BuildFixture) {
