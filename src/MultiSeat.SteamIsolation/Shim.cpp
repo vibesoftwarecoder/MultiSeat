@@ -3,6 +3,8 @@
 #include "IsolationPolicy.h"
 #include "Log.h"
 
+#include <tlhelp32.h>
+
 using namespace steam_isolation;
 
 // The program a Steam shortcut, the steam:// handler and the Run entry point at, in place of steam.exe:
@@ -42,25 +44,52 @@ static std::wstring StateKey() {
     return length && length < 260 ? std::wstring(buffer, length) : std::wstring(L"Software\\Valve\\Steam");
 }
 
-// The isolated Steam of this account, or 0. SteamPID in the user's own key (the hook keeps it there),
-// a live steam.exe in this session, and the hook DLL loaded in it. The hook is what makes the process
-// an isolated one, so it is what we look for; a plain Steam that happens to be running does not count.
+// Is this pid a live steam.exe of this session with the hook DLL loaded? The hook is what makes the
+// process an isolated one, so it is what we look for; a plain Steam that happens to be running does not count.
+static bool IsIsolatedSteam(DWORD pid) {
+    if (!pid) return false;
+    Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+    if (!process.value) return false;
+    DWORD exitCode = 0;
+    if (!GetExitCodeProcess(process.value, &exitCode) || exitCode != STILL_ACTIVE) return false;
+    std::vector<wchar_t> image(32768);
+    DWORD length = static_cast<DWORD>(image.size());
+    if (!QueryFullProcessImageNameW(process.value, 0, image.data(), &length)) return false;
+    if (!SteamImage(std::wstring(image.data(), length))) return false;
+    DWORD mine = 0, theirs = 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &mine) || !ProcessIdToSessionId(pid, &theirs) || mine != theirs) return false;
+    return FindModule(pid, L"MultiSeat.SteamHook.dll", false) || FindModule(pid, L"MultiSeat.SteamHook32.dll", false);
+}
+
+// The first isolated steam.exe in this session, or 0.
+static DWORD FindIsolatedSteamInSession() {
+    Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+    if (snapshot.value == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W entry{}; entry.dwSize = sizeof(entry);
+    for (BOOL more = Process32FirstW(snapshot.value, &entry); more; more = Process32NextW(snapshot.value, &entry))
+        if (!_wcsicmp(entry.szExeFile, L"steam.exe") && IsIsolatedSteam(entry.th32ProcessID)) return entry.th32ProcessID;
+    return 0;
+}
+
+// The isolated Steam of this account, or 0. SteamPID in the user's own key (the hook keeps it there)
+// names it when that is still true. A plain steam.exe also writes SteamPID in that key, so a Steam
+// started some other way (a taskbar pin, a script) can leave it pointing at a process with no hook.
+// The hook-carrying Steam of this session is the answer then; starting a second one would replace
+// the first one's session. The smoke tests point the key elsewhere, so they never search the machine.
 static DWORD IsolatedMaster() {
     DWORD pid = 0, size = sizeof(pid);
     if (RegGetValueW(HKEY_CURRENT_USER, StateKey().c_str(), L"SteamPID", RRF_RT_REG_DWORD,
-                     nullptr, &pid, &size) != ERROR_SUCCESS || !pid) return 0;
-    Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
-    if (!process.value) return 0;
-    DWORD exitCode = 0;
-    if (!GetExitCodeProcess(process.value, &exitCode) || exitCode != STILL_ACTIVE) return 0;
-    std::vector<wchar_t> image(32768);
-    DWORD length = static_cast<DWORD>(image.size());
-    if (!QueryFullProcessImageNameW(process.value, 0, image.data(), &length)) return 0;
-    if (!SteamImage(std::wstring(image.data(), length))) return 0;
-    DWORD mine = 0, theirs = 0;
-    if (!ProcessIdToSessionId(GetCurrentProcessId(), &mine) || !ProcessIdToSessionId(pid, &theirs) || mine != theirs) return 0;
-    if (!FindModule(pid, L"MultiSeat.SteamHook.dll", false) && !FindModule(pid, L"MultiSeat.SteamHook32.dll", false)) return 0;
-    return pid;
+                     nullptr, &pid, &size) == ERROR_SUCCESS && IsIsolatedSteam(pid)) return pid;
+    if (GetEnvironmentVariableW(L"MULTISEAT_STEAM_SHIM_KEY", nullptr, 0)) return 0;
+    const DWORD found = FindIsolatedSteamInSession();
+    if (found) {
+        // The forwarding steam.exe hands its command to whatever SteamPID names, so the value has to be
+        // right before the launcher runs, not only in what the shim believes.
+        const LSTATUS repaired = RegSetKeyValueW(HKEY_CURRENT_USER, StateKey().c_str(), L"SteamPID", REG_DWORD, &found, sizeof(found));
+        AppendLog(L"Steam shim: SteamPID did not name an isolated Steam; found " + std::to_wstring(found) + L" by scanning" +
+                  (repaired == ERROR_SUCCESS ? L" and set SteamPID to it" : L", and could not set SteamPID (" + std::to_wstring(repaired) + L")"));
+    }
+    return found;
 }
 
 static bool StartLauncher(const std::wstring& launcher, const std::wstring& steam, const std::wstring& tail,

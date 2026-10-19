@@ -167,6 +167,41 @@ public sealed class SteamShimInstallerTests : IDisposable
     }
 
     [Fact]
+    public void TaskbarPinsAndStartupShortcutsThatPointAtSteamGoThroughTheShimToo()
+    {
+        // A plain Steam started from the taskbar's implicit shortcut on the reference host (2026-10-19)
+        // overwrote SteamPID and made the next launch start a second isolated Steam.
+        var profile = Path.Combine(_root, "profile");
+        var pinned = Path.Combine(profile, "AppData", "Roaming", "Microsoft", "Internet Explorer", "Quick Launch", "User Pinned");
+        var implicitSteam = Path.Combine(pinned, "ImplicitAppShortcuts", "d356105fac5527ef", "Steam.lnk");
+        var taskbarSteam = Path.Combine(pinned, "TaskBar", "Steam.lnk");
+        var taskbarOther = Path.Combine(pinned, "TaskBar", "Firefox.lnk");
+        var startup = Path.Combine(profile, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "Steam.lnk");
+        var steamInfo = new ShortcutInfo(Steam, "", @"C:\Program Files (x86)\Steam", "", "Steam");
+        var firefox = new ShortcutInfo(@"C:\Program Files\Mozilla Firefox\firefox.exe", "", "", "", "Firefox");
+        foreach (var path in new[] { implicitSteam, taskbarSteam, taskbarOther, startup })
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, "x");   // the folder is listed from disk; the fake store holds what is inside
+        }
+
+        _shortcuts.Files[implicitSteam] = steamInfo;
+        _shortcuts.Files[taskbarSteam] = steamInfo;
+        _shortcuts.Files[startup] = steamInfo;
+        _shortcuts.Files[taskbarOther] = firefox;
+
+        var installer = Installer();
+        Assert.Equal(3 + 1 /* the steam:// handler a seat without one gets */, installer.ApplyToUser(_scratch, "S-1-5-21-1", "console user", profile));
+
+        foreach (var path in new[] { implicitSteam, taskbarSteam, startup })
+            Assert.Equal(_shim, _shortcuts.Files[path].Target);
+        Assert.Equal(firefox, _shortcuts.Files[taskbarOther]);
+
+        installer.Undo();
+        Assert.Equal(steamInfo, _shortcuts.Files[implicitSteam]);
+    }
+
+    [Fact]
     public void AShortcutThatIsNotSteamIsNotTouched()
     {
         var path = Path.Combine(_root, "Steam.lnk");

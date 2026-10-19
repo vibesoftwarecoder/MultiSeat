@@ -182,7 +182,11 @@ NTSTATUS NTAPI CreateUserHook(PHANDLE process, PHANDLE thread, ACCESS_MASK pa, A
         std::wstring changed;
         if (saved.Buffer && !(saved.Length % sizeof(wchar_t))) {
             changed = RewriteCommand(std::wstring(saved.Buffer, saved.Length / sizeof(wchar_t)), ipcName);
-            if (changed.size() > 32766) return static_cast<NTSTATUS>(0xc000000dL);
+            if (changed.size() > 32766) {
+                AppendLog(L"Steam isolation hook refused a process start: its command line would be " +
+                          std::to_wstring(changed.size()) + L" characters, over the limit");
+                return static_cast<NTSTATUS>(0xc000000dL);
+            }
             p->command.Buffer = changed.data();
             p->command.Length = static_cast<USHORT>(changed.size() * sizeof(wchar_t));
             p->command.MaximumLength = static_cast<USHORT>((changed.size() + 1) * sizeof(wchar_t));
@@ -190,11 +194,28 @@ NTSTATUS NTAPI CreateUserHook(PHANDLE process, PHANDLE thread, ACCESS_MASK pa, A
         std::vector<wchar_t> environment;
         if (oldEnvironment && oldSize >= 4 && oldSize <= 16 * 1024 * 1024 && !(oldSize % sizeof(wchar_t))) {
             environment = RewriteEnvironment(static_cast<wchar_t*>(oldEnvironment), oldSize / sizeof(wchar_t), ipcName);
-            if (environment.empty()) return static_cast<NTSTATUS>(0xc000000dL);
+            if (environment.empty()) {
+                const size_t characters = oldSize / sizeof(wchar_t);
+                const auto* block = static_cast<const wchar_t*>(oldEnvironment);
+                AppendLog(L"Steam isolation hook refused a process start: its environment (" + std::to_wstring(characters) +
+                          L" characters, last two " + std::to_wstring(static_cast<unsigned>(block[characters - 2])) + L" and " +
+                          std::to_wstring(static_cast<unsigned>(block[characters - 1])) + L") is not a well-formed block");
+                return static_cast<NTSTATUS>(0xc000000dL);
+            }
             p->environment = environment.data(); p->environmentSize = environment.size() * sizeof(wchar_t);
         }
-        return invoke();
-    } catch (...) { return static_cast<NTSTATUS>(0xc0000017L); }
+        const NTSTATUS status = invoke();
+        if (status < 0) {
+            wchar_t code[16]; swprintf_s(code, L"0x%08lx", static_cast<unsigned long>(status));
+            AppendLog(L"Steam isolation hook: the system refused a process start with " + std::wstring(code) +
+                      L" (command " + std::to_wstring(p->command.Length / sizeof(wchar_t)) + L" characters, environment " +
+                      std::to_wstring(p->environmentSize / sizeof(wchar_t)) + L" characters)");
+        }
+        return status;
+    } catch (...) {
+        AppendLog(L"Steam isolation hook refused a process start: it ran out of memory rewriting the call");
+        return static_cast<NTSTATUS>(0xc0000017L);
+    }
 }
 template<class T> bool Hook(const wchar_t* module, const char* function, void* replacement, T* original) {
     HMODULE handle = GetModuleHandleW(module);

@@ -216,6 +216,32 @@ public sealed class SteamShimInstaller
     {
         yield return Path.Combine(profile, "Desktop", "Steam.lnk");
         yield return Path.Combine(profile, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Steam", "Steam.lnk");
+
+        // Shortcuts Windows or the user made elsewhere: a pin on the taskbar, the "implicit" shortcut
+        // Windows keeps for a running app's taskbar button, an entry in the Startup folder. One of these
+        // started a plain Steam on the reference host (2026-10-19). Only the ones that point at Steam
+        // are changed; PatchShortcut passes over everything else.
+        var roaming = Path.Combine(profile, "AppData", "Roaming", "Microsoft");
+        foreach (var folder in new[]
+        {
+            Path.Combine(roaming, "Internet Explorer", "Quick Launch", "User Pinned"),
+            Path.Combine(roaming, "Windows", "Start Menu", "Programs", "Startup"),
+        })
+        {
+            IEnumerable<string> found;
+            try
+            {
+                found = Directory.Exists(folder)
+                    ? Directory.EnumerateFiles(folder, "*.lnk", SearchOption.AllDirectories).ToList()
+                    : [];
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            foreach (var path in found) yield return path;
+        }
     }
 
     private bool PatchShortcut(string path, string label)

@@ -100,8 +100,10 @@ reported). It only reports; it never ends a process.
 ## Not decided here
 
 - The console and the seat still share one `config\` folder in the Steam install
-  (`loginusers.vdf`, `config.vdf`). The console's Steam did not sign in in two runs while the seat's
-  Steam was up, and signed in at once in two runs without it. Not yet explained.
+  (`loginusers.vdf`, `config.vdf`) and one `logs\` folder. Earlier notes said the console's Steam did
+  not sign in while the seat's was up. That came from reading `logs\connection_log.txt`, which only
+  the Steam that started first appears to write to. Looking at the console window showed it signed in
+  on 2026-10-19 (seat first, then the console shortcut). Do not use that log to judge the second Steam.
 - A second copy of Steam in another folder keeps working through the shim, because the shim uses the
   `steam.exe` the shortcut named. The service only edits the shortcuts it finds in the shared and
   account locations, so a shortcut to that copy elsewhere is not changed.

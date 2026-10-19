@@ -128,7 +128,10 @@ inline std::wstring RewriteCommand(const std::wstring& raw, const std::wstring& 
     return result;
 }
 inline std::vector<wchar_t> RewriteEnvironment(const wchar_t* data, size_t characters, const std::wstring& name) {
-    if (!data || characters < 2 || data[characters - 1] != 0 || data[characters - 2] != 0) return {};
+    // `characters` is the size of the buffer the caller passed, and a caller may pass more than the block
+    // (CreateProcess does, for games with a long environment). The block ends at its own empty entry, so
+    // that is where reading stops; only an entry that runs off the buffer, or no terminator, is malformed.
+    if (!data || characters < 1) return {};
     std::vector<std::wstring> entries;
     size_t pos = 0;
     while (pos < characters && data[pos]) {
@@ -139,6 +142,7 @@ inline std::vector<wchar_t> RewriteEnvironment(const wchar_t* data, size_t chara
         if (value.size() < prefix.size() || !Equal(value.substr(0, prefix.size()), prefix)) entries.push_back(value);
         pos = end + 1;
     }
+    if (pos >= characters) return {};  // ran out of buffer before the block's empty terminating entry
     entries.push_back(L"steam_master_ipc_name_override=" + name);
     std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return _wcsicmp(a.c_str(), b.c_str()) < 0; });
     std::vector<wchar_t> result;

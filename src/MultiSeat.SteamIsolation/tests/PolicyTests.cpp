@@ -74,6 +74,12 @@ int main() {
         }
         Expect(found == 1 && drive && test, "Environment unrelated entries lost");
         Expect(RewriteEnvironment(L"broken", 6, key).empty(), "Malformed block accepted");
+        // A buffer larger than the block, with leftover text after the terminator (seen live with a game launch).
+        const wchar_t padded[] = L"A=1\0B=2\0\0stale\0words12";
+        auto trimmed = RewriteEnvironment(padded, sizeof(padded) / sizeof(wchar_t), key);
+        int paddedEntries = 0; bool leaked = false;
+        for (const wchar_t* p = trimmed.data(); !trimmed.empty() && *p; p += wcslen(p) + 1) { ++paddedEntries; if (!wcsncmp(p, L"stale", 5)) leaked = true; }
+        Expect(paddedEntries == 3 && !leaked, "Padding after the environment terminator was read as entries");
         // Steam's machine-wide key, in both registry views, and nothing that merely resembles it.
         Expect(IsMachineSteamKeyPath(L"\\REGISTRY\\MACHINE\\SOFTWARE\\WOW6432Node\\Valve\\Steam"), "32-bit view not recognised");
         Expect(IsMachineSteamKeyPath(L"\\REGISTRY\\MACHINE\\SOFTWARE\\Valve\\Steam"), "64-bit view not recognised");
