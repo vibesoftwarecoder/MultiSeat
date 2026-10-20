@@ -67,7 +67,7 @@ jobs:
         shell: pwsh
         run: ./src/MultiSeat.SteamIsolation/tests/GameLauncherSmoke.ps1
 
-      - name: Require all four helper binaries
+      - name: Require all five helper binaries
         shell: pwsh
         # Half a set is worse than none: the service picks the launcher and hook by the
         # architecture of the Steam it starts, so a missing one fails for one Steam only.
