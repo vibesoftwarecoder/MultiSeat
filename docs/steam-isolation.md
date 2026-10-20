@@ -4,11 +4,11 @@ MultiSeat can launch Steam through its own native isolation launcher inside a se
 
 The native launcher and hooks live in `C:\Program Files\MultiSeat\SteamIsolation`, and you do not normally build or place them yourself:
 
-- **A release asset (`multiseat-windows-x64.zip`) already contains them.** `install-service.ps1 -FromZip` installs them beside the service. The release build runs the same native smoke tests that run on every push to `src/MultiSeat.SteamIsolation`, and refuses to publish an asset that lacks any of the four files.
+- **A release asset (`multiseat-windows-x64.zip`) already contains them.** `install-service.ps1 -FromZip` installs them beside the service. The release build runs the same native smoke tests that run on every push to `src/MultiSeat.SteamIsolation`, and refuses to publish an asset that lacks any of the five files.
 - **A source install builds them only when asked:** `.\scripts\install-service.ps1 -BuildSteamIsolation` (Visual Studio 2022 C++ tools and CMake are required). They are built fresh on that run and never taken from an earlier build's output. If the build fails, the install fails, rather than leaving a host with the feature on and no helper.
-- **An upgrade never silently deletes them.** The installer replaces the whole install folder. A payload that ships `SteamIsolation\` replaces the old copy, and one that does not (an older release, or a source install without the switch) leaves the existing `SteamIsolation\` folder as it was. A payload that ships only some of the four files is refused before anything is touched.
+- **An upgrade never silently deletes them.** The installer replaces the whole install folder. A payload that ships `SteamIsolation\` replaces the old copy, and one that does not (an older release, or a source install without the switch) leaves the existing `SteamIsolation\` folder as it was. A payload that ships only some of the five files is refused before anything is touched.
 
-The folder must contain the x64 `MultiSeat.SteamLauncher.exe` and `MultiSeat.SteamHook.dll`, and for 32-bit Steam also `MultiSeat.SteamLauncher32.exe` and `MultiSeat.SteamHook32.dll`. Keep these binaries in a directory standard seat accounts cannot modify, while granting them read/execute access.
+The folder must contain the x64 `MultiSeat.SteamLauncher.exe` and `MultiSeat.SteamHook.dll`, and for 32-bit Steam also `MultiSeat.SteamLauncher32.exe` and `MultiSeat.SteamHook32.dll`. The release also carries `MultiSeat.SteamShim.exe`, the fifth file. Keep these binaries in a directory standard seat accounts cannot modify, while granting them read/execute access.
 
 Enable it in the deployed `appsettings.local.json`, then restart MultiSeat:
 
@@ -47,7 +47,7 @@ Build the managed service using the normal MultiSeat build process. Building the
 .\src\MultiSeat.SteamIsolation\build.ps1
 ```
 
-The four release binaries are written to `src\MultiSeat.SteamIsolation\artifacts`. MinHook v1.3.4 is vendored with its license in `third_party\minhook`. To build safe test fixtures and run the launcher smoke checks without launching installed Steam:
+The five release binaries are written to `src\MultiSeat.SteamIsolation\artifacts`. MinHook v1.3.4 is vendored with its license in `third_party\minhook`. To build safe test fixtures and run the launcher smoke checks without launching installed Steam:
 
 ```powershell
 .\src\MultiSeat.SteamIsolation\build.ps1 -BuildFixture
