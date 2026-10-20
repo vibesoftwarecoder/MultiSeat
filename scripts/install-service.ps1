@@ -705,24 +705,38 @@ try {
 
     # -- Stop service so its DLLs are not locked --------------------------
     # Only now: the payload is verified and the host can run it.
+    #
+    # And only if no isolated Steam holds the helper files in SteamIsolation\. Windows cannot
+    # overwrite a loaded DLL, so the replace would fail after the service was already stopped
+    # and the seats dropped (measured 2026-10-20). Invoke-StopWhenNotBlocked probes the files and
+    # names the programs holding them first; when it reports a block, the stop below never runs.
     $svcBeforePublish = Get-Service $ServiceName -ErrorAction SilentlyContinue
     $serviceWasRunning = ($svcBeforePublish -and $svcBeforePublish.Status -eq 'Running')
-    if ($serviceWasRunning) {
-        Write-Step "Stopping service before the install..."
-        Stop-Service $ServiceName -Force
-        try { $svcBeforePublish.WaitForStatus('Stopped', (New-TimeSpan -Seconds 15)) }
-        catch { Write-Warning "SCM stop timed out -- will force-kill the process" }
-    }
+    $stopGate = Invoke-StopWhenNotBlocked -InstallDir $InstallDir -Stop {
+        if ($serviceWasRunning) {
+            Write-Step "Stopping service before the install..."
+            Stop-Service $ServiceName -Force
+            try { $svcBeforePublish.WaitForStatus('Stopped', (New-TimeSpan -Seconds 15)) }
+            catch { Write-Warning "SCM stop timed out -- will force-kill the process" }
+        }
 
-    # Kill any surviving process running the service exe by path
-    # (handles cases where the process outlives the SCM status change)
-    $serviceExe = Join-Path $InstallDir "MultiSeat.Service.exe"
-    $lingering = Get-Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -eq $serviceExe }
-    foreach ($proc in $lingering) {
-        Write-Step "Force-killing lingering process PID $($proc.Id)..."
-        $proc | Stop-Process -Force
-        $proc.WaitForExit(10000)
+        # Kill any surviving process running the service exe by path
+        # (handles cases where the process outlives the SCM status change)
+        $serviceExe = Join-Path $InstallDir "MultiSeat.Service.exe"
+        $lingering = Get-Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -eq $serviceExe }
+        foreach ($proc in $lingering) {
+            Write-Step "Force-killing lingering process PID $($proc.Id)..."
+            $proc | Stop-Process -Force
+            $proc.WaitForExit(10000)
+        }
+    }
+    if ($stopGate.Blocked) {
+        Write-Host ""
+        Write-Host $stopGate.Message -ForegroundColor Yellow
+        Write-Host ""
+        # The finally block below still removes our staging folder. Nothing else was touched.
+        exit 1
     }
 
     # Brief pause to let the OS release all file handles before the folder is replaced

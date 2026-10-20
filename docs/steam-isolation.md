@@ -96,3 +96,17 @@ The picker changes only the new game's environment. It does not inject a DLL int
 Manual user testing reported simultaneous Steam clients on the host and one Windows seat and successful Valheim launches via this helper. The game installation included a third-party Steamworks compatibility component; unmodified retail Steamworks games have not been validated. These reports supplement the fixture checks rather than establishing general game compatibility.
 
 The IPC override technique predates this implementation; see [steam-multibox-easysetup](https://github.com/dreamware-media/steam-multibox-easysetup). This implementation adds targeted hooks, startup readiness, restart propagation, and process-tree supervision. No claim is made that those additions outperform simpler launch scripts across all games.
+
+## Upgrading while Steam isolation is in use
+
+Windows will not overwrite a DLL that a running program has loaded. An isolated Steam loads `SteamIsolation\MultiSeat.SteamHook.dll`, and `MultiSeat.SteamLauncher.exe` runs from the same folder. So an upgrade cannot replace those files while that Steam is up.
+
+`scripts\install-service.ps1` checks for this before it stops the service. It tries to open every file under `SteamIsolation\` for exclusive write, and it lists the programs that have an image or module there. If anything is held, the installer prints what is using the files and exits with a non-zero code. The service is still running and the install folder is untouched. A first install, or a host with no `SteamIsolation\` folder, is not affected.
+
+To go on, close Steam in every seat that runs it, then run the installer again. Either exit Steam from its own menu, or run this as the Windows user that started it:
+
+    MultiSeat.SteamLauncher.exe --steam "<path to steam.exe>" --forward -- -shutdown
+
+A plain `steam -shutdown` does not reach an isolated Steam. The installer never closes Steam for you.
+
+`-Uninstall` does not need the check. It does not delete the install folder; it only removes the service and leaves the folder for you to delete.

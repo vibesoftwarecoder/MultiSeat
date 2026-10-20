@@ -785,6 +785,159 @@ public class InstallLibTests
         Assert.Contains("an upgrade would remove the Steam isolation helpers", yml);
     }
 
+    // -- Pre-flight: an isolated Steam holding the helper files (measured 2026-10-20) --------
+    //
+    // Windows will not overwrite a loaded DLL. The upgrade used to stop the service first and
+    // discover that only when the replace failed. These tests hold REAL files open (and run a
+    // REAL process from SteamIsolation\) and check the answer, not just that a function exists.
+
+    private static string HookDll(string root) => Path.Combine(root, "SteamIsolation", "MultiSeat.SteamHook.dll");
+
+    private static string CheckCall(string install) =>
+        "$r = Test-SteamIsolationBlocksUpgrade -InstallDir " + Q(install) + "\n";
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Preflight_is_clear_when_there_is_no_steam_isolation_folder(string engine)
+    {
+        using var t = new Temp();   // a first install: nothing there at all
+        var j = J(Ps(engine, CheckCall(t.Sub("ProgramFiles-MultiSeat"))));
+        Assert.False(j.GetProperty("Blocked").GetBoolean());
+        Assert.Empty(Strings(j.GetProperty("LockedFiles")));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Preflight_is_clear_when_nothing_holds_the_helper_files(string engine)
+    {
+        using var t = new Temp();
+        PutSteamIsolation(t.Root, "old");
+        var j = J(Ps(engine, CheckCall(t.Root)));
+        Assert.False(j.GetProperty("Blocked").GetBoolean());
+        Assert.Empty(Strings(j.GetProperty("LockedFiles")));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Preflight_reports_a_held_file_by_name_and_clears_when_it_is_released(string engine)
+    {
+        using var t = new Temp();
+        PutSteamIsolation(t.Root, "old");
+        JsonElement held;
+        using (new FileStream(HookDll(t.Root), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            held = J(Ps(engine, CheckCall(t.Root)));
+        }
+        Assert.True(held.GetProperty("Blocked").GetBoolean());
+        var locked = Strings(held.GetProperty("LockedFiles"));
+        Assert.Single(locked);
+        Assert.Equal(HookDll(t.Root), locked[0], ignoreCase: true);
+
+        var released = J(Ps(engine, CheckCall(t.Root)));
+        Assert.False(released.GetProperty("Blocked").GetBoolean());
+        Assert.Empty(Strings(released.GetProperty("LockedFiles")));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Preflight_names_a_running_process_whose_image_lives_in_steam_isolation(string engine)
+    {
+        // A real process started from SteamIsolation\, standing in for MultiSeat.SteamLauncher.exe.
+        using var t = new Temp();
+        PutSteamIsolation(t.Root, "old");
+        var launcher = Path.Combine(t.Root, "SteamIsolation", "MultiSeat.SteamLauncher.exe");
+        File.Copy(Path.Combine(Environment.SystemDirectory, "ping.exe"), launcher, overwrite: true);
+        using var proc = Process.Start(new ProcessStartInfo(launcher, "-n 120 127.0.0.1")
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+        })!;
+        try
+        {
+            Thread.Sleep(500);
+            var j = J(Ps(engine, CheckCall(t.Root)));
+            Assert.True(j.GetProperty("Blocked").GetBoolean());
+            var procs = j.GetProperty("Processes").EnumerateArray().ToArray();
+            var mine = procs.Single(x => x.GetProperty("Id").GetInt32() == proc.Id);
+            Assert.Equal("holder", mine.GetProperty("Role").GetString());
+            Assert.Equal(proc.SessionId, mine.GetProperty("SessionId").GetInt32());
+            Assert.Equal(launcher, mine.GetProperty("Path").GetString(), ignoreCase: true);
+            // Its image is a locked file too, so the two measurements agree.
+            Assert.Contains(Strings(j.GetProperty("LockedFiles")), f => string.Equals(f, launcher, StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            try { proc.Kill(); proc.WaitForExit(10_000); } catch (InvalidOperationException) { }
+        }
+        var after = J(Ps(engine, CheckCall(t.Root)));
+        Assert.False(after.GetProperty("Blocked").GetBoolean());
+        Assert.Empty(after.GetProperty("Processes").EnumerateArray());
+    }
+
+    private static string GateCall(string install, string marker) =>
+        "$r = Invoke-StopWhenNotBlocked -InstallDir " + Q(install) +
+        " -Stop { Set-Content -LiteralPath " + Q(marker) + " -Value stopped }\n";
+
+    [Theory, MemberData(nameof(Engines))]
+    public void A_blocked_preflight_never_runs_the_stop_step_and_says_how_to_close_steam(string engine)
+    {
+        using var t = new Temp();
+        PutSteamIsolation(t.Root, "old");
+        var marker = t.Sub("stop-was-called.txt");
+        JsonElement j;
+        using (new FileStream(HookDll(t.Root), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            j = J(Ps(engine, GateCall(t.Root, marker)));
+        }
+        Assert.True(j.GetProperty("Blocked").GetBoolean());
+        Assert.False(j.GetProperty("Stopped").GetBoolean());
+        Assert.False(File.Exists(marker), "the stop step ran although the pre-flight reported a block");
+        var msg = j.GetProperty("Message").GetString()!;
+        Assert.Contains("MultiSeat.SteamHook.dll", msg);
+        Assert.Contains("has NOT been stopped", msg);
+        Assert.Contains("--forward -- -shutdown", msg);
+        Assert.Contains("MultiSeat.SteamLauncher.exe", msg);
+        Assert.Contains("does not reach an isolated Steam", msg);
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void A_clear_preflight_runs_the_stop_step_once(string engine)
+    {
+        using var t = new Temp();
+        PutSteamIsolation(t.Root, "old");   // present but not held
+        var marker = t.Sub("stop-was-called.txt");
+        var j = J(Ps(engine, GateCall(t.Root, marker)));
+        Assert.False(j.GetProperty("Blocked").GetBoolean());
+        Assert.True(j.GetProperty("Stopped").GetBoolean());
+        Assert.True(File.Exists(marker));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void A_first_install_runs_the_stop_step_unchanged(string engine)
+    {
+        using var t = new Temp();
+        var marker = t.Sub("stop-was-called.txt");
+        var j = J(Ps(engine, GateCall(t.Sub("none-yet"), marker)));
+        Assert.False(j.GetProperty("Blocked").GetBoolean());
+        Assert.True(File.Exists(marker));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Instrument_check_a_check_stubbed_to_always_clear_lets_the_stop_run_while_a_file_is_held(string engine)
+    {
+        // Proves the blocked-case assertions above can fail: with the check replaced by a stub that
+        // always says clear, the same held file no longer blocks and the marker IS written.
+        using var t = new Temp();
+        PutSteamIsolation(t.Root, "old");
+        var marker = t.Sub("stop-was-called.txt");
+        JsonElement j;
+        using (new FileStream(HookDll(t.Root), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            j = J(Ps(engine,
+                "function Test-SteamIsolationBlocksUpgrade { param($InstallDir) " +
+                "[pscustomobject]@{ Blocked = $false; Folder = ''; LockedFiles = @(); Processes = @() } }\n" +
+                GateCall(t.Root, marker)));
+        }
+        Assert.False(j.GetProperty("Blocked").GetBoolean());
+        Assert.True(File.Exists(marker));
+    }
+
     // -- Wiring of install-service.ps1 itself ----------------------------------------
 
     private static string[] InstallerLines() => File.ReadAllLines(Path.Combine(RepoRoot, "scripts", "install-service.ps1"));
@@ -821,5 +974,20 @@ public class InstallLibTests
             "order must be: verify stage, runtime preflight, stop service, replace folder");
         // The old in-place wipe must not come back as a second, unshared copy.
         Assert.DoesNotContain("Get-ChildItem $InstallDir -Force | Remove-Item", text);
+    }
+
+    [Fact]
+    public void The_installer_runs_the_steam_preflight_before_it_can_stop_the_service()
+    {
+        var text = string.Join("\n", InstallerLines());
+        var iStaging = text.IndexOf("$stamp = Get-Date", StringComparison.Ordinal);
+        var iGate = text.IndexOf("Invoke-StopWhenNotBlocked -InstallDir", iStaging, StringComparison.Ordinal);
+        var iStop = text.IndexOf("Stop-Service $ServiceName", iStaging, StringComparison.Ordinal);
+        var iBlocked = text.IndexOf("if ($stopGate.Blocked)", StringComparison.Ordinal);
+        var iExit = text.IndexOf("exit 1", iBlocked, StringComparison.Ordinal);
+        var iInstall = text.IndexOf("Install-Payload -Stage", StringComparison.Ordinal);
+        Assert.True(iGate > 0 && iGate < iStop, "the stop must sit inside the pre-flight gate, after it");
+        Assert.True(iBlocked > iStop && iExit > iBlocked && iExit < iInstall,
+            "a block must exit non-zero before the install folder is replaced");
     }
 }

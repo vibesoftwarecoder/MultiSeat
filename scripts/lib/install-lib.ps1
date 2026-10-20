@@ -495,3 +495,187 @@ function Install-Payload {
 
     return [pscustomobject]@{ ConfigBackup = $backupDir; FolderBackup = $folderBackup }
 }
+
+# -- Pre-flight: is an isolated Steam holding the helper files? ---------------------------------
+#
+# Measured 2026-10-20: an isolated Steam (steam.exe, its steamwebhelper children and
+# MultiSeat.SteamLauncher.exe) had MultiSeat.SteamHook.dll loaded. Windows will not overwrite or
+# delete a loaded DLL, so Install-Payload failed with "Access ... is denied" and rolled back. The
+# rollback worked, but the installer had already stopped the service, which dropped every seat,
+# and the error never said "close Steam". These functions find that case BEFORE the service is
+# stopped. Only SteamIsolation\ is checked: the service's own files are held by the service, which
+# the installer stops on purpose, so probing them would block every upgrade.
+
+function Test-FileHeld {
+    # $true when the file cannot be opened exclusively for write. That is the real failure (a
+    # loaded DLL or a running exe), measured rather than guessed from a process list. Only a
+    # sharing violation counts. A permissions error is not a lock and the installer can cope.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+                                     [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        return $false
+    }
+    catch [System.UnauthorizedAccessException] { return $false }
+    catch [System.IO.FileNotFoundException] { return $false }
+    catch [System.IO.DirectoryNotFoundException] { return $false }
+    catch [System.IO.IOException] { return $true }
+    finally { if ($fs) { $fs.Dispose() } }
+}
+
+function Get-ProcessOwner {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    try {
+        $cim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+        $o = Invoke-CimMethod -InputObject $cim -MethodName GetOwner -ErrorAction Stop
+        if ($o -and $o.User) { return "$($o.Domain)\$($o.User)" }
+    } catch { }
+    return $null
+}
+
+function Get-ProcessesUsingFolder {
+    <#
+    .SYNOPSIS
+        Running processes whose main image or any loaded module lives under Folder.
+    .DESCRIPTION
+        Protected processes and processes that exit while we look throw when their modules are
+        read. Those are skipped, never fatal. Returns objects with Name, Id, SessionId, Owner,
+        Path (the file that put it on the list) and Role 'holder'.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Folder)
+    $prefix = [System.IO.Path]::GetFullPath($Folder).TrimEnd('\') + '\'
+    $found = @()
+    foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+        $hit = $null
+        try {
+            $main = $p.MainModule
+            if ($main -and $main.FileName.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $hit = $main.FileName
+            }
+        } catch { }
+        if (-not $hit) {
+            try {
+                foreach ($m in @($p.Modules)) {
+                    if ($m.FileName.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $hit = $m.FileName
+                        break
+                    }
+                }
+            } catch { }
+        }
+        if ($hit) {
+            $found += [pscustomobject]@{
+                Name = $p.ProcessName; Id = $p.Id; SessionId = $p.SessionId
+                Owner = (Get-ProcessOwner -ProcessId $p.Id); Path = $hit; Role = 'holder' }
+        }
+    }
+    return $found
+}
+
+function Test-SteamIsolationBlocksUpgrade {
+    <#
+    .SYNOPSIS
+        Would replacing InstallDir fail because an isolated Steam holds files in SteamIsolation\ ?
+    .DESCRIPTION
+        Two measurements, combined. Every file under SteamIsolation\ is probed for an exclusive
+        open (the real failure). Running processes with an image or module there are listed to
+        name the culprits. Blocked is true when either finds something. steam.exe and
+        steamwebhelper.exe in the same session as a culprit are listed too, with Role 'steam',
+        because they have to exit with it. A missing SteamIsolation\ folder (first install, or the
+        feature never installed) is clear. Reads only; changes nothing.
+    #>
+    param([Parameter(Mandatory = $true)][string]$InstallDir)
+    $dir = Join-Path $InstallDir 'SteamIsolation'
+    $result = [pscustomobject]@{
+        Blocked = $false; Folder = $dir; LockedFiles = @(); Processes = @() }
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $result }
+
+    $locked = @()
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+        if (Test-FileHeld -Path $f.FullName) { $locked += $f.FullName }
+    }
+    $procs = @(Get-ProcessesUsingFolder -Folder $dir)
+
+    if ($procs.Count -gt 0) {
+        $sessions = @($procs | ForEach-Object { $_.SessionId })
+        $known = @($procs | ForEach-Object { $_.Id })
+        foreach ($p in @(Get-Process -Name 'steam', 'steamwebhelper' -ErrorAction SilentlyContinue)) {
+            if (($sessions -contains $p.SessionId) -and -not ($known -contains $p.Id)) {
+                $path = $null
+                try { $path = $p.MainModule.FileName } catch { }
+                $procs += [pscustomobject]@{
+                    Name = $p.ProcessName; Id = $p.Id; SessionId = $p.SessionId
+                    Owner = (Get-ProcessOwner -ProcessId $p.Id); Path = $path; Role = 'steam' }
+            }
+        }
+    }
+
+    $result.LockedFiles = @($locked)
+    $result.Processes = @($procs)
+    $result.Blocked = ($locked.Count -gt 0 -or $procs.Count -gt 0)
+    return $result
+}
+
+function Format-SteamInUseMessage {
+    # Plain-language text for a blocked upgrade. Says the service was NOT stopped.
+    param(
+        [Parameter(Mandatory = $true)]$Check
+    )
+    $launcher = Join-Path $Check.Folder 'MultiSeat.SteamLauncher.exe'
+    $steamExe = $null
+    foreach ($p in @($Check.Processes)) {
+        if ($p.Name -eq 'steam' -and $p.Path) { $steamExe = $p.Path; break }
+    }
+    if (-not $steamExe) { $steamExe = '<path to steam.exe>' }
+
+    $lines = @()
+    $lines += 'UPGRADE STOPPED EARLY: an isolated Steam is using the MultiSeat helper files.'
+    $lines += 'Windows will not overwrite a DLL that a running program has loaded.'
+    $lines += 'Nothing was changed. The MultiSeat service has NOT been stopped and your seats are still up.'
+    $lines += ''
+    if (@($Check.LockedFiles).Count -gt 0) {
+        $lines += 'Files that are in use:'
+        foreach ($f in @($Check.LockedFiles)) { $lines += "  $f" }
+        $lines += ''
+    }
+    if (@($Check.Processes).Count -gt 0) {
+        $lines += 'Programs using them (or that must exit with them):'
+        foreach ($p in @($Check.Processes)) {
+            $who = if ($p.Owner) { $p.Owner } else { 'owner unknown' }
+            $note = if ($p.Role -eq 'steam') { ' (part of the same Steam)' } else { '' }
+            $lines += ('  {0}.exe  PID {1}  session {2}  {3}{4}' -f $p.Name, $p.Id, $p.SessionId, $who, $note)
+        }
+        $lines += ''
+    }
+    $lines += 'To fix this, close Steam in every seat that runs it. Then run this installer again.'
+    $lines += 'Either exit Steam from its own menu (Steam, then Exit),'
+    $lines += 'or run this as the Windows user that started that Steam:'
+    $lines += "  `"$launcher`" --steam `"$steamExe`" --forward -- -shutdown"
+    $lines += 'A plain "steam -shutdown" does not reach an isolated Steam, so do not use it.'
+    $lines += 'This installer does not close Steam for you.'
+    return ($lines -join "`n")
+}
+
+function Invoke-StopWhenNotBlocked {
+    <#
+    .SYNOPSIS
+        Run the service-stop step only if no isolated Steam holds the helper files.
+    .DESCRIPTION
+        The one place the pre-flight and the stop meet, so the order can be tested: when the
+        check says Blocked, the Stop scriptblock is NEVER called. Returns Blocked, Stopped,
+        Check and Message. The caller prints Message and exits non-zero on Blocked.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallDir,
+        [Parameter(Mandatory = $true)][scriptblock]$Stop
+    )
+    $check = Test-SteamIsolationBlocksUpgrade -InstallDir $InstallDir
+    if ($check.Blocked) {
+        return [pscustomobject]@{
+            Blocked = $true; Stopped = $false; Check = $check
+            Message = (Format-SteamInUseMessage -Check $check) }
+    }
+    $null = & $Stop
+    return [pscustomobject]@{ Blocked = $false; Stopped = $true; Check = $check; Message = $null }
+}
