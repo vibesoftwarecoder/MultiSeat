@@ -52,6 +52,29 @@ public sealed class ProcessInjector
         bool allowConsoleSession = false,
         bool minimized = false)
     {
+        var launched = await LaunchInSessionCoreAsync(
+            sessionId, accountName, exePath, arguments, workingDir, ct,
+            allowConsoleSession, minimized, noConsoleWindow: false, keepProcessHandle: false);
+        return launched.ProcessId;
+    }
+
+    /// <summary>
+    /// The launch itself. <paramref name="noConsoleWindow"/> asks for CREATE_NO_WINDOW instead of
+    /// CREATE_NEW_CONSOLE. <paramref name="keepProcessHandle"/> hands the process handle back
+    /// to the caller instead of closing it, so the caller can read the exit code later (#124).
+    /// </summary>
+    private async Task<(int ProcessId, LaunchedProcess? Process)> LaunchInSessionCoreAsync(
+        int sessionId,
+        string accountName,
+        string exePath,
+        string? arguments,
+        string? workingDir,
+        CancellationToken ct,
+        bool allowConsoleSession,
+        bool minimized,
+        bool noConsoleWindow,
+        bool keepProcessHandle)
+    {
         _logger.LogInformation(
             "Launching '{Exe}' in session {Sid} (account: {Account})",
             exePath, sessionId, accountName);
@@ -135,7 +158,7 @@ public sealed class ProcessInjector
                 wShowWindow = ShowWindowFor(minimized)
             };
 
-            var creationFlags = CreationFlagsFor(launchPlan.Supervised);
+            var creationFlags = CreationFlagsFor(launchPlan.Supervised, noConsoleWindow);
 
             // Step 4: Launch the process
             if (!AdvApi.CreateProcessAsUserW(
@@ -164,6 +187,7 @@ public sealed class ProcessInjector
             // session we ASKED for, which is a claim about our intent rather than about the world —
             // so a process running in the wrong session produced a perfectly reassuring log. Seven
             // rounds of issue #18 went past exactly that line.
+            LaunchedProcess? kept = null;
             try
             {
                 VerifyLandedInSession(pi, exePath, sessionId, consoleSessionId);
@@ -172,6 +196,10 @@ public sealed class ProcessInjector
                     await readiness.WaitAsync(pi.hProcess, _options.UsableSteamIsolationReadyTimeout, ct);
                 else
                     await WaitForProcessStartAsync(pi, ct);
+
+                // Ownership of the handle moves to the caller only once nothing above can throw.
+                if (keepProcessHandle)
+                    kept = new LaunchedProcess(pi.dwProcessId, pi.hProcess);
             }
             catch
             {
@@ -186,10 +214,12 @@ public sealed class ProcessInjector
             }
             finally
             {
-                // Close the process handle even if the wait is cancelled, so it never leaks.
-                Kernel32.CloseHandle(pi.hProcess);
+                // Close the process handle even if the wait is cancelled, so it never leaks,
+                // unless it was handed to the caller above.
+                if (kept is null)
+                    Kernel32.CloseHandle(pi.hProcess);
             }
-            return pi.dwProcessId;
+            return (pi.dwProcessId, kept);
         }
         finally
         {
@@ -199,22 +229,31 @@ public sealed class ProcessInjector
     }
 
     /// <summary>
-    /// Process creation flags for a launch in a seat. An ordinary launch gets a new console, as it
-    /// always did. A supervised Steam launch never does: it starts the isolation launcher, which
-    /// has no console of its own, and a console created for it anyway would be one more window
-    /// in the seat that nobody asked for. The helper's own children are Steam, which is a
-    /// windowed program.
+    /// Process creation flags for a launch in a seat. An ordinary launch (a game, an on-connect
+    /// app) gets a new console, as it always did.
+    ///
+    /// Two launches get CREATE_NO_WINDOW instead:
+    ///   - A supervised Steam launch. It starts the isolation launcher, which has no console of
+    ///     its own, and a console created for it anyway would be one more window in the seat that
+    ///     nobody asked for. The helper's own children are Steam, which is a windowed program.
+    ///   - The seat's Apollo (<paramref name="noConsoleWindow"/>, issue #124). With no console
+    ///     window, Apollo's GetConsoleWindow() is NULL, which is how Apollo knows a supervisor runs
+    ///     it: Restart then just exits 0 and Quit exits 1115 (ERROR_SHUTDOWN_IN_PROGRESS), instead
+    ///     of Restart spawning an untracked copy of itself. Apollo's own Windows service launches
+    ///     it the same way (tools/sunshinesvc.cpp). This reverses the #120/#121 choice to keep
+    ///     CREATE_NEW_CONSOLE on purpose.
     /// </summary>
-    internal static uint CreationFlagsFor(bool supervised) =>
+    internal static uint CreationFlagsFor(bool supervised, bool noConsoleWindow = false) =>
         Kernel32.CREATE_UNICODE_ENVIRONMENT |
-        (supervised ? Kernel32.CREATE_NO_WINDOW : Kernel32.CREATE_NEW_CONSOLE) |
+        (supervised || noConsoleWindow ? Kernel32.CREATE_NO_WINDOW : Kernel32.CREATE_NEW_CONSOLE) |
         Kernel32.NORMAL_PRIORITY_CLASS;
 
     /// <summary>
     /// Initial window state for a launch in a seat. Games are shown, as they always were. Seat
-    /// Apollo is started minimized without taking focus, so its console does not sit in the seat's
-    /// view. It keeps its console (CREATE_NEW_CONSOLE, not CREATE_NO_WINDOW) so GetConsoleWindow
-    /// stays non-NULL for Apollo's restart and quit logic; see issue #120.
+    /// Apollo asks for minimized without taking focus (issue #120). Since #124 seat Apollo runs
+    /// with CREATE_NO_WINDOW, so it has no console window for this to apply to. It is kept anyway:
+    /// it costs nothing, and CREATE_NO_WINDOW is ignored for a GUI-subsystem executable, so if
+    /// ApolloExePath ever points at one, any window it shows still starts out of the seat's view.
     /// </summary>
     internal static short ShowWindowFor(bool minimized) =>
         minimized ? Kernel32.SW_SHOWMINNOACTIVE : Kernel32.SW_SHOW;
@@ -222,8 +261,11 @@ public sealed class ProcessInjector
     /// <summary>
     /// Launch Apollo streaming server inside a target session.
     /// Special handling: Apollo needs specific env vars and the config path.
+    ///
+    /// Returns the launched process with its handle kept open, so the caller can read Apollo's
+    /// exit code once it exits (issue #124). The caller owns it and must dispose it.
     /// </summary>
-    public Task<int> LaunchApolloInSessionAsync(
+    public async Task<LaunchedProcess> LaunchApolloInSessionAsync(
         int sessionId,
         string accountName,
         string apolloExePath,
@@ -231,28 +273,34 @@ public sealed class ProcessInjector
         CancellationToken ct)
     {
         var request = ApolloLaunchRequestFor(apolloExePath, configPath);
-        return LaunchInSessionAsync(
+        var launched = await LaunchInSessionCoreAsync(
             sessionId, accountName,
             request.ExePath, request.Arguments,
             request.WorkingDir,
             ct,
-            minimized: request.Minimized);
+            allowConsoleSession: false,
+            minimized: request.Minimized,
+            noConsoleWindow: request.NoConsoleWindow,
+            keepProcessHandle: true);
+        return launched.Process!;
     }
 
     /// <summary>What a seat Apollo launch asks LaunchInSessionAsync for.</summary>
     internal readonly record struct ApolloLaunchRequest(
-        string ExePath, string Arguments, string? WorkingDir, bool Minimized);
+        string ExePath, string Arguments, string? WorkingDir, bool Minimized, bool NoConsoleWindow);
 
     /// <summary>
-    /// Builds the seat Apollo launch request. The one place that decides Apollo starts minimized
-    /// (issue #120).
+    /// Builds the seat Apollo launch request. The one place that decides how seat Apollo starts:
+    /// minimized (issue #120) and with no console window (issue #124, see
+    /// <see cref="CreationFlagsFor"/>).
     /// </summary>
     internal static ApolloLaunchRequest ApolloLaunchRequestFor(string apolloExePath, string configPath) =>
         // Working dir = per-seat config dir (not the Apollo install dir).
         // Apollo resolves sunshine_state.json from {workingDir}/config/sunshine_state.json.
         // Each seat must have its own working dir so they get distinct UUIDs and
         // Moonlight can list them as separate servers.
-        new(apolloExePath, $"\"{configPath}\"", Path.GetDirectoryName(configPath), Minimized: true);
+        new(apolloExePath, $"\"{configPath}\"", Path.GetDirectoryName(configPath),
+            Minimized: true, NoConsoleWindow: true);
 
     /// <summary>
     /// Refuse to launch a seat's process into the console session.

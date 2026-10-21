@@ -122,12 +122,20 @@ public sealed class ApolloManager
         // IPC — the SudoVDA watchdog aborts if the connection fails. The IPC works when
         // Apollo runs in the same session as the virtual display, not in the console session.
         // The seat's session was created by SessionLauncher and already has the virtual display.
-        var pid = await _processInjector.LaunchApolloInSessionAsync(
+        //
+        // First make sure nothing else is serving this seat's config: an Apollo left by a build
+        // before #124 (which restarted itself behind our back), or one started by hand. Two
+        // Apollos on one seat share its ports, and the one we do not track survives our Stop.
+        KillStrayApollosForConfig(configPath, $"start for seat {seat.Id}");
+
+        var launched = await _processInjector.LaunchApolloInSessionAsync(
             seat.SessionId, seat.AccountName,
             _options.ApolloExePath, configPath, ct);
+        var pid = launched.ProcessId;
 
         if (pid <= 0)
         {
+            launched.Dispose();
             _logger.LogError("Seat {Id}: Apollo failed to start (PID={Pid})", seat.Id, pid);
             throw new InvalidOperationException($"Apollo process could not be launched (PID={pid}).");
         }
@@ -153,9 +161,10 @@ public sealed class ApolloManager
             AccountName: seat.AccountName,
             StartedAt: DateTimeOffset.UtcNow,
             RestartCount: 0,
-            Identity: osStartedAt is { } t ? new ProcessIdentity(pid, t) : null);
+            Identity: osStartedAt is { } t ? new ProcessIdentity(pid, t) : null,
+            Launched: launched);
 
-        _instances[seat.Id] = instance;
+        SetInstance(seat.Id, instance);
 
         // Also record it on the seat, which outlives this dictionary. _instances is in-memory
         // only, so after a service restart it is empty while the seat and its Apollo are both
@@ -205,20 +214,35 @@ public sealed class ApolloManager
         // just been killed, and the record would then claim an identity it does not have. It
         // fails closed rather than dangerously — a stale identity matches nothing — but a record
         // that contradicts itself is exactly what made the restart path wrong.
-        _instances[seat.Id] = instance with { ProcessId = 0, RestartCount = 0, Identity = null };
+        // The process handle goes with it: we killed this process, so its exit code means nothing.
+        SetInstance(seat.Id, instance with { ProcessId = 0, RestartCount = 0, Identity = null, Launched = null });
         seat.ApolloIdentity = null;
     }
 
     /// <summary>
     /// Stop the Apollo instance for a seat. Kills the entire process tree
-    /// (Apollo spawns encoder sub-processes).
+    /// (Apollo spawns encoder sub-processes), then any other Apollo still running with this
+    /// seat's config path (issue #124), so teardown leaves nothing serving the seat's ports.
     /// </summary>
     public void Stop(SeatInfo seat)
     {
         // Keep the record rather than discarding it: it carries the ProcessIdentity, which is
         // the only thing that can tell this seat's Apollo from a process that inherited its PID.
         _instances.TryRemove(seat.Id, out var instance);
+        try
+        {
+            StopTracked(seat, instance);
+        }
+        finally
+        {
+            instance?.Launched?.Dispose();
+            KillStrayApollosForConfig(
+                instance?.ConfigPath ?? SeatConfigPathFor(seat), $"stop for seat {seat.Id}");
+        }
+    }
 
+    private void StopTracked(SeatInfo seat, ApolloInstance? instance)
+    {
         if (instance?.Identity is { } identity)
         {
             var outcome = TryKillIdentifiedProcess(
@@ -260,7 +284,12 @@ public sealed class ApolloManager
     /// Restart a crashed Apollo instance for a seat.
     /// Called by SessionHealthCheck when it detects Apollo is no longer running.
     /// </summary>
-    public async Task<int> RestartAsync(SeatInfo seat, CancellationToken ct)
+    /// <param name="countsAsCrash">
+    /// False when Apollo exited because the user asked it to Restart (issue #124). That relaunch
+    /// does not spend one of the <see cref="MaxRestartAttempts"/>, and an exhausted budget does not
+    /// block it. A relaunch that then fails its readiness check is counted all the same.
+    /// </param>
+    public async Task<int> RestartAsync(SeatInfo seat, CancellationToken ct, bool countsAsCrash = true)
     {
         if (!_instances.TryGetValue(seat.Id, out var prev))
         {
@@ -269,7 +298,8 @@ public sealed class ApolloManager
             return await StartAsync(seat, ct);
         }
 
-        if (prev.RestartCount >= MaxRestartAttempts)
+        var budget = RestartBudget(prev.RestartCount, countsAsCrash);
+        if (budget.GiveUp)
         {
             _logger.LogError(
                 "Seat {Id}: Apollo exhausted {Count} restart attempts — giving up. " +
@@ -279,17 +309,30 @@ public sealed class ApolloManager
             return -1;
         }
 
-        _logger.LogWarning(
-            "Seat {Id}: restarting Apollo (attempt {N}/{Max})",
-            seat.Id, prev.RestartCount + 1, MaxRestartAttempts);
+        if (countsAsCrash)
+            _logger.LogWarning(
+                "Seat {Id}: restarting Apollo (attempt {N}/{Max})",
+                seat.Id, prev.RestartCount + 1, MaxRestartAttempts);
+        else
+            _logger.LogInformation(
+                "Seat {Id}: relaunching Apollo after its own Restart; not counted against the " +
+                "restart limit ({N}/{Max} used)",
+                seat.Id, prev.RestartCount, MaxRestartAttempts);
 
         // Same precondition as a first start. Cheap when the file is already there.
         EnsureInstallAppsJson();
 
+        // The same guard as StartAsync: nothing else may be serving this seat's config when ours
+        // starts. Before #124 this is exactly where the second Apollo came from: a self-restarted
+        // child was still running when this path launched another one.
+        KillStrayApollosForConfig(prev.ConfigPath, $"restart for seat {seat.Id}");
+
         // Re-use existing config — restart in the seat's own session (same as initial start)
-        var pid = await _processInjector.LaunchApolloInSessionAsync(
+        var launched = await _processInjector.LaunchApolloInSessionAsync(
             seat.SessionId, seat.AccountName,
             _options.ApolloExePath, prev.ConfigPath, ct);
+        var pid = launched.ProcessId;
+        if (pid <= 0) launched.Dispose();
 
         if (pid > 0)
         {
@@ -315,15 +358,16 @@ public sealed class ApolloManager
 
             ProcessIdentity? identity = restartedAt is { } t ? new ProcessIdentity(pid, t) : null;
 
-            _instances[seat.Id] = prev with
+            SetInstance(seat.Id, prev with
             {
                 ProcessId = pid,
                 StartedAt = DateTimeOffset.UtcNow,
-                RestartCount = prev.RestartCount + 1,
+                RestartCount = budget.NextCount,
                 SessionId = seat.SessionId,
                 AccountName = seat.AccountName,
-                Identity = identity
-            };
+                Identity = identity,
+                Launched = launched
+            });
 
             seat.ApolloProcessId = pid;
             seat.ApolloIdentity = identity;
@@ -335,10 +379,12 @@ public sealed class ApolloManager
             {
                 _logger.LogWarning("Seat {Id}: {Reason}", seat.Id, ex.Message);
                 // Preserve the retry budget after readiness cleanup removed the process record.
-                _instances[seat.Id] = prev with
+                // A failed readiness check is a failure whatever caused the relaunch, so it is
+                // always counted, and the retry is counted too.
+                SetInstance(seat.Id, prev with
                 {
-                    ProcessId = 0, Identity = null, RestartCount = prev.RestartCount + 1
-                };
+                    ProcessId = 0, Identity = null, Launched = null, RestartCount = prev.RestartCount + 1
+                });
                 return await RestartAsync(seat, ct);
             }
             _logger.LogInformation(
@@ -346,6 +392,149 @@ public sealed class ApolloManager
         }
 
         return pid;
+    }
+
+    /// <summary>
+    /// Whether a relaunch may go ahead, and the restart count it leaves behind. A crash relaunch
+    /// spends one of <see cref="MaxRestartAttempts"/> and is refused once they are spent. A
+    /// relaunch after Apollo's own Restart (issue #124) spends nothing and is never refused.
+    /// </summary>
+    internal static (bool GiveUp, int NextCount) RestartBudget(int restartCount, bool countsAsCrash) =>
+        countsAsCrash
+            ? (restartCount >= MaxRestartAttempts, restartCount + 1)
+            : (false, restartCount);
+
+    /// <summary>
+    /// The exit code of the seat's tracked Apollo once it has exited, or null when it is still
+    /// running, when there is no record, or when the code cannot be read (issue #124). Read it
+    /// before anything replaces the record: a restart or stop disposes the handle it comes from.
+    /// </summary>
+    internal int? GetExitCode(Guid seatId) =>
+        _instances.TryGetValue(seatId, out var instance) ? instance.Launched?.TryGetExitCode() : null;
+
+    /// <summary>
+    /// Store a seat's instance record, disposing the process handle of the record it replaces
+    /// unless the new record carries the same one.
+    /// </summary>
+    private void SetInstance(Guid seatId, ApolloInstance next)
+    {
+        ApolloInstance? previous = null;
+        _instances.AddOrUpdate(seatId, next, (_, old) => { previous = old; return next; });
+        if (previous?.Launched is { } oldProcess && !ReferenceEquals(oldProcess, next.Launched))
+            oldProcess.Dispose();
+    }
+
+    /// <summary>
+    /// The config path a seat's Apollo runs with, derived the same way ApolloConfigBuilder.BuildConfig
+    /// derives it. Used only to find a stray Apollo when there is no instance record to read it from.
+    /// </summary>
+    private string SeatConfigPathFor(SeatInfo seat)
+    {
+        if (string.IsNullOrWhiteSpace(_options.ApolloConfigDir) || string.IsNullOrWhiteSpace(seat.AccountName))
+            return "";
+        try
+        {
+            return Path.GetFullPath(Path.Combine(_options.ApolloConfigDir, seat.AccountName, "sunshine.conf"));
+        }
+        catch (Exception)
+        {
+            return "";
+        }
+    }
+
+    /// <summary>
+    /// Kill every Apollo whose command line passes exactly <paramref name="configPath"/>, that is,
+    /// every Apollo serving this one seat (issue #124). Returns how many were killed.
+    ///
+    /// Callers run it when no Apollo should be serving the seat: right before a launch, and as the
+    /// last step of a stop. It catches what the PID record cannot see: a copy an older Apollo
+    /// started of itself on Restart, or one started by hand.
+    ///
+    /// ⛔ It must never touch another seat's Apollo or the console player's. Matching is by
+    /// <see cref="ApolloOwnership.CommandLineNamesConfig"/>, an exact path comparison, and a match
+    /// is confirmed a second time while we hold a handle to it, because the PID cannot be reused
+    /// while that handle is open. When WMI fails, nothing is killed: the launch goes ahead as it
+    /// did before this guard existed.
+    /// </summary>
+    private int KillStrayApollosForConfig(string configPath, string reason)
+    {
+        var exeName = Path.GetFileNameWithoutExtension(_options.ApolloExePath);
+        if (string.IsNullOrEmpty(exeName) || string.IsNullOrWhiteSpace(configPath))
+            return 0;
+
+        List<int> matches;
+        try
+        {
+            matches = QueryApolloPidsForConfig(exeName, configPath, onlyPid: null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not look for a stray Apollo with config {Config} ({Reason}); WMI failed, so " +
+                "nothing was killed", configPath, reason);
+            return 0;
+        }
+
+        var killed = 0;
+        foreach (var pid in matches)
+        {
+            try
+            {
+                using var proc = Process.GetProcessById(pid);
+                // Opening the handle pins the PID: from here it cannot name another process.
+                _ = proc.SafeHandle;
+                if (proc.HasExited) continue;
+
+                if (QueryApolloPidsForConfig(exeName, configPath, onlyPid: pid).Count == 0)
+                {
+                    _logger.LogInformation(
+                        "Apollo PID {Pid} no longer runs config {Config}; leaving it alone ({Reason})",
+                        pid, configPath, reason);
+                    continue;
+                }
+
+                proc.Kill(entireProcessTree: true);
+                proc.WaitForExit(5000);
+                killed++;
+                _logger.LogWarning(
+                    "Killed a stray Apollo (PID {Pid}) running this seat's config {Config} ({Reason})",
+                    pid, configPath, reason);
+            }
+            catch (ArgumentException)
+            {
+                // Already gone.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not kill stray Apollo PID {Pid} ({Reason})", pid, reason);
+            }
+        }
+        return killed;
+    }
+
+    /// <summary>
+    /// PIDs of running <paramref name="exeName"/>.exe processes whose command line passes exactly
+    /// <paramref name="configPath"/>. Throws when WMI fails.
+    /// </summary>
+    private static List<int> QueryApolloPidsForConfig(string exeName, string configPath, int? onlyPid)
+    {
+        // Same query shape as MultiSeatWorker.GetManagedApolloPids. The name comes from our own
+        // options, and a quote in it is refused rather than escaped.
+        if (exeName.Contains('\'')) return [];
+        var query = $"SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = '{exeName}.exe'";
+        if (onlyPid is { } p) query += $" AND ProcessId = {p}";
+
+        var pids = new List<int>();
+        using var searcher = new System.Management.ManagementObjectSearcher(query);
+        foreach (System.Management.ManagementObject obj in searcher.Get())
+        {
+            using (obj)
+            {
+                if (ApolloOwnership.CommandLineNamesConfig(obj["CommandLine"] as string, configPath))
+                    pids.Add(Convert.ToInt32(obj["ProcessId"]));
+            }
+        }
+        return pids;
     }
 
     /// <summary>
@@ -997,8 +1186,13 @@ internal sealed record ApolloInstance(
     string AccountName,
     DateTimeOffset StartedAt,
     int RestartCount,
-    ProcessIdentity? Identity = null)
+    ProcessIdentity? Identity = null,
+    LaunchedProcess? Launched = null)
 {
+    // Launched: the handle kept from the launch, so the exit code can be read once Apollo exits
+    // (issue #124). Null for a record of a process we killed, or none launched. ApolloManager
+    // owns it and disposes it when the record is replaced or removed.
+
     /// <summary>
     /// Check if the Apollo process is still running.
     ///

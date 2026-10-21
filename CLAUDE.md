@@ -369,6 +369,27 @@ Until then, a PID alone is not reported as API readiness. An early exit or timeo
 launched process and reports the seat log path. Automatic restarts retain their three-attempt
 limit. The success message names the Moonlight base port, not the web UI's base-plus-one port.
 
+### Seat Apollo has no console window, and its exit code decides what happens (#124)
+
+Seat Apollo is launched with `CREATE_NO_WINDOW` (`ProcessInjector.ApolloLaunchRequestFor`), and the
+service keeps the launch's process handle so it can read the exit code. With no console window
+Apollo's `GetConsoleWindow()` is NULL, so it behaves as it does under its own Windows service:
+Restart from its web UI or tray exits **0** and starts nothing, and Quit exits **1115**
+(`ERROR_SHUTDOWN_IN_PROGRESS`). The health check reads the code (`ApolloExit`):
+
+| exit code | the health check |
+|---|---|
+| 1115 (Quit) | leaves Apollo stopped, like the dashboard's Stop: `ApolloProcessId` 0, a message on the seat, no restart attempt spent. Start or Restart on the seat's Apollo row brings it back |
+| 0 (Restart) | relaunches it without spending a restart attempt. Within 30 s of launch it is counted, so an Apollo that keeps exiting 0 still stops |
+| anything else, or unreadable | a crash: relaunch, counted against the three attempts |
+
+⚠️ This reverses #120/#121, which kept `CREATE_NEW_CONSOLE` on purpose. With a console, Restart
+made Apollo start a copy of itself before exiting 0, the service then launched a second one, and
+both ran on the seat's ports (issue #124). Quit also exited 0, so it was relaunched within 5 s.
+As a guard, `ApolloManager` also kills any `sunshine.exe` whose command line passes exactly this
+seat's `sunshine.conf` before every launch and at the end of every stop
+(`ApolloOwnership.CommandLineNamesConfig`). Another seat's Apollo and the console Apollo never match.
+
 ### It KEEPS RUNNING and serves, but writes nothing -> it cannot open its log file
 
 A seat is a standard user. A log left by an earlier run is owned by Administrators with

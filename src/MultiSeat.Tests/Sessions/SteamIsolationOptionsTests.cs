@@ -47,8 +47,8 @@ public sealed class SteamIsolationOptionsTests
         Assert.Equal(new MultiSeatOptions().SteamIsolationReadyTimeoutSeconds, shipped);
     }
 
-    // The supervised launcher must not get a console window in the seat; every other launch
-    // keeps the new console it always had.
+    // The supervised launcher must not get a console window in the seat; an ordinary launch
+    // keeps the new console it always had. Seat Apollo is the other exception (issue #124).
     [Fact]
     public void SupervisedLaunchGetsNoConsoleWindow()
     {
@@ -71,7 +71,8 @@ public sealed class SteamIsolationOptionsTests
     }
 
     // Seat Apollo starts minimized without stealing focus (issue #120); everything else is shown.
-    // Apollo keeps its console, so GetConsoleWindow stays non-NULL.
+    // Since #124 seat Apollo has no console window for this to apply to; the request is kept as a
+    // harmless fallback (see ProcessInjector.ShowWindowFor).
     [Fact]
     public void ApolloLaunchIsMinimizedWithoutActivation()
     {
@@ -84,13 +85,45 @@ public sealed class SteamIsolationOptionsTests
         Assert.Equal(Kernel32.SW_SHOW, ProcessInjector.ShowWindowFor(minimized: false));
     }
 
+    // ⚠️ REVERSED ON PURPOSE (issue #124). Until #124 this test asserted the opposite: seat Apollo
+    // kept CREATE_NEW_CONSOLE so GetConsoleWindow stayed non-NULL (issues #120/#121). That console
+    // is what made Apollo's Restart spawn an untracked copy of itself, leaving two Apollos on one
+    // seat, and made Quit exit 0 so the service could not tell it from a Restart. With no console
+    // window Apollo exits 0 on Restart and 1115 on Quit and starts nothing, and the service decides.
     [Fact]
-    public void ApolloLaunchKeepsItsConsoleAndNeverUsesNoWindow()
+    public void ApolloLaunchHasNoConsoleWindow()
     {
-        // Apollo is never supervised, so it takes the ordinary flags.
-        var flags = ProcessInjector.CreationFlagsFor(supervised: false);
-        Assert.True((flags & Kernel32.CREATE_NEW_CONSOLE) != 0);
-        Assert.True((flags & Kernel32.CREATE_NO_WINDOW) == 0);
+        var request = ProcessInjector.ApolloLaunchRequestFor(
+            @"C:\Program Files\ApolloVibe\sunshine.exe",
+            @"C:\ProgramData\MultiSeat\apollo\Gaming\sunshine.conf");
+        Assert.True(request.NoConsoleWindow);
+
+        // Apollo is not a supervised Steam launch; its own flag is what removes the console.
+        var flags = ProcessInjector.CreationFlagsFor(supervised: false, request.NoConsoleWindow);
+        Assert.True((flags & Kernel32.CREATE_NO_WINDOW) != 0);
+        Assert.True((flags & Kernel32.CREATE_NEW_CONSOLE) == 0);
+        Assert.Equal(
+            Kernel32.CREATE_UNICODE_ENVIRONMENT | Kernel32.CREATE_NO_WINDOW | Kernel32.NORMAL_PRIORITY_CLASS,
+            flags);
+    }
+
+    [Fact]
+    public void NoConsoleWindowDefaultsOff_SoGamesKeepTheirConsole()
+    {
+        // Games and on-connect apps go through LaunchInSessionAsync, which never asks for it.
+        Assert.Equal(
+            ProcessInjector.CreationFlagsFor(supervised: false, noConsoleWindow: false),
+            ProcessInjector.CreationFlagsFor(supervised: false));
+        Assert.True((ProcessInjector.CreationFlagsFor(supervised: false) & Kernel32.CREATE_NEW_CONSOLE) != 0);
+    }
+
+    [Fact]
+    public void SupervisedAndNoConsoleWindowTogether_StillOneNoWindowFlag()
+    {
+        var flags = ProcessInjector.CreationFlagsFor(supervised: true, noConsoleWindow: true);
+        Assert.Equal(
+            Kernel32.CREATE_UNICODE_ENVIRONMENT | Kernel32.CREATE_NO_WINDOW | Kernel32.NORMAL_PRIORITY_CLASS,
+            flags);
     }
 
     [Fact]
@@ -101,8 +134,8 @@ public sealed class SteamIsolationOptionsTests
         Assert.True((ProcessInjector.CreationFlagsFor(supervised: true) & Kernel32.CREATE_NO_WINDOW) != 0);
     }
 
-    // The wiring: the Apollo launch request is minimized, quotes the config path, and runs from
-    // the config file's directory.
+    // The wiring: the Apollo launch request is minimized with no console window, quotes the config
+    // path, and runs from the config file's directory.
     [Fact]
     public void ApolloLaunchRequestIsMinimizedWithSeatConfigAndWorkingDir()
     {
@@ -110,6 +143,7 @@ public sealed class SteamIsolationOptionsTests
             @"C:\Program Files\ApolloVibe\sunshine.exe",
             @"C:\Seats\seat1\config\sunshine.conf");
         Assert.True(request.Minimized);
+        Assert.True(request.NoConsoleWindow);
         Assert.Equal(@"C:\Program Files\ApolloVibe\sunshine.exe", request.ExePath);
         Assert.Equal("\"C:\\Seats\\seat1\\config\\sunshine.conf\"", request.Arguments);
         Assert.Equal(@"C:\Seats\seat1\config", request.WorkingDir);
