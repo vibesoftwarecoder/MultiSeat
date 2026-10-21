@@ -69,4 +69,35 @@ public sealed class SteamIsolationOptionsTests
             Kernel32.CREATE_UNICODE_ENVIRONMENT | Kernel32.CREATE_NEW_CONSOLE | Kernel32.NORMAL_PRIORITY_CLASS,
             flags);
     }
+
+    // Seat Apollo starts minimized without stealing focus (issue #120); everything else is shown.
+    // Apollo keeps its console, so GetConsoleWindow stays non-NULL.
+    [Fact]
+    public void ApolloLaunchIsMinimizedWithoutActivation()
+    {
+        Assert.Equal(Kernel32.SW_SHOWMINNOACTIVE, ProcessInjector.ShowWindowFor(minimized: true));
+    }
+
+    [Fact]
+    public void OrdinaryLaunchStaysVisible()
+    {
+        Assert.Equal(Kernel32.SW_SHOW, ProcessInjector.ShowWindowFor(minimized: false));
+    }
+
+    [Fact]
+    public void ApolloLaunchKeepsItsConsoleAndNeverUsesNoWindow()
+    {
+        // Apollo is never supervised, so it takes the ordinary flags.
+        var flags = ProcessInjector.CreationFlagsFor(supervised: false);
+        Assert.True((flags & Kernel32.CREATE_NEW_CONSOLE) != 0);
+        Assert.True((flags & Kernel32.CREATE_NO_WINDOW) == 0);
+    }
+
+    [Fact]
+    public void SupervisedLaunchWindowStateIsUnchanged()
+    {
+        // The supervised Steam launch is not minimized: only the Apollo launch asks for that.
+        Assert.Equal(Kernel32.SW_SHOW, ProcessInjector.ShowWindowFor(minimized: false));
+        Assert.True((ProcessInjector.CreationFlagsFor(supervised: true) & Kernel32.CREATE_NO_WINDOW) != 0);
+    }
 }

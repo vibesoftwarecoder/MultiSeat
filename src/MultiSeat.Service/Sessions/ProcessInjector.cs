@@ -49,7 +49,8 @@ public sealed class ProcessInjector
         string? arguments = null,
         string? workingDir = null,
         CancellationToken ct = default,
-        bool allowConsoleSession = false)
+        bool allowConsoleSession = false,
+        bool minimized = false)
     {
         _logger.LogInformation(
             "Launching '{Exe}' in session {Sid} (account: {Account})",
@@ -131,7 +132,7 @@ public sealed class ProcessInjector
                 cb = Marshal.SizeOf<Kernel32.StartupInfo>(),
                 lpDesktop = @"WinSta0\Default",
                 dwFlags = Kernel32.STARTF_USESHOWWINDOW,
-                wShowWindow = Kernel32.SW_SHOW  // games should be visible
+                wShowWindow = ShowWindowFor(minimized)
             };
 
             var creationFlags = CreationFlagsFor(launchPlan.Supervised);
@@ -210,6 +211,15 @@ public sealed class ProcessInjector
         Kernel32.NORMAL_PRIORITY_CLASS;
 
     /// <summary>
+    /// Initial window state for a launch in a seat. Games are shown, as they always were. Seat
+    /// Apollo is started minimized without taking focus, so its console does not sit in the seat's
+    /// view. It keeps its console (CREATE_NEW_CONSOLE, not CREATE_NO_WINDOW) so GetConsoleWindow
+    /// stays non-NULL for Apollo's restart and quit logic; see issue #120.
+    /// </summary>
+    internal static short ShowWindowFor(bool minimized) =>
+        minimized ? Kernel32.SW_SHOWMINNOACTIVE : Kernel32.SW_SHOW;
+
+    /// <summary>
     /// Launch Apollo streaming server inside a target session.
     /// Special handling: Apollo needs specific env vars and the config path.
     /// </summary>
@@ -230,7 +240,8 @@ public sealed class ProcessInjector
             sessionId, accountName,
             apolloExePath, arguments,
             Path.GetDirectoryName(configPath),
-            ct);
+            ct,
+            minimized: true);
     }
 
     /// <summary>
