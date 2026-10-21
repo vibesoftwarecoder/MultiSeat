@@ -100,4 +100,18 @@ public sealed class SteamIsolationOptionsTests
         Assert.Equal(Kernel32.SW_SHOW, ProcessInjector.ShowWindowFor(minimized: false));
         Assert.True((ProcessInjector.CreationFlagsFor(supervised: true) & Kernel32.CREATE_NO_WINDOW) != 0);
     }
+
+    // The wiring: the Apollo launch request is minimized, quotes the config path, and runs from
+    // the config file's directory.
+    [Fact]
+    public void ApolloLaunchRequestIsMinimizedWithSeatConfigAndWorkingDir()
+    {
+        var request = ProcessInjector.ApolloLaunchRequestFor(
+            @"C:\Program Files\ApolloVibe\sunshine.exe",
+            @"C:\Seats\seat1\config\sunshine.conf");
+        Assert.True(request.Minimized);
+        Assert.Equal(@"C:\Program Files\ApolloVibe\sunshine.exe", request.ExePath);
+        Assert.Equal("\"C:\\Seats\\seat1\\config\\sunshine.conf\"", request.Arguments);
+        Assert.Equal(@"C:\Seats\seat1\config", request.WorkingDir);
+    }
 }

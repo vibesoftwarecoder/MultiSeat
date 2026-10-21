@@ -230,19 +230,29 @@ public sealed class ProcessInjector
         string configPath,
         CancellationToken ct)
     {
-        var arguments = $"\"{configPath}\"";
+        var request = ApolloLaunchRequestFor(apolloExePath, configPath);
+        return LaunchInSessionAsync(
+            sessionId, accountName,
+            request.ExePath, request.Arguments,
+            request.WorkingDir,
+            ct,
+            minimized: request.Minimized);
+    }
 
+    /// <summary>What a seat Apollo launch asks LaunchInSessionAsync for.</summary>
+    internal readonly record struct ApolloLaunchRequest(
+        string ExePath, string Arguments, string? WorkingDir, bool Minimized);
+
+    /// <summary>
+    /// Builds the seat Apollo launch request. The one place that decides Apollo starts minimized
+    /// (issue #120).
+    /// </summary>
+    internal static ApolloLaunchRequest ApolloLaunchRequestFor(string apolloExePath, string configPath) =>
         // Working dir = per-seat config dir (not the Apollo install dir).
         // Apollo resolves sunshine_state.json from {workingDir}/config/sunshine_state.json.
         // Each seat must have its own working dir so they get distinct UUIDs and
         // Moonlight can list them as separate servers.
-        return LaunchInSessionAsync(
-            sessionId, accountName,
-            apolloExePath, arguments,
-            Path.GetDirectoryName(configPath),
-            ct,
-            minimized: true);
-    }
+        new(apolloExePath, $"\"{configPath}\"", Path.GetDirectoryName(configPath), Minimized: true);
 
     /// <summary>
     /// Refuse to launch a seat's process into the console session.
