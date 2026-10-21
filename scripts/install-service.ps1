@@ -472,7 +472,18 @@ function Get-RunningVoiceMeeter {
     return $null
 }
 
-if ($vmExe) {
+# Only SharedHost uses VoiceMeeter. Under PerSession (the service default) every seat plays to
+# its own RDP Remote Audio endpoint, so starting it, or telling the user to install it, is wrong.
+# This runs BEFORE Install-Payload, so on an upgrade the config read is the one already deployed
+# in $InstallDir (the settings the service will keep, since the payload step carries the user's
+# appsettings over), and on a fresh install there is none yet, which correctly means PerSession.
+$audioMode = Get-EffectiveAudioMode -ConfigPaths @(
+    (Join-Path $InstallDir "appsettings.local.json"),
+    (Join-Path $InstallDir "appsettings.json"))
+
+if (-not (Test-VoiceMeeterNeeded -AudioMode $audioMode)) {
+    Write-Host "  OK: VoiceMeeter not needed (AudioMode $audioMode)" -ForegroundColor DarkGray
+} elseif ($vmExe) {
     $vmRunning = Get-RunningVoiceMeeter -Names $vmNames
     if ($vmRunning) {
         Write-Host "  OK: VoiceMeeter already running ($vmRunning)" -ForegroundColor DarkGray

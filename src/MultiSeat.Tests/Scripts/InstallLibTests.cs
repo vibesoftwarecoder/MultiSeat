@@ -938,6 +938,126 @@ public class InstallLibTests
         Assert.True(File.Exists(marker));
     }
 
+    // -- AudioMode decision: does this install need VoiceMeeter? (#122) ----------------
+
+    private static (string Mode, bool Needed) AudioModeOf(string engine, params string[] paths)
+    {
+        var j = J(Ps(engine,
+            "$mode = Get-EffectiveAudioMode -ConfigPaths @(" + string.Join(",", paths.Select(Q)) + ")\n" +
+            "$r = [pscustomobject]@{ Mode = $mode; Needed = [bool](Test-VoiceMeeterNeeded -AudioMode $mode) }\n"));
+        return (j.GetProperty("Mode").GetString()!, j.GetProperty("Needed").GetBoolean());
+    }
+
+    private static string Cfg(string audioMode) => "{\n  \"MultiSeat\": {\n    \"AudioMode\": \"" + audioMode + "\"\n  }\n}\n";
+
+    [Theory, MemberData(nameof(Engines))]
+    public void No_config_files_means_PerSession_and_no_VoiceMeeter(string engine)
+    {
+        using var t = new Temp();
+        Assert.Equal(("PerSession", false), AudioModeOf(engine, t.Sub("appsettings.local.json"), t.Sub("appsettings.json")));
+        var empty = J(Ps(engine, "$mode = Get-EffectiveAudioMode\n$r = [pscustomobject]@{ Mode = $mode }\n"));
+        Assert.Equal("PerSession", empty.GetProperty("Mode").GetString());
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Base_file_PerSession_is_PerSession(string engine)
+    {
+        using var t = new Temp();
+        Put(t.Root, "appsettings.json", Cfg("PerSession"));
+        Assert.Equal(("PerSession", false), AudioModeOf(engine, t.Sub("appsettings.local.json"), t.Sub("appsettings.json")));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Base_file_SharedHost_is_SharedHost_and_needs_VoiceMeeter(string engine)
+    {
+        using var t = new Temp();
+        Put(t.Root, "appsettings.json", Cfg("SharedHost"));
+        Assert.Equal(("SharedHost", true), AudioModeOf(engine, t.Sub("appsettings.local.json"), t.Sub("appsettings.json")));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Local_file_overrides_the_base_file_both_ways(string engine)
+    {
+        using var t = new Temp();
+        Put(t.Root, "appsettings.json", Cfg("SharedHost"));
+        Put(t.Root, "appsettings.local.json", Cfg("PerSession"));
+        Assert.Equal(("PerSession", false), AudioModeOf(engine, t.Sub("appsettings.local.json"), t.Sub("appsettings.json")));
+        Put(t.Root, "appsettings.local.json", Cfg("SharedHost"));
+        Assert.Equal(("SharedHost", true), AudioModeOf(engine, t.Sub("appsettings.local.json"), t.Sub("appsettings.json")));
+        Put(t.Root, "appsettings.json", Cfg("PerSession"));
+        Assert.Equal(("SharedHost", true), AudioModeOf(engine, t.Sub("appsettings.local.json"), t.Sub("appsettings.json")));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void A_local_file_without_the_key_leaves_the_base_file_in_charge(string engine)
+    {
+        using var t = new Temp();
+        Put(t.Root, "appsettings.json", Cfg("SharedHost"));
+        Put(t.Root, "appsettings.local.json", "{ \"MultiSeat\": { \"ApiKey\": \"x\" } }");
+        Assert.Equal(("SharedHost", true), AudioModeOf(engine, t.Sub("appsettings.local.json"), t.Sub("appsettings.json")));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Comments_and_a_byte_order_mark_do_not_break_the_read(string engine)
+    {
+        using var t = new Temp();
+        // Full-line and trailing // comments (Windows PowerShell 5.1's ConvertFrom-Json rejects both),
+        // a commented-out AudioMode line that must NOT win, and a UTF-8 BOM.
+        var text = "// header comment\n{\n  \"MultiSeat\": {\n    // \"AudioMode\": \"PerSession\",\n" +
+                   "    \"AudioMode\": \"SharedHost\", // trailing note\n    \"Url\": \"http://localhost\" // another\n  }\n}\n";
+        Put(t.Root, "appsettings.json", new byte[] { 0xEF, 0xBB, 0xBF }.Concat(Encoding.UTF8.GetBytes(text)).ToArray());
+        Assert.Equal(("SharedHost", true), AudioModeOf(engine, t.Sub("appsettings.json")));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void A_commented_out_AudioMode_line_alone_means_PerSession(string engine)
+    {
+        using var t = new Temp();
+        Put(t.Root, "appsettings.json", "{\n  // \"AudioMode\": \"SharedHost\"\n}\n");
+        Assert.Equal(("PerSession", false), AudioModeOf(engine, t.Sub("appsettings.json")));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Garbage_and_unreadable_files_mean_PerSession(string engine)
+    {
+        using var t = new Temp();
+        Put(t.Root, "appsettings.json", "\u0001\u0002 not json at all {{{ \"AudioMode");
+        Assert.Equal(("PerSession", false), AudioModeOf(engine, t.Sub("appsettings.json")));
+
+        Put(t.Root, "locked.json", Cfg("SharedHost"));
+        using (new FileStream(t.Sub("locked.json"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            Assert.Equal(("PerSession", false), AudioModeOf(engine, t.Sub("locked.json")));
+        }
+        // A directory where a file should be.
+        Directory.CreateDirectory(t.Sub("dir.json"));
+        Assert.Equal(("PerSession", false), AudioModeOf(engine, t.Sub("dir.json")));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void An_unrecognised_value_means_PerSession(string engine)
+    {
+        using var t = new Temp();
+        Put(t.Root, "appsettings.json", Cfg("Banana"));
+        Assert.Equal(("PerSession", false), AudioModeOf(engine, t.Sub("appsettings.json")));
+        Put(t.Root, "appsettings.json", Cfg(""));
+        Assert.Equal(("PerSession", false), AudioModeOf(engine, t.Sub("appsettings.json")));
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void VoiceMeeter_is_needed_only_for_SharedHost(string engine)
+    {
+        var j = J(Ps(engine,
+            "$r = [pscustomobject]@{ Shared = [bool](Test-VoiceMeeterNeeded -AudioMode 'SharedHost');" +
+            " Per = [bool](Test-VoiceMeeterNeeded -AudioMode 'PerSession');" +
+            " Empty = [bool](Test-VoiceMeeterNeeded -AudioMode '');" +
+            " Other = [bool](Test-VoiceMeeterNeeded -AudioMode 'Banana') }\n"));
+        Assert.True(j.GetProperty("Shared").GetBoolean());
+        Assert.False(j.GetProperty("Per").GetBoolean());
+        Assert.False(j.GetProperty("Empty").GetBoolean());
+        Assert.False(j.GetProperty("Other").GetBoolean());
+    }
+
     // -- Wiring of install-service.ps1 itself ----------------------------------------
 
     private static string[] InstallerLines() => File.ReadAllLines(Path.Combine(RepoRoot, "scripts", "install-service.ps1"));
@@ -989,5 +1109,35 @@ public class InstallLibTests
         Assert.True(iGate > 0 && iGate < iStop, "the stop must sit inside the pre-flight gate, after it");
         Assert.True(iBlocked > iStop && iExit > iBlocked && iExit < iInstall,
             "a block must exit non-zero before the install folder is replaced");
+    }
+
+    [Fact]
+    public void The_VoiceMeeter_step_runs_only_when_the_AudioMode_decision_says_so()
+    {
+        var lines = InstallerLines();
+        var iGuard = Array.FindIndex(lines, l => l.TrimStart().StartsWith("if (-not (Test-VoiceMeeterNeeded"));
+        Assert.True(iGuard > 0, "the VoiceMeeter block must be guarded by Test-VoiceMeeterNeeded");
+        var iElse = Array.FindIndex(lines, iGuard, l => l.TrimStart().StartsWith("} elseif ($vmExe) {"));
+        var iEnd = Array.FindIndex(lines, iGuard, l => l.Contains("-- Standalone Apollo coexistence"));
+        Assert.True(iElse > iGuard && iEnd > iElse, "expected: guard, then the SharedHost branch, then the next section");
+
+        // The guard's own branch (PerSession) must neither start VoiceMeeter nor print the NOTE.
+        var skipBranch = string.Join("\n", lines.Skip(iGuard + 1).Take(iElse - iGuard - 1));
+        Assert.DoesNotContain("Start-Process", skipBranch);
+        Assert.DoesNotContain("not found", skipBranch);
+        Assert.Contains("VoiceMeeter not needed", skipBranch);
+
+        // Both the start and the NOTE live in the SharedHost branches, after the guard.
+        var iStart = Array.FindIndex(lines, l => l.Contains("Start-Process $vmExe"));
+        var iNote = Array.FindIndex(lines, l => l.Contains("VoiceMeeter not found under VB"));
+        Assert.True(iStart > iElse && iStart < iEnd, "Start-Process of VoiceMeeter must sit inside the guarded branch");
+        Assert.True(iNote > iElse && iNote < iEnd, "the 'VoiceMeeter not found' NOTE must sit inside the guarded branch");
+
+        // The config is read from the deployed folder BEFORE Install-Payload replaces it.
+        var iRead = Array.FindIndex(lines, l => l.Contains("Get-EffectiveAudioMode -ConfigPaths"));
+        var iInstall = Array.FindIndex(lines, l => l.Contains("Install-Payload -Stage"));
+        Assert.True(iRead > 0 && iRead < iGuard && iGuard < iInstall, "AudioMode must be read before the guard and before Install-Payload");
+        Assert.Contains("appsettings.local.json", lines[iRead + 1]);
+        Assert.Contains("appsettings.json", lines[iRead + 2]);
     }
 }

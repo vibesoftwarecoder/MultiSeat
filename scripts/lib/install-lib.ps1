@@ -268,6 +268,40 @@ function Read-JsonLoose {
     return ($text | ConvertFrom-Json)
 }
 
+function Get-EffectiveAudioMode {
+    # The AudioMode the service will run with, read from the config files it reads.
+    # -ConfigPaths is in precedence order, HIGHEST first (appsettings.local.json, then
+    # appsettings.json): the first file that sets AudioMode decides, like the service's own
+    # layering. A missing or unreadable file, no AudioMode key, or a value that is not
+    # SharedHost or PerSession (any case, as the service's binder reads it) all give PerSession,
+    # the service default (MultiSeatOptions).
+    # It takes paths, not an install folder, so a test can feed it temp files and nothing here
+    # knows where MultiSeat lives.
+    #
+    # A regex, not Read-JsonLoose/ConvertFrom-Json: it must not throw on a half-written or
+    # hand-edited file, and a comment after the value ("PerSession", // note) must not matter.
+    # Full-line // comments are dropped first so a commented-out "AudioMode" line cannot win.
+    # Same approach as Get-ConfiguredAudioMode in prerequisites\install-prerequisites.ps1.
+    param([string[]]$ConfigPaths = @())
+    foreach ($f in $ConfigPaths) {
+        if (-not $f -or -not (Test-Path -LiteralPath $f -PathType Leaf)) { continue }
+        try { $text = [System.IO.File]::ReadAllText($f) } catch { continue }
+        $text = [regex]::Replace($text, '(?m)^[ \t]*//[^\r\n]*', '')
+        $m = [regex]::Match($text, '"AudioMode"\s*:\s*"([^"]*)"')
+        if (-not $m.Success) { continue }
+        if ($m.Groups[1].Value -eq 'SharedHost') { return 'SharedHost' }
+        return 'PerSession'
+    }
+    return 'PerSession'
+}
+
+function Test-VoiceMeeterNeeded {
+    # Only SharedHost routes seat audio through VoiceMeeter's devices. PerSession gives every
+    # seat its own RDP Remote Audio endpoint, so VoiceMeeter is neither started nor missed.
+    param([string]$AudioMode)
+    return ($AudioMode -eq 'SharedHost')
+}
+
 function Get-Sha256 {
     # .NET directly: Get-FileHash lives in a module that is not always loadable when PSModulePath
     # is shared between Windows PowerShell and PowerShell 7.
