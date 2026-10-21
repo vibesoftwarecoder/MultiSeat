@@ -870,6 +870,80 @@ public class InstallLibTests
         Assert.Empty(after.GetProperty("Processes").EnumerateArray());
     }
 
+    // -- The close-Steam command must name steam.exe, never the hook DLL (#126) ---------------
+
+    private static string MessageFor(string engine, string processesLiteral, string folder)
+    {
+        var j = J(Ps(engine,
+            "$check = [pscustomobject]@{ Blocked = $true; Folder = " + Q(folder) + "; LockedFiles = @(); Processes = @(" + processesLiteral + ") }\n" +
+            "$r = [pscustomobject]@{ Message = (Format-SteamInUseMessage -Check $check) }\n"));
+        return j.GetProperty("Message").GetString()!;
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void The_close_steam_command_names_steam_exe_when_the_holder_path_is_the_hook_dll(string engine)
+    {
+        const string steamExe = @"C:\Program Files (x86)\Steam\steam.exe";
+        const string dir = @"C:\Program Files\MultiSeat\SteamIsolation";
+        var msg = MessageFor(engine,
+            "[pscustomobject]@{ Name = 'steam'; Id = 10; SessionId = 2; Owner = 'PC\\gamer'; Role = 'holder'; " +
+            "Path = " + Q(dir + @"\MultiSeat.SteamHook.dll") + "; ImagePath = " + Q(steamExe) + " }", dir);
+        Assert.Contains("--steam \"" + steamExe + "\" --forward -- -shutdown", msg);
+        Assert.DoesNotContain("--steam \"" + dir + @"\MultiSeat.SteamHook.dll", msg);
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void The_close_steam_command_keeps_the_placeholder_when_no_steam_image_is_known(string engine)
+    {
+        const string dir = @"C:\Program Files\MultiSeat\SteamIsolation";
+        var msg = MessageFor(engine,
+            "[pscustomobject]@{ Name = 'steam'; Id = 10; SessionId = 2; Owner = $null; Role = 'holder'; " +
+            "Path = " + Q(dir + @"\MultiSeat.SteamHook.dll") + "; ImagePath = $null }", dir);
+        Assert.Contains("--steam \"<path to steam.exe>\"", msg);
+        Assert.DoesNotContain("SteamHook.dll\" --forward", msg);
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void The_close_steam_command_skips_a_steam_entry_whose_image_is_not_steam_exe(string engine)
+    {
+        // A first entry with only a DLL image must not win over a later entry with the real exe.
+        const string steamExe = @"D:\Games\Steam\steam.exe";
+        const string dir = @"C:\Program Files\MultiSeat\SteamIsolation";
+        var msg = MessageFor(engine,
+            "[pscustomobject]@{ Name = 'steam'; Id = 10; SessionId = 2; Owner = $null; Role = 'holder'; Path = 'x.dll'; ImagePath = " + Q(dir + @"\MultiSeat.SteamHook.dll") + " }, " +
+            "[pscustomobject]@{ Name = 'steam'; Id = 11; SessionId = 2; Owner = $null; Role = 'steam'; Path = " + Q(steamExe) + "; ImagePath = " + Q(steamExe) + " }", dir);
+        Assert.Contains("--steam \"" + steamExe + "\"", msg);
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public void Preflight_fills_ImagePath_with_the_real_exe_and_the_message_uses_it(string engine)
+    {
+        // A real process whose image is SteamIsolation\steam.exe. Path (the matching file) and
+        // ImagePath must both be that exe here, and the printed command must carry it.
+        using var t = new Temp();
+        PutSteamIsolation(t.Root, "old");
+        var fakeSteam = Path.Combine(t.Root, "SteamIsolation", "steam.exe");
+        File.Copy(Path.Combine(Environment.SystemDirectory, "ping.exe"), fakeSteam, overwrite: true);
+        using var proc = Process.Start(new ProcessStartInfo(fakeSteam, "-n 120 127.0.0.1")
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+        })!;
+        try
+        {
+            Thread.Sleep(500);
+            var j = J(Ps(engine, CheckCall(t.Root) +
+                "$r | Add-Member -NotePropertyName Message -NotePropertyValue (Format-SteamInUseMessage -Check $r)\n"));
+            var mine = j.GetProperty("Processes").EnumerateArray().Single(x => x.GetProperty("Id").GetInt32() == proc.Id);
+            Assert.Equal(fakeSteam, mine.GetProperty("ImagePath").GetString(), ignoreCase: true);
+            Assert.Contains("--steam \"" + fakeSteam + "\"", j.GetProperty("Message").GetString(), StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            try { proc.Kill(); proc.WaitForExit(10_000); } catch (InvalidOperationException) { }
+        }
+    }
+
     private static string GateCall(string install, string marker) =>
         "$r = Invoke-StopWhenNotBlocked -InstallDir " + Q(install) +
         " -Stop { Set-Content -LiteralPath " + Q(marker) + " -Value stopped }\n";

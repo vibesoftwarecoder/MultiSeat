@@ -568,6 +568,22 @@ function Get-ProcessOwner {
     return $null
 }
 
+function Get-ProcessImagePath {
+    # The process's own main-module path, or $null when it cannot be read. A protected process, or a
+    # 32-bit steam.exe read from 64-bit PowerShell, makes MainModule throw; then ask WMI, which does
+    # not need a handle on the process. Never throws.
+    param([Parameter(Mandatory = $true)]$Process)
+    try {
+        $f = $Process.MainModule.FileName
+        if ($f) { return $f }
+    } catch { }
+    try {
+        $cim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($Process.Id)" -ErrorAction Stop
+        if ($cim -and $cim.ExecutablePath) { return $cim.ExecutablePath }
+    } catch { }
+    return $null
+}
+
 function Get-ProcessesUsingFolder {
     <#
     .SYNOPSIS
@@ -575,7 +591,8 @@ function Get-ProcessesUsingFolder {
     .DESCRIPTION
         Protected processes and processes that exit while we look throw when their modules are
         read. Those are skipped, never fatal. Returns objects with Name, Id, SessionId, Owner,
-        Path (the file that put it on the list) and Role 'holder'.
+        Path (the file that put it on the list), ImagePath (the process's own exe, or $null when
+        unreadable) and Role 'holder'. Path may be a DLL; ImagePath is never a module.
     #>
     param([Parameter(Mandatory = $true)][string]$Folder)
     $prefix = [System.IO.Path]::GetFullPath($Folder).TrimEnd('\') + '\'
@@ -601,7 +618,8 @@ function Get-ProcessesUsingFolder {
         if ($hit) {
             $found += [pscustomobject]@{
                 Name = $p.ProcessName; Id = $p.Id; SessionId = $p.SessionId
-                Owner = (Get-ProcessOwner -ProcessId $p.Id); Path = $hit; Role = 'holder' }
+                Owner = (Get-ProcessOwner -ProcessId $p.Id); Path = $hit
+                ImagePath = (Get-ProcessImagePath -Process $p); Role = 'holder' }
         }
     }
     return $found
@@ -636,11 +654,11 @@ function Test-SteamIsolationBlocksUpgrade {
         $known = @($procs | ForEach-Object { $_.Id })
         foreach ($p in @(Get-Process -Name 'steam', 'steamwebhelper' -ErrorAction SilentlyContinue)) {
             if (($sessions -contains $p.SessionId) -and -not ($known -contains $p.Id)) {
-                $path = $null
-                try { $path = $p.MainModule.FileName } catch { }
+                $path = Get-ProcessImagePath -Process $p
                 $procs += [pscustomobject]@{
                     Name = $p.ProcessName; Id = $p.Id; SessionId = $p.SessionId
-                    Owner = (Get-ProcessOwner -ProcessId $p.Id); Path = $path; Role = 'steam' }
+                    Owner = (Get-ProcessOwner -ProcessId $p.Id); Path = $path
+                    ImagePath = $path; Role = 'steam' }
             }
         }
     }
@@ -659,7 +677,10 @@ function Format-SteamInUseMessage {
     $launcher = Join-Path $Check.Folder 'MultiSeat.SteamLauncher.exe'
     $steamExe = $null
     foreach ($p in @($Check.Processes)) {
-        if ($p.Name -eq 'steam' -and $p.Path) { $steamExe = $p.Path; break }
+        # ImagePath, not Path: for a holder, Path is the module that matched (the hook DLL).
+        if ($p.Name -eq 'steam' -and $p.ImagePath -and $p.ImagePath.EndsWith('steam.exe', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $steamExe = $p.ImagePath; break
+        }
     }
     if (-not $steamExe) { $steamExe = '<path to steam.exe>' }
 
