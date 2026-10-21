@@ -776,6 +776,7 @@ public sealed class SeatManager
         try { UnassignControllersForSeat(seat.Id); } catch { /* best effort */ }
         try { _controllerManager.DestroyController(seat); } catch { /* best effort */ }
         try { _apolloManager.Stop(seat); } catch { /* best effort */ }
+        try { _apolloManager.ClearStoppedByUser(seat.Id); } catch { /* best effort */ }
         try { _audioRouter.ReleaseCable(seat); } catch { /* best effort */ }
         try { await _firewall.ClosePortsAsync(seat, ct); } catch { /* best effort */ }
         try { await _displayManager.DestroyDisplayAsync(seat, ct); } catch { /* best effort */ }
@@ -872,8 +873,9 @@ public sealed class SeatManager
         var seat = LiveSeatAfterGate(seatId, "Apollo stop");
         if (seat is null) return;
 
-        _apolloManager.Stop(seat);
-        seat.ApolloProcessId = 0;
+        // Marks the seat as stopped by the user, as a Quit from Apollo's own UI does, so the health
+        // check's reconnect after a sleep does not start it again (issue #124).
+        _apolloManager.StopByUser(seat);
         _ = BroadcastState(seat);
         _logger.LogInformation("Seat {Id}: Apollo stopped by user", seatId);
     }
@@ -889,6 +891,10 @@ public sealed class SeatManager
 
         var seat = LiveSeatAfterGate(seatId, "Apollo start");
         if (seat is null) return;
+
+        // The user wants Apollo running: their earlier stop no longer applies, even if this start
+        // fails, so a later reconnect may start it (issue #124).
+        _apolloManager.ClearStoppedByUser(seat.Id);
 
         if (seat.SessionId < 0)
             throw new InvalidOperationException("No active session — provision the seat first.");
@@ -918,6 +924,9 @@ public sealed class SeatManager
 
         var seat = LiveSeatAfterGate(seatId, "Apollo restart");
         if (seat is null) return;
+
+        // As for Start: an explicit Restart ends the user's stop (issue #124).
+        _apolloManager.ClearStoppedByUser(seat.Id);
 
         _apolloManager.Stop(seat);
         seat.ApolloProcessId = 0;

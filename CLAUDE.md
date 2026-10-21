@@ -379,7 +379,7 @@ Restart from its web UI or tray exits **0** and starts nothing, and Quit exits *
 
 | exit code | the health check |
 |---|---|
-| 1115 (Quit) | leaves Apollo stopped, like the dashboard's Stop: `ApolloProcessId` 0, a message on the seat, no restart attempt spent. Start or Restart on the seat's Apollo row brings it back |
+| 1115 (Quit) | leaves Apollo stopped, like the dashboard's Stop: `ApolloProcessId` 0, the seat marked as stopped by the user, a message on the seat, no restart attempt spent. Start or Restart on the seat's Apollo row brings it back |
 | 0 (Restart) | relaunches it without spending a restart attempt. Within 30 s of launch it is counted, so an Apollo that keeps exiting 0 still stops |
 | anything else, or unreadable | a crash: relaunch, counted against the three attempts |
 
@@ -389,6 +389,15 @@ both ran on the seat's ports (issue #124). Quit also exited 0, so it was relaunc
 As a guard, `ApolloManager` also kills any `sunshine.exe` whose command line passes exactly this
 seat's `sunshine.conf` before every launch and at the end of every stop
 (`ApolloOwnership.CommandLineNamesConfig`). Another seat's Apollo and the console Apollo never match.
+
+**A user's stop holds across a sleep.** Quit and the dashboard's Stop both go through
+`ApolloManager.StopByUser`, which marks the seat (`IsStoppedByUser`). While it is marked, the health
+check's reconnect after a session drop reconnects the session but does not start Apollo. The mark
+is cleared by an explicit Start or Restart (even one that then fails), by any successful
+`StartAsync` (provision, and the NVENC, resolution and scale changes, which restart Apollo), and by
+teardown. A reprovisioned seat is a new seat with no mark. It is in memory only, like the seats:
+a service restart or reboot provisions auto-start seats and starts Apollo as usual. It is not in
+the seat JSON; the Apollo row's Start button shows the state, and after a Quit so does the seat's message.
 
 ### It KEEPS RUNNING and serves, but writes nothing -> it cannot open its log file
 

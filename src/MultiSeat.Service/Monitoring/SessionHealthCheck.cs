@@ -337,17 +337,36 @@ public sealed class SessionHealthCheck
         // dropped on its own keeps the scale it had, so a mismatch is something to report.
         _seatManager.RecordAppliedScaleInBackground(seat, "after health-check reconnect");
 
-        // Give the display pipeline a moment to reinitialize after the session
-        // transitions back to Active — SudoVDA and DXGI need a beat to be ready.
-        await Task.Delay(2000, ct);
+        // The user stopped this seat's Apollo (Quit or the dashboard's Stop) before the session
+        // dropped. Reconnecting the session is ours to do; starting Apollo is not (issue #124).
+        var newPid = await RestartApolloAfterReconnectAsync(
+            stoppedByUser: () => _apolloManager.IsStoppedByUser(seat.Id),
+            restart: async c =>
+            {
+                // Give the display pipeline a moment to reinitialize after the session
+                // transitions back to Active — SudoVDA and DXGI need a beat to be ready.
+                await Task.Delay(2000, c);
 
-        _logger.LogInformation(
-            "Seat {Id}: session reconnected — restarting Apollo",
-            seat.Id);
-        var newPid = await _apolloManager.RestartAsync(seat, ct);
+                _logger.LogInformation(
+                    "Seat {Id}: session reconnected — restarting Apollo",
+                    seat.Id);
+                return await _apolloManager.RestartAsync(seat, c);
+            },
+            ct);
+
+        if (newPid is null)
+        {
+            _logger.LogInformation(
+                "Seat {Id}: session reconnected; Apollo was stopped by the user, so it is left stopped",
+                seat.Id);
+            seat.ApolloProcessId = 0;
+            seat.TransitionTo(SeatStatus.Ready, _logger);
+            return;
+        }
+
         if (newPid > 0)
         {
-            seat.ApolloProcessId = newPid;
+            seat.ApolloProcessId = newPid.Value;
             _logger.LogInformation(
                 "Seat {Id}: Apollo restarted after reconnect (PID {Pid})",
                 seat.Id, newPid);
@@ -366,6 +385,22 @@ public sealed class SessionHealthCheck
         // RestartAsync has exhausted the readiness retry budget.
         seat.TransitionTo(SeatStatus.Error, _logger);
         seat.ErrorMessage ??= "Apollo did not become ready after reconnect; check its log.";
+    }
+
+    /// <summary>
+    /// The Apollo step of the reconnect rescue, separated so it can be tested (issue #124). While
+    /// the seat is marked as stopped by the user, Apollo is not started and the result is null.
+    /// Otherwise <paramref name="restart"/> runs and its PID (or -1) is returned.
+    /// </summary>
+    internal static async Task<int?> RestartApolloAfterReconnectAsync(
+        Func<bool> stoppedByUser,
+        Func<CancellationToken, Task<int>> restart,
+        CancellationToken ct)
+    {
+        if (stoppedByUser())
+            return null;
+
+        return await restart(ct);
     }
 
     private async Task<bool> CheckSeatAsync(SeatInfo seat, CancellationToken ct)
@@ -520,7 +555,7 @@ public sealed class SessionHealthCheck
             var (action, newPid) = await ResolveApolloExitAsync(
                 exitCode,
                 _apolloManager.GetUptime(seat.Id),
-                leaveStopped: () => LeaveApolloStoppedAfterQuit(seat, exitCode),
+                leaveStopped: () => LeaveApolloStoppedAfterQuit(_apolloManager, seat, exitCode, _logger),
                 relaunch: countsAsCrash => RelaunchAfterExitAsync(seat, exitCode, countsAsCrash, ct));
 
             if (action == ApolloExitAction.LeaveStopped)
@@ -662,26 +697,27 @@ public sealed class SessionHealthCheck
     /// to stop, so it stays stopped: no relaunch, and no restart attempt spent.
     ///
     /// The seat ends where the dashboard's own "Stop Apollo" leaves it (SeatManager.StopApollo):
-    /// the record dropped, ApolloProcessId 0, and the seat status kept, so the health check goes on
-    /// watching the session. Check 2 only relaunches when ApolloProcessId is above 0, which is what
-    /// keeps it down. The message says why on the seat card. POST /api/seats/{id}/apollo/start or
-    /// /apollo/restart brings it back, and a successful start clears the message.
+    /// the record dropped, ApolloProcessId 0, the seat marked as stopped by the user, and the seat
+    /// status kept, so the health check goes on watching the session. Check 2 only relaunches when
+    /// ApolloProcessId is above 0, and the reconnect after a sleep checks the mark; together they
+    /// keep it down. The message says why on the seat card. POST /api/seats/{id}/apollo/start or
+    /// /apollo/restart brings it back and clears the mark, and a successful start clears the message.
     /// </summary>
-    private void LeaveApolloStoppedAfterQuit(SeatInfo seat, int? exitCode)
+    internal static void LeaveApolloStoppedAfterQuit(
+        ApolloManager apolloManager, SeatInfo seat, int? exitCode, ILogger logger)
     {
-        _logger.LogWarning(
+        logger.LogWarning(
             "Seat {Id}: Apollo (PID {Pid}) exited with code {Code}, which is Quit from its web UI or " +
             "tray — leaving it stopped. Start it again from the dashboard",
             seat.Id, seat.ApolloProcessId, exitCode);
 
-        // Drops the record and its handle, and kills any stray Apollo still on this seat's config.
-        _apolloManager.Stop(seat);
-        seat.ApolloProcessId = 0;
-        seat.ApolloIdentity = null;
+        // Drops the record and its handle, kills any stray Apollo still on this seat's config, and
+        // marks the seat as stopped by the user.
+        apolloManager.StopByUser(seat);
 
         // Nobody can be streaming from an Apollo that is gone.
         if (seat.Status == SeatStatus.Streaming)
-            seat.TransitionTo(SeatStatus.Ready, _logger);
+            seat.TransitionTo(SeatStatus.Ready, logger);
 
         seat.ErrorMessage =
             "Apollo was quit from its web UI or tray and was left stopped. Use Start on the seat's Apollo row to bring it back.";

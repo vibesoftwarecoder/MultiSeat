@@ -48,6 +48,12 @@ public sealed class ApolloManager
     // Seat → Apollo instance tracking
     private readonly ConcurrentDictionary<Guid, ApolloInstance> _instances = new();
 
+    // Seats whose Apollo the user stopped: Quit from Apollo's web UI or tray (exit 1115), or the
+    // dashboard's Stop (issue #124). While a seat is here, nothing automatic starts its Apollo, not
+    // even the health check's reconnect after a sleep. In memory only, like the seats themselves:
+    // a service restart or reboot rebuilds seats from their presets and starts Apollo as usual.
+    private readonly ConcurrentDictionary<Guid, byte> _stoppedByUser = new();
+
     public ApolloManager(
         ILogger<ApolloManager> logger,
         IOptions<MultiSeatOptions> options,
@@ -175,11 +181,45 @@ public sealed class ApolloManager
 
         await WaitForReadinessAsync(seat, instance, ct);
 
+        // Apollo is running again, so the user's stop no longer describes the seat. Every caller
+        // of StartAsync is a provision or a user action, except the health check's reconnect,
+        // which checks IsStoppedByUser and does not get here while the seat is marked.
+        ClearStoppedByUser(seat.Id);
+
         _logger.LogInformation(
             "Seat {Id}: Apollo API ready (PID {Pid}) — Moonlight port {Port}",
             seat.Id, pid, seat.PortBase);
 
         return pid;
+    }
+
+    /// <summary>
+    /// True when the user stopped this seat's Apollo (Quit or the dashboard's Stop) and has not
+    /// started it again since (issue #124). Automatic paths must not start Apollo while it is set.
+    /// </summary>
+    public bool IsStoppedByUser(Guid seatId) => _stoppedByUser.ContainsKey(seatId);
+
+    /// <summary>
+    /// Forget a user's stop: an explicit Start or Restart, a successful start, or a teardown.
+    /// </summary>
+    public void ClearStoppedByUser(Guid seatId)
+    {
+        if (_stoppedByUser.TryRemove(seatId, out _))
+            _logger.LogInformation("Seat {Id}: Apollo is no longer marked as stopped by the user", seatId);
+    }
+
+    /// <summary>
+    /// Stop the seat's Apollo because the user asked for it, and keep it stopped (issue #124):
+    /// Quit from Apollo's web UI or tray, or the dashboard's Stop. Drops the record, sets
+    /// ApolloProcessId to 0 and marks the seat, so neither the health check's crash relaunch
+    /// (which needs a PID) nor its reconnect after a sleep (which checks the mark) starts it again.
+    /// </summary>
+    public void StopByUser(SeatInfo seat)
+    {
+        Stop(seat);
+        seat.ApolloProcessId = 0;
+        seat.ApolloIdentity = null;
+        _stoppedByUser[seat.Id] = 0;
     }
 
     /// <summary>
