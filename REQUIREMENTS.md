@@ -223,7 +223,7 @@ For each concurrent streaming seat:
 |----------|-------------|
 | Windows local account | One per seat (created/managed by MultiSeat, or link an existing account) |
 | Virtual display | One SudoVDA display per seat |
-| Virtual audio device | One per seat: VB-CABLE (seat 0) or VoiceMeeter virtual input (seats 1–3) |
+| Virtual audio device | `SharedHost` audio only: one per seat, VB-CABLE (seat 0) or VoiceMeeter virtual input (seats 1–3). `PerSession` (default): none, each seat uses its own RDP Remote Audio endpoint |
 | TCP/UDP ports | 30-port block per seat (default: 48100–48129, 48130–48159, ...) |
 | Apollo config directory | Created automatically under `C:\ProgramData\MultiSeat\apollo\` |
 | Emulator netplay port | One per seat: `PortBase + 13` (48113, 48143, ...); seats netplay over `127.0.0.1` |

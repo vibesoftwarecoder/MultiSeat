@@ -2,14 +2,14 @@
 
 **Multi-seat headless game streaming for Windows using Moonlight/Apollo.**
 
-MultiSeat lets you run multiple simultaneous Moonlight game-streaming sessions on a single Windows machine. Each "seat" gets its own isolated Windows user account, virtual display, virtual audio cable, and Apollo (Sunshine) streaming instance — all managed from a single web dashboard.
+MultiSeat lets you run multiple simultaneous Moonlight game-streaming sessions on a single Windows machine. Each "seat" gets its own isolated Windows user account, virtual display, its own audio endpoint, and Apollo (Sunshine) streaming instance — all managed from a single web dashboard.
 
 ---
 
 ## How It Works
 
 1. You create or link a Windows local account for each streaming seat.
-2. MultiSeat provisions a seat: launches a dedicated Apollo process in the account's RDP session, attaches a virtual display (SudoVDA), and routes a virtual audio cable (VB-CABLE) to it.
+2. MultiSeat provisions a seat: launches a dedicated Apollo process in the account's RDP session, attaches a virtual display (SudoVDA), and gives it its own audio endpoint (by default the session's RDP "Remote Audio"; under `SharedHost` audio, a VB-CABLE virtual cable).
 3. The Moonlight client connects to the seat's Apollo instance using the host's IP and the seat's assigned port.
 4. Each seat streams independently with isolated input, audio, and display.
 
@@ -205,7 +205,8 @@ Edit `appsettings.json` in `C:\Program Files\MultiSeat\` (restart the service af
 | `ApolloLogLevel` | `info` | Apollo's own log level per seat. `debug` is the only way to see why a seat refuses a pairing or a client. Values: `verbose`, `debug`, `info`, `warning`, `error`. |
 | `ApiPort` | `9550` | Dashboard port |
 | `ApiKey` | *(auto-generated)* | API key required to access the dashboard. Auto-generated on first start and saved to `C:\ProgramData\MultiSeat\api-key.txt`. Set a fixed value here to override. Set to `disabled` to turn off authentication entirely (only safe on a fully trusted private network). |
-| `VacCableCount` | `4` | Number of installed VB-CABLE devices |
+| `AudioMode` | `PerSession` | `PerSession`: each seat uses its own RDP "Remote Audio" endpoint. No VB-CABLE or VoiceMeeter, no seat cap from audio, no microphone; set the client's "Play audio on host PC" **on**. `SharedHost`: host virtual cables (VB-CABLE + VoiceMeeter Potato), at most 4 seats, microphone works, client "Play audio on host PC" **off**. `SharedHost` can leave the host's own audio silent after a seat is provisioned; `scripts\fix-host-audio.ps1` repairs it. |
+| `VacCableCount` | `4` | Number of installed VB-CABLE devices. Used only under `SharedHost` audio |
 | `EnableKeyboardMouseIsolation` | `false` | Keyboard/mouse session isolation (no-op as architected — see Known Constraints in CLAUDE.md) |
 | `EnableSharedGameLibrary` | `true` | Create a shared games/ROMs folder all seats can use |
 | `SharedGameLibraryDir` | `C:\MultiSeatGames` | Root of the shared library (`\SteamLibrary` + `\ROMs`) |
@@ -328,7 +329,7 @@ MultiSeatService (Windows Service, SYSTEM)
 ├── SessionLauncher       — RDP session + mstsc window management
 ├── ApolloManager         — per-seat Apollo process management
 ├── VirtualDisplayManager — SudoVDA display attach/detach
-├── AudioRouter           — VB-CABLE assignment per seat
+├── AudioRouter           — VB-CABLE assignment per seat (`SharedHost` audio only)
 ├── InputRouter           — XInput/ViGEm controller routing
 ├── HidHideConfigurator   — controller cloaking
 ├── InputHookManager      — keyboard/mouse session isolation
@@ -408,8 +409,8 @@ Controller isolation is handled by HidHide, not the InputHook DLL. Ensure HidHid
 **RDPWrap shows "Not supported" after a Windows update**
 Re-run `prerequisites\install-prerequisites.ps1` — it will fetch the latest `rdpwrap.ini` automatically.
 
-**Multiple VB-CABLE devices needed**
-Each seat requires one VB-CABLE. After installing the first one via the prerequisites script, run `VBCABLE_Setup_x64.exe` manually for each additional seat (found in the extracted `VBCABLE_Driver_Pack45.zip`).
+**Multiple VB-CABLE devices needed** (`SharedHost` audio only)
+Under `SharedHost`, each seat requires one VB-CABLE. The default `PerSession` mode needs none. After installing the first one via the prerequisites script, run `VBCABLE_Setup_x64.exe` manually for each additional seat (found in the extracted `VBCABLE_Driver_Pack45.zip`).
 
 ---
 

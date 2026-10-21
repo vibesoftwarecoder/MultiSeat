@@ -105,18 +105,27 @@ export function TipsPage() {
       <Section title="Audio & Microphone">
         <TipCard title="Game audio">
           <p>
-            Each seat uses a dedicated virtual audio device (VB-CABLE or VoiceMeeter bus).
-            Apollo loopback-captures from that device so only that seat's game audio is streamed.
-            If audio is silent after provisioning, use <strong>Manage Services → Audio → Reset</strong>
-            on the seat card.
+            By default (<code>AudioMode = PerSession</code>) each seat uses its own RDP
+            <strong> Remote Audio</strong> endpoint. No VB-CABLE or VoiceMeeter is needed, and in
+            the Moonlight client <strong>Play audio on host PC</strong> should be <strong>on</strong>.
+          </p>
+          <p>
+            Under <code>SharedHost</code> audio, each seat instead uses a dedicated virtual audio
+            device (VB-CABLE or VoiceMeeter bus), and <strong>Play audio on host PC</strong> should
+            be <strong>off</strong>. If audio is silent after provisioning in that mode, use
+            <strong> Manage Services → Audio → Reset</strong> on the seat card.
           </p>
         </TipCard>
 
         <TipCard title="Microphone passthrough">
           <p>
-            ApolloVibe streams the Moonlight client's microphone into the seat session via
-            <strong> Steam Streaming Microphone</strong>. Games see it as a normal mic input — no
-            extra configuration required.
+            Microphone passthrough works only with <code>AudioMode = SharedHost</code>. The default,
+            <code>PerSession</code>, has no microphone path.
+          </p>
+          <p>
+            Under <code>SharedHost</code>, ApolloVibe streams the Moonlight client's microphone into
+            the seat session via <strong>Steam Streaming Microphone</strong>. Games see it as a
+            normal mic input — no extra configuration required.
           </p>
           <ul>
             <li>Requires the standard Moonlight client (mic packets are supported in ApolloVibe)</li>
