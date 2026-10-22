@@ -45,22 +45,52 @@ public static class WebSocketHub
             var clientId = Guid.NewGuid().ToString("N");
             _clients.TryAdd(clientId, new Client(ws));
 
+            // A receive that ignores shutdown holds Kestrel's graceful stop open until its
+            // timeout, so the read loop watches ApplicationStopping as well as the request.
+            var stopping = context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, stopping);
+            var shuttingDown = false;
+
             try
             {
                 // Keep connection alive — read loop (we only push, but must drain client frames)
                 var buffer = new byte[256];
                 while (ws.State == WebSocketState.Open)
                 {
-                    var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
+                    var result = await ws.ReceiveAsync(buffer, cts.Token);
                     if (result.MessageType == WebSocketMessageType.Close)
                         break;
                 }
             }
+            catch (OperationCanceledException)
+            {
+                shuttingDown = true;
+            }
+            catch (WebSocketException)
+            {
+                // The client vanished without a close handshake; nothing left to close.
+            }
             finally
             {
                 _clients.TryRemove(clientId, out _);
-                if (ws.State is WebSocketState.Open or WebSocketState.CloseReceived)
-                    await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
+                try
+                {
+                    using var closeTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                    if (shuttingDown && ws.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                    {
+                        // Output only: do not wait for a client that may never answer.
+                        await ws.CloseOutputAsync(WebSocketCloseStatus.EndpointUnavailable,
+                            "server stopping", closeTimeout.Token);
+                    }
+                    else if (ws.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                    {
+                        await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", closeTimeout.Token);
+                    }
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or WebSocketException)
+                {
+                    // Best effort: the socket is already gone or the peer is not answering.
+                }
             }
         });
     }

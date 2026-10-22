@@ -107,6 +107,6 @@ To go on, close Steam in every seat that runs it, then run the installer again. 
 
     MultiSeat.SteamLauncher.exe --steam "<path to steam.exe>" --forward -- -shutdown
 
-A plain `steam -shutdown` does not reach an isolated Steam. The installer never closes Steam for you.
+A plain `steam -shutdown` does not reach an isolated Steam. The `-shutdown` command only hands the request to Steam and exits 0 right away. Steam itself does not exit while a game is running in that seat, so close the game first. The installer never closes Steam for you.
 
 `-Uninstall` does not need the check. It does not delete the install folder; it only removes the service and leaves the folder for you to delete.

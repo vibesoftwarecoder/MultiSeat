@@ -708,6 +708,8 @@ function Format-SteamInUseMessage {
     $lines += 'or run this as the Windows user that started that Steam:'
     $lines += "  `"$launcher`" --steam `"$steamExe`" --forward -- -shutdown"
     $lines += 'A plain "steam -shutdown" does not reach an isolated Steam, so do not use it.'
+    $lines += 'The -shutdown command only hands the request to Steam and exits 0 right away.'
+    $lines += 'Steam itself does not exit while a game is running in that seat, so close the game first.'
     $lines += 'This installer does not close Steam for you.'
     return ($lines -join "`n")
 }
