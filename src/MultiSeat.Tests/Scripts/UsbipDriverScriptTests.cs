@@ -357,8 +357,16 @@ Write-Output ('@@JSON@@' + (ConvertTo-Json -InputObject $r -Compress))";
         var j = J(RunScript(engine, script));
         if (!j.GetProperty("Exists").GetBoolean()) return;   // a host without the value: nothing to prove
         Assert.True(j.GetProperty("IsString").GetBoolean());
-        // This host is not in test-signing mode (the user's rule), so the real read must say "not refused".
-        Assert.False(j.GetProperty("Refuse").GetBoolean(), j.GetProperty("Reason").GetString());
+        // Whether the verdict is "refuse" depends on the machine: a CI runner can be in test-signing mode, a
+        // normal host is not. So compare the script's real read with an independent read made here, from the
+        // same registry value, and require the verdict to agree on either kind of host.
+        var raw = Microsoft.Win32.Registry.GetValue(
+            @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control", "SystemStartOptions", null) as string;
+        Assert.NotNull(raw);
+        var expectRefuse = System.Text.RegularExpressions.Regex.IsMatch(raw,
+            @"(?i)(^|[\s,])(TESTSIGNING|DISABLE_INTEGRITY_CHECKS|NOINTEGRITYCHECKS)(?=$|[\s,=])");
+        Assert.True(expectRefuse == j.GetProperty("Refuse").GetBoolean(),
+            $"verdict disagrees with the real start options (expected refuse={expectRefuse}): {j.GetProperty("Reason").GetString()}");
     }
 
     [Theory, MemberData(nameof(Engines))]
