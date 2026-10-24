@@ -10,6 +10,14 @@
     Suppress the reboot prompt at the end.
 .PARAMETER SkipDownload
     Skip downloading missing files; only install what is already present.
+.PARAMETER WithUsbForwarding
+    OPT-IN, off by default, never part of an unattended run. Also installs the pinned usbip-win2
+    USB/IP kernel driver that the HOST needs for USB forwarding (see install-usbip-driver.ps1).
+    Used only while the driver is Microsoft-signed; otherwise it stops and exits non-zero. The driver
+    needs a reboot, which this script never performs for it - that is your decision.
+.PARAMETER UsbForwardingDryRun
+    With -WithUsbForwarding: print the USB driver steps and do none of them. To dry-run ONLY that
+    step, run install-usbip-driver.ps1 -WhatIf directly.
 .PARAMETER Seats
     Number of seats to provision audio cables for. Defaults to 4.
     Each seat needs one VB-CABLE device. Only meaningful under SharedHost audio.
@@ -30,6 +38,8 @@
 param(
     [switch]$SkipReboot,
     [switch]$SkipDownload,
+    [switch]$WithUsbForwarding,
+    [switch]$UsbForwardingDryRun,
     [int]$Seats = 4,
     [ValidateSet('PerSession', 'SharedHost')]
     [string]$AudioMode
@@ -60,6 +70,8 @@ if (-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSyste
         $Fwd = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
         if ($SkipReboot)   { $Fwd += '-SkipReboot' }
         if ($SkipDownload) { $Fwd += '-SkipDownload' }
+        if ($WithUsbForwarding)   { $Fwd += '-WithUsbForwarding' }
+        if ($UsbForwardingDryRun) { $Fwd += '-UsbForwardingDryRun' }
         if ($AudioMode)    { $Fwd += @('-AudioMode', $AudioMode) }
         $Fwd += @('-Seats', $Seats)
         & $NativeHost @Fwd
@@ -1474,6 +1486,29 @@ if (-not (Get-NetFirewallRule -DisplayName "MultiSeat Streaming" -ErrorAction Si
 }
 
 # ----------------------------------------------------------------
+# 10. USB forwarding driver (usbip-win2) -- OPT-IN ONLY
+# ----------------------------------------------------------------
+# Runs only with -WithUsbForwarding. Never part of a default or unattended run. It does not set
+# $NeedsReboot and never reboots: the driver needs one, and that is the user's decision.
+$UsbipExit = 0
+if ($UsbForwardingDryRun -and -not $WithUsbForwarding) {
+    Write-Host "`n  NOTE: -UsbForwardingDryRun does nothing without -WithUsbForwarding; the USB forwarding step was not run." -ForegroundColor Yellow
+}
+if ($WithUsbForwarding) {
+    Write-Step "USB forwarding driver (usbip-win2, opt-in)"
+    . (Join-Path $ScriptDir 'lib\usbip-driver-lib.ps1')
+    $usbip = Invoke-UsbipDriverInstall -DryRun:$UsbForwardingDryRun
+    $UsbipExit = $usbip.ExitCode
+    if ($UsbipExit -eq 0 -and $usbip.Status -eq 'Installed') {
+        $Installed += "usbip-win2 driver (REBOOT needed before it works; your decision)"
+    } elseif ($UsbipExit -eq 2) {
+        $Skipped += "usbip-win2 driver package is INSTALLED but NOT VERIFIED Microsoft-signed - do not reboot until it is removed (steps printed above)"
+    } elseif ($UsbipExit -ne 0) {
+        $Skipped += "usbip-win2 driver NOT installed or NOT trusted ($($usbip.Status)); see the messages above"
+    }
+}
+
+# ----------------------------------------------------------------
 # Summary
 # ----------------------------------------------------------------
 Write-Host ""
@@ -1490,7 +1525,16 @@ if ($Skipped.Count -gt 0) {
     $Skipped | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
 }
 
-if ($NeedsReboot -and -not $SkipReboot) {
+if ($UsbipExit -eq 2) {
+    # The USB forwarding driver package is on this machine and is NOT verified Microsoft-signed.
+    # Never offer a reboot here, even when another step needs one: it would load that driver.
+    Write-Host "`n  DO NOT REBOOT yet." -ForegroundColor Red
+    Write-Host "  The USB forwarding driver installed above is not verified as Microsoft-signed and will load at the next boot." -ForegroundColor Red
+    Write-Host "  Remove it first (the removal steps are printed above), then reboot. No reboot prompt is shown." -ForegroundColor Red
+    if ($NeedsReboot) {
+        Write-Host "  (Another step also needs a reboot; that waits until the driver is dealt with.)" -ForegroundColor Magenta
+    }
+} elseif ($NeedsReboot -and -not $SkipReboot) {
     Write-Host "`n  A REBOOT is required before continuing." -ForegroundColor Magenta
     # Read-Host THROWS under -NonInteractive, which failed the whole script at the very last step
     # even when every install before it succeeded — so a scripted or CI run reported failure for a
@@ -1512,3 +1556,4 @@ Write-Host "  Log written to: $LogFile" -ForegroundColor DarkGray
 Write-Host ""
 
 Stop-Transcript | Out-Null
+if ($UsbipExit -ne 0) { exit $UsbipExit }

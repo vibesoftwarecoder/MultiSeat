@@ -16,7 +16,8 @@ public static class Constants
     // MultiSeat:PortBase in appsettings.json.
     public const int PortBase = 48100;
     // A seat's port offsets span -5 (GFE HTTPS) to +26 (RTSP) — a 32-position range — but only
-    // 8 of those positions are actually used: {-5,0,1,9,10,11,12,26}. PortsPerSeat=30 is
+    // 10 of those positions are reserved or used: {-5,0,1,7,9,10,11,12,13,26} (7 = USB tunnel,
+    // reserved and closed; 13 = netplay). PortsPerSeat=30 is
     // intentionally smaller than the raw 32-span: at 30-port spacing none of the *used* offsets
     // collide between seats, so blocks stay non-overlapping in practice. Verified by
     // StreamingTests.Constants_PortsPerSeat_NoUsedPortCollision — re-check it if the used-offset
@@ -45,6 +46,12 @@ public static class Constants
     // Emulator netplay (not an Apollo offset). Uses a free slot in the seat's 30-port block so
     // each seat gets a unique, collision-free netplay port (seat 0 = 48113, seat 1 = 48143, …).
     public const int OffsetRetroArchNetplay = 13;  // RetroArch netplay host port (TCP)
+
+    // Reserved for ApolloVibe's USB tunnel (main port + 7, TCP). Seats keep USB forwarding OFF
+    // (ApolloConfigBuilder writes it disabled), so nothing listens here and it is NOT opened in
+    // the firewall (FirewallManager.TcpPorts never includes it). It is in the used-offset set so
+    // the collision tests prove it can never land on another seat's port if that changes.
+    public const int OffsetUsbForwarding = 7;
 
     // There were two aliases here, OffsetHttps and OffsetHttp, and both said the opposite of what
     // they pointed at: OffsetHttps was the GFE *HTTP* port (0) and OffsetHttp was the web UI, which

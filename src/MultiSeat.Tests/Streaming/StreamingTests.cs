@@ -812,6 +812,7 @@ public class StreamingTests
             Constants.OffsetGfeHttps, Constants.OffsetGfeHttp, Constants.OffsetWebUi,
             Constants.OffsetVideo, Constants.OffsetControl, Constants.OffsetAudio,
             Constants.OffsetMic, Constants.OffsetRtsp, Constants.OffsetRetroArchNetplay,
+            Constants.OffsetUsbForwarding,   // reserved for ApolloVibe's USB tunnel (closed in seats)
         };
 
         var allUsedPorts = new HashSet<int>();

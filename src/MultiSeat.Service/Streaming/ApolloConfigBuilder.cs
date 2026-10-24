@@ -282,6 +282,17 @@ public sealed class ApolloConfigBuilder
         sb.AppendLine("keyboard = enabled");
         sb.AppendLine();
 
+        // ── USB forwarding: always OFF for a seat ─────────────────────
+        // ApolloVibe's USB tunnel (main port + 7) is off by default, but a default can change.
+        // An imported USB device is a machine-wide PnP device, not a per-session one, so a seat
+        // must never open a tunnel. Written explicitly, with the spelling the rest of this file
+        // uses ("disabled"; ApolloVibe's to_bool reads anything not true/yes/enable(d)/on/containing
+        // '1' as false). usb_forwarding_port is deliberately NOT written: with the feature off it is
+        // never bound, and main + 7 stays reserved (Constants.OffsetUsbForwarding), not opened.
+        sb.AppendLine("# USB forwarding stays off in every seat (machine-wide devices; see docs)");
+        sb.AppendLine("usb_forwarding_enabled = disabled");
+        sb.AppendLine();
+
         // ── Security ──────────────────────────────────────────────────
         // file_state must be an absolute path — Apollo resolves relative paths against
         // {exe_dir}/config/, which is shared by all instances. Each seat needs its own

@@ -26,3 +26,8 @@ Notes:
 
 To use offline/local files instead of downloading, place the installer files in
 this folder before running the script — it will use them as-is.
+
+Optional, off by default:
+  install-prerequisites.ps1 -WithUsbForwarding   - installs the pinned usbip-win2 USB/IP driver (host side of
+  USB forwarding). Only if its kernel drivers are Microsoft-signed; otherwise it stops. Never reboots for you.
+  Preview with: install-usbip-driver.ps1 -WhatIf

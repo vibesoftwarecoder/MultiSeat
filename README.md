@@ -108,6 +108,37 @@ This script automatically downloads and installs everything:
 | .NET 9 SDK | Required only to **build from source**. Not needed with `-FromZip`, which installs a self-contained release asset. |
 | Node.js LTS | Required only to **build the dashboard from source**. Not needed with `-FromZip`, which ships it prebuilt. |
 
+#### Optional: USB forwarding driver (opt-in, off by default)
+
+ApolloVibe can forward a USB device from a Moonlight client to the host. The host then needs the
+[usbip-win2](https://github.com/vadimgrn/usbip-win2) USB/IP kernel driver. It is **never** installed by a
+default or unattended run. You ask for it:
+
+```powershell
+.\prerequisites\install-prerequisites.ps1 -WithUsbForwarding
+.\prerequisites\install-usbip-driver.ps1 -WhatIf     # print the steps, change nothing
+```
+
+- **Pinned and checked.** One release (`v.0.9.8.1`), downloaded over HTTPS, verified against a fixed SHA-256 and
+  its Authenticode signature before it runs, then installed silently with `/NORESTART`.
+- **Microsoft-signed drivers only.** After the install the script checks every installed `usbip2` kernel driver
+  file. If any is not signed by "Microsoft Windows Hardware Compatibility Publisher", it stops, enables nothing
+  and exits with code 2. Each file must be signed by "Microsoft Windows Hardware Compatibility Publisher", chain to
+  Microsoft Root Certificate Authority 2010 and carry a hardware-driver usage. **Exit code 2 means the driver package
+  is already on the machine and will load at the next boot: do not reboot until you have removed it.** The script
+  prints the removal steps but never runs them, and no reboot prompt is shown. It refuses to run while Windows
+  test-signing mode or disabled integrity checks are on, or if that state cannot be read, and it never turns them on.
+- **Private staging.** The installer is downloaded into a new folder under `%ProgramData%` that only SYSTEM and
+  Administrators can open, and the verified file stays locked while the installer runs.
+- **A reboot is needed** before the driver works. The script never reboots the machine; that is your decision.
+- **Seats keep USB forwarding off.** MultiSeat writes `usb_forwarding_enabled = disabled` into every seat's
+  Apollo config, because a forwarded device is machine-wide, not per session. Only the console ApolloVibe can
+  use it, and only when you enable it there.
+- **Port reservation.** ApolloVibe's USB tunnel listens on its main port + 7 (TCP). That offset is reserved in
+  every seat's port block and checked against all other ports, but MultiSeat does not open it in the firewall.
+  That check assumes the default console Apollo port (47989) and `PortBase` (48100). If you override either in
+  config, re-check that the console Apollo's ports (its main port -5 to +26) stay outside the seat blocks.
+
 It also enables Remote Desktop and opens the required firewall ports automatically.
 
 > **Reboot** when prompted — HidHide and RDPWrap require it before the service will work.
