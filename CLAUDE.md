@@ -30,6 +30,8 @@ MultiSeat runs multiple simultaneous Moonlight game-streaming sessions on one Wi
 | `GitHubReleaseClient` | The only code that would talk to the internet: unauthenticated GET of three release lists, every failure returned not thrown |
 | `UpdateStateStore` | `C:\ProgramData\MultiSeat\update-check.json` cache (ETags, candidates, baseline, backoff, hash cache) |
 | `UpdateEndpoints` | `GET /api/system/updates`, `POST .../updates/check`, `POST .../updates/settings` |
+| `HostUsbControl` / `ApolloUsbControlClient` | Talk to the **host** Apollo's USB control pipe (opt-in in Apollo). The client follows Apollo's pipe contract: identification-level open, owner SYSTEM or Administrators, server PID = the process listening on Apollo's main port, bounded I/O. Never edits Apollo's config |
+| `HostUsbEndpoints` / `ConsoleCallerCheck` | `GET /api/host/usb` and `POST /api/host/usb/{enabled,revoke,clear-revoke}`. A filter on the whole route group, reading included, serves only a process of the user logged on at the active console session, never a seat account (loopback source port to owner process and connection time, owner handle held, table read twice); everything doubtful is refused. See `docs/security-posture.md` |
 
 ## Port Layout
 

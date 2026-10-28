@@ -338,3 +338,54 @@ export interface UpdatesState {
   error: string | null;
   components: UpdateComponent[];
 }
+
+// ── Host Apollo: USB forwarding ───────────────────────────────────
+
+/** One USB device a paired client is forwarding to the host right now. */
+export interface UsbForward {
+  clientUuid: string;
+  clientName: string;
+  busid: string;
+  sinceUnix: number;
+}
+
+/** A client paired with the host's Apollo, and whether it may forward USB devices. */
+export interface UsbClient {
+  uuid: string;
+  name: string;
+  usbPermission: boolean;
+}
+
+export interface UsbStatus {
+  enabled: boolean;
+  listening: boolean;
+  port: number;
+  requireStream: boolean;
+  forwards: UsbForward[];
+  clients: UsbClient[];
+  /** Client uuids blocked from USB forwarding until Apollo restarts. */
+  denied: string[];
+}
+
+/** GET /api/host/usb: "not available" is a state to show, not an error. */
+export type UsbState =
+  | { available: true; status: UsbStatus }
+  | { available: false; reason: string };
+
+export interface UsbSetEnabledResult {
+  enabled: boolean;
+  listening: boolean;
+  port: number;
+  persisted: boolean;
+}
+
+export interface UsbRevokeResult {
+  forwardsCut: number;
+  denied: boolean;
+  known: boolean;
+}
+
+export interface UsbClearResult {
+  denied: boolean;
+  known: boolean;
+}

@@ -116,6 +116,49 @@ provisioning that nobody is there to dismiss — which usually shows up as a sea
   toggle before it holds a key. `POST` on that path — the call that turns authentication off — is
   gated, and a test holds that distinction in place.
 
+## Host USB forwarding control (dashboard)
+
+The dashboard's host card can switch the **host's own Apollo** USB tunnel on or off and block a client's USB
+forwarding. It does this through a Windows named pipe that Apollo creates only when its owner ticks
+"USB Forwarding Control Pipe" in Apollo's own settings. MultiSeat never edits that Apollo's config, and a
+change made here lasts only until that Apollo restarts.
+
+- **Reading and changing are both for the console only.** This API has no key on a host that chose that, and
+  every seat user can reach it on loopback. A seat user could otherwise switch the host's USB tunnel on through
+  this SYSTEM service (the pipe's access list cannot help: the service is the legitimate client), and could read
+  the status, which names paired clients and the devices they forward. A filter on the whole `/api/host/usb`
+  route group, so every route now or later, `GET` included, checks where the request came from. A refusal is
+  403 `console_session_required`, and the request never reaches the pipe.
+  - The source port of the loopback connection names the client process in the system TCP table, with the time
+    the connection was created. The service opens that process and **keeps the handle open for the whole
+    check**, so its id cannot be given to another process meanwhile. The table names the process that
+    *created* the socket even after it has exited, so a process **created after the connection** cannot be the
+    one that made it. A reused process id is refused, and so is a zero timestamp. The comparison is strict.
+  - The table is read again once the handle is held and must name the same owner and connection, and the
+    console session must not have moved.
+  - The process must run in the **active console session**, and its token user must be **the user logged on
+    there**, not SYSTEM or another service account, and **not one of MultiSeat's seat accounts**. A seat user who
+    moves their own session to the console with `tscon` is the console user but a seat account, so is still
+    refused. A seat account MultiSeat cannot list is not excluded by that rule; it is still refused by the
+    session and user comparisons unless it is the console user.
+  - A request that is not loopback, whose caller cannot be found, or when nobody is at the console, is refused.
+    Another program of the console user can still ask; that is the trust the console user already has over the
+    host. A console-user program that hands a connected socket to a program in another session is not
+    detected, because the table names the creator.
+  - The check is by session and user, so it needs the dashboard opened on the host's own desktop (for example
+    over a remote-desktop tool). A dashboard on another PC, or in a seat, cannot see or change USB forwarding;
+    no key is offered for that. Its USB card says so.
+  - Refusals are logged at most once a minute per outcome, with a count of the rest, because the dashboard polls.
+- **The service does not trust the pipe's name.** Before sending anything it opens the pipe with
+  `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` (so a fake server can never act as SYSTEM), requires the
+  pipe's **owner** to be SYSTEM or Administrators, and requires the pipe's **server process** to be the one
+  that listens on the host Apollo's main port. A standard user can create a pipe with the same name while
+  Apollo is stopped; with these checks the service refuses it (`untrusted_server`) and sends nothing. Every
+  read and write is bounded, one conversation runs at a time, and a close with no reply is reported as busy.
+- **Not in scope:** other administrators and SYSTEM-level processes (an administrator can already stop Apollo
+  and take the name). The blocklist is Apollo's, in memory, and does not unpair a client or change its stored
+  permission.
+
 ## Outbound connections
 
 MultiSeat makes **no** connection to the internet unless you turn on update checks. With `MultiSeat:UpdateCheckEnabled` left at its default of `false`, the service only talks to loopback addresses (Apollo on this host).

@@ -330,6 +330,11 @@ builder.Services.AddSingleton<OnConnectAppLauncher>();
 builder.Services.AddSingleton<ClientResolutionFollower>();
 builder.Services.AddSingleton<MultiSeat.Service.Monitoring.ApolloServerQuery>();
 builder.Services.AddSingleton<MultiSeat.Service.Monitoring.HostApolloMonitor>();
+// Host Apollo USB forwarding: the control-pipe client, what talks to it, and the console-session check
+// that gates every change made through the API.
+builder.Services.AddSingleton<MultiSeat.Service.HostUsb.ApolloUsbControlClient>();
+builder.Services.AddSingleton<MultiSeat.Service.HostUsb.IHostUsbControl, MultiSeat.Service.HostUsb.HostUsbControl>();
+builder.Services.AddSingleton<MultiSeat.Service.Api.ConsoleCallerCheck>();
 builder.Services.AddSingleton<PortAllocator>();
 builder.Services.AddSingleton<SeatLifecycleGate>();
 // The DWM interval in effect now. Seeded from configuration once; after that the settings API

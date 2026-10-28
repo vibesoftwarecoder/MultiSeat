@@ -37,6 +37,8 @@ public static class ApiServer
         builder.Services.AddSingleton(hostServices.GetRequiredService<Monitoring.MetricsCollector>());
         builder.Services.AddSingleton(hostServices.GetRequiredService<Monitoring.SessionHealthCheck>());
         builder.Services.AddSingleton(hostServices.GetRequiredService<Monitoring.HostApolloMonitor>());
+        builder.Services.AddSingleton(hostServices.GetRequiredService<HostUsb.IHostUsbControl>());
+        builder.Services.AddSingleton(hostServices.GetRequiredService<ConsoleCallerCheck>());
         builder.Services.AddSingleton(hostServices.GetRequiredService<Display.VirtualDisplayManager>());
         builder.Services.AddSingleton(hostServices.GetRequiredService<Configuration.SeatPresetStore>());
         // The SAME instance the seat manager reads, so a change made through the API is what the
@@ -168,6 +170,7 @@ public static class ApiServer
         SystemEndpoints.Map(app);
         UpdateEndpoints.Map(app);
         HostEndpoints.Map(app);
+        HostUsbEndpoints.Map(app);
         InputEndpoints.Map(app);
         WebSocketHub.Map(app);
 
