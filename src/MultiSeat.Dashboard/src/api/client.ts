@@ -18,6 +18,10 @@ import type {
   HostApolloInfo,
   ScaleChange,
   UpdatesState,
+  UsbState,
+  UsbSetEnabledResult,
+  UsbRevokeResult,
+  UsbClearResult,
 } from "./types";
 
 const BASE = "/api";
@@ -223,6 +227,31 @@ export const system = {
 
 export const host = {
   get: () => request<HostApolloInfo>("/host"),
+};
+
+// ── Host USB forwarding (the host Apollo's control pipe) ─────────
+
+export const hostUsb = {
+  get: () => request<UsbState>("/host/usb"),
+
+  /** Lasts until the host's Apollo restarts. Refused unless the request comes from the host's own desktop. */
+  setEnabled: (enabled: boolean) =>
+    request<UsbSetEnabledResult>("/host/usb/enabled", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+
+  revoke: (clientUuid: string) =>
+    request<UsbRevokeResult>("/host/usb/revoke", {
+      method: "POST",
+      body: JSON.stringify({ clientUuid }),
+    }),
+
+  clearRevoke: (clientUuid: string) =>
+    request<UsbClearResult>("/host/usb/clear-revoke", {
+      method: "POST",
+      body: JSON.stringify({ clientUuid }),
+    }),
 };
 
 // ── Input ─────────────────────────────────────────────────────────

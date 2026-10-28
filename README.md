@@ -134,6 +134,13 @@ default or unattended run. You ask for it:
 - **Seats keep USB forwarding off.** MultiSeat writes `usb_forwarding_enabled = disabled` into every seat's
   Apollo config, because a forwarded device is machine-wide, not per session. Only the console ApolloVibe can
   use it, and only when you enable it there.
+- **Dashboard control of the console Apollo.** The host card has a "USB forwarding" panel: switch the tunnel on or off,
+  see what is forwarded, block a client or allow it again. It talks to a Windows named pipe that ApolloVibe creates
+  only when you tick "USB Forwarding Control Pipe" in its own Network tab and restart it, so the console Apollo must run
+  as SYSTEM (the normal case) for the pipe to exist. MultiSeat never edits that Apollo's config, a switch made here lasts
+  until that Apollo restarts, and the panel is served only to the host's own desktop (reading too, because the status
+  names paired clients and their devices). See
+  [security-posture.md](docs/security-posture.md#host-usb-forwarding-control-dashboard).
 - **Port reservation.** ApolloVibe's USB tunnel listens on its main port + 7 (TCP). That offset is reserved in
   every seat's port block and checked against all other ports, but MultiSeat does not open it in the firewall.
   That check assumes the default console Apollo port (47989) and `PortBase` (48100). If you override either in

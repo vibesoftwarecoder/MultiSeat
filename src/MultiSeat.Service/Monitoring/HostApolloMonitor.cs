@@ -73,6 +73,17 @@ public sealed partial class HostApolloMonitor
     }
 
     /// <summary>
+    /// The standalone Apollo's main port, without the HTTPS probe or the pairing count that
+    /// <see cref="CollectAsync"/> also does. Null when no standalone Apollo is running. Cheap enough
+    /// to call for every USB control request.
+    /// </summary>
+    public int? TryResolveMainPort()
+    {
+        var host = FindStandaloneApollo();
+        return host is null ? null : ResolvePort(host.Value.ExePath);
+    }
+
+    /// <summary>
     /// The first Apollo process that is not MultiSeat's. Mirrors the ownership test used by
     /// startup cleanup. Returns null when only MultiSeat's own instances are running.
     /// </summary>

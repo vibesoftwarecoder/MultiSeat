@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { HostApolloInfo } from "../api/types";
 import { host as hostApi } from "../api/client";
+import { HostUsbPanel } from "./HostUsbPanel";
 
 /**
  * The console's own Apollo, shown the way a seat is.
@@ -10,6 +11,8 @@ import { host as hostApi } from "../api/client";
  * the operator actually uses the only one they could not see here.
  *
  * Read-only on purpose: this process is not ours to start, stop or reconfigure.
+ * The one exception is the USB forwarding panel, which switches a tunnel the host owner already allowed
+ * in Apollo itself; see HostUsbPanel.
  */
 export function HostCard() {
   const [info, setInfo] = useState<HostApolloInfo | null>(null);
@@ -151,6 +154,8 @@ export function HostCard() {
             {info.note}
           </div>
         )}
+
+        {info.detected && <HostUsbPanel />}
       </div>
     </div>
   );
