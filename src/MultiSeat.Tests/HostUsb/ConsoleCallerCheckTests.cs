@@ -168,6 +168,60 @@ public class ConsoleCallerCheckTests
         Assert.Equal(CallerVerdict.Allowed, check.Check(IPAddress.Loopback, 50000, 9550));
     }
 
+    // ── which accounts count as seat accounts ─────────────────────────
+
+    private const string ConsoleOwnerSid = "S-1-5-21-1-1-1-1001";
+    private const string SeatOwnerSid = "S-1-5-21-1-1-1-1010";
+
+    private static string? ResolveFrom(string name) => name.ToLowerInvariant() switch
+    {
+        "roelb" => ConsoleOwnerSid,
+        "gaming" => SeatOwnerSid,
+        _ => null,
+    };
+
+    [Fact]
+    public void ALinkedAccountThatHostsNoSeat_IsNotASeatAccount()
+    {
+        // The person at the console is often linked to MultiSeat as an ordinary account (IsManaged false).
+        // Listing every stored account made the check refuse them from their own panel (0.6.24).
+        var sids = ConsoleCallerCheck.SeatSidsFrom(
+            [(null, "roelb", false), (null, "Gaming", true)], ["Gaming"], ["Gaming"], ResolveFrom);
+        Assert.Equal([SeatOwnerSid], sids);
+
+        var s = new Setup { ConsoleUserSid = ConsoleOwnerSid, Owner = new FakeOwner { User = ConsoleOwnerSid }, SeatSids = sids.ToArray() };
+        Assert.Equal(CallerVerdict.Allowed, Run(s));
+    }
+
+    [Fact]
+    public void ALinkedAccountThatHostsALiveSeat_IsASeatAccount()
+    {
+        var sids = ConsoleCallerCheck.SeatSidsFrom([(null, "roelb", false)], ["roelb"], [], ResolveFrom);
+        Assert.Contains(ConsoleOwnerSid, sids);
+        var s = new Setup { ConsoleUserSid = ConsoleOwnerSid, Owner = new FakeOwner { User = ConsoleOwnerSid }, SeatSids = sids.ToArray() };
+        Assert.Equal(CallerVerdict.NotConsoleUser, Run(s));
+    }
+
+    [Fact]
+    public void ALinkedAccountWithASavedPreset_IsASeatAccount()
+    {
+        var sids = ConsoleCallerCheck.SeatSidsFrom([(null, "roelb", false)], [], ["Roelb"], ResolveFrom);
+        Assert.Contains(ConsoleOwnerSid, sids);
+    }
+
+    [Fact]
+    public void AnAccountMultiSeatCreated_IsASeatAccount_EvenWithNoSeatRunning()
+    {
+        Assert.Contains(SeatOwnerSid, ConsoleCallerCheck.SeatSidsFrom([(null, "Gaming", true)], [], [], ResolveFrom));
+        Assert.Contains("S-1-5-21-9-9-9-5", ConsoleCallerCheck.SeatSidsFrom([("S-1-5-21-9-9-9-5", "x", true)], [], [], _ => null));
+    }
+
+    [Fact]
+    public void AnUnresolvableName_IsSkipped_NotAnError()
+    {
+        Assert.Empty(ConsoleCallerCheck.SeatSidsFrom([(null, "ghost", true)], ["ghost"], ["ghost"], _ => null));
+    }
+
     // ── a process id can be given to another process ──────────────────
 
     [Fact]
