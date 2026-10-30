@@ -139,7 +139,9 @@ change made here lasts only until that Apollo restarts.
   - The process must run in the **active console session**, and its token user must be **the user logged on
     there**, not SYSTEM or another service account, and **not one of MultiSeat's seat accounts**. A seat user who
     moves their own session to the console with `tscon` is the console user but a seat account, so is still
-    refused. A seat account MultiSeat cannot list is not excluded by that rule; it is still refused by the
+    refused. A "seat account" is one MultiSeat created, or one that hosts a live seat or has a saved seat preset.
+    An ordinary Windows account that was only linked to MultiSeat, such as the console owner's, is not one.
+    A seat account MultiSeat cannot list is not excluded by that rule; it is still refused by the
     session and user comparisons unless it is the console user.
   - A request that is not loopback, whose caller cannot be found, or when nobody is at the console, is refused.
     Another program of the console user can still ask; that is the trust the console user already has over the

@@ -1,6 +1,8 @@
 using System.Net;
 using MultiSeat.Service.Accounts;
+using MultiSeat.Service.Configuration;
 using MultiSeat.Service.Interop;
+using MultiSeat.Service.Sessions;
 
 namespace MultiSeat.Service.Api;
 
@@ -54,13 +56,13 @@ public sealed class ConsoleCallerCheck
     private readonly Func<uint, string?> _consoleUserSid;
     private readonly Func<IReadOnlyCollection<string>> _seatSids;
 
-    public ConsoleCallerCheck(AccountManager accounts)
+    public ConsoleCallerCheck(AccountManager accounts, SeatManager seats, SeatPresetStore presets)
         : this(
             (clientPort, serverPort) => TcpTable.ClientOwner(TcpTable.ReadConnectionsWithTimes(), clientPort, serverPort),
             OwnerProcess.Open,
             Kernel32.WTSGetActiveConsoleSessionId,
             ConsoleUser.SidOf,
-            () => SeatSidsOf(accounts))
+            () => SeatSidsOf(accounts, seats, presets))
     {
     }
 
@@ -75,15 +77,39 @@ public sealed class ConsoleCallerCheck
         _seatSids = seatSids;
     }
 
-    /// <summary>The SIDs of the seat accounts MultiSeat manages. A name that cannot be resolved is skipped.</summary>
-    private static IReadOnlyCollection<string> SeatSidsOf(AccountManager accounts)
+    /// <summary>
+    /// The SIDs of the accounts that are, or can become, a seat: accounts MultiSeat created, the account of
+    /// every live seat, and the account of every saved seat preset. NOT every account MultiSeat has stored:
+    /// <c>AccountManager</c> also holds ordinary accounts that were only LINKED (<c>IsManaged</c> false), and
+    /// the person at the console is often one of them. Counting those refused the console user from the
+    /// panel meant for them. A linked account that does host a seat still counts, through its seat or preset.
+    /// A name that cannot be resolved is skipped.
+    /// </summary>
+    internal static IReadOnlyCollection<string> SeatSidsOf(AccountManager accounts, SeatManager seats, SeatPresetStore presets) =>
+        SeatSidsFrom(
+            accounts.ListManagedAccounts().Select(a => (a.Sid, a.Username, a.IsManaged)),
+            seats.GetAllSeats().Select(s => s.AccountName),
+            presets.GetAll().Select(p => p.AccountName),
+            name => AccountManager.TryResolveSid(name, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance));
+
+    /// <summary>The rule behind <see cref="SeatSidsOf"/>, with its inputs passed in so a test can drive it.</summary>
+    internal static IReadOnlyCollection<string> SeatSidsFrom(
+        IEnumerable<(string? Sid, string Username, bool IsManaged)> stored,
+        IEnumerable<string> liveSeatAccounts, IEnumerable<string> presetAccounts, Func<string, string?> resolve)
     {
         var sids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var account in accounts.ListManagedAccounts())
+
+        void Add(string? knownSid, string username)
         {
-            var sid = account.Sid ?? AccountManager.TryResolveSid(account.Username, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+            var sid = !string.IsNullOrEmpty(knownSid) ? knownSid
+                : string.IsNullOrWhiteSpace(username) ? null : resolve(username);
             if (!string.IsNullOrEmpty(sid)) sids.Add(sid);
         }
+
+        foreach (var (sid, username, isManaged) in stored)
+            if (isManaged) Add(sid, username);
+        foreach (var name in liveSeatAccounts) Add(null, name);
+        foreach (var name in presetAccounts) Add(null, name);
         return sids;
     }
 
