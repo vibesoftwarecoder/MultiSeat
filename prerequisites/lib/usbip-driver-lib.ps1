@@ -85,11 +85,22 @@ function Get-UsbipCertFacts {
     return $f
 }
 
+function Import-UsbipSecurityModule {
+    # Windows PowerShell started from PowerShell 7 can inherit a PSModulePath that lists PowerShell 7's
+    # module folders first. It then autoloads PowerShell 7's Microsoft.PowerShell.Security, which cannot
+    # load there, and Get-AuthenticodeSignature returns nothing. This engine's own copy is imported by
+    # path so the signature check can run at all. It only makes the check able to run; it never relaxes it.
+    $psd1 = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+    if (Test-Path -LiteralPath $psd1) { Import-Module $psd1 -Force -Global -ErrorAction SilentlyContinue }
+}
+
 function Get-UsbipSignatureFacts {
     param([string]$Path)
-    $s = Get-AuthenticodeSignature -LiteralPath $Path
-    $facts = Get-UsbipCertFacts $s.SignerCertificate
-    $facts.Status = [string]$s.Status
+    Import-UsbipSecurityModule
+    $s = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction SilentlyContinue
+    $facts = Get-UsbipCertFacts $(if ($s) { $s.SignerCertificate } else { $null })
+    # No result at all is reported as such, not as an empty status, so a refusal names its real cause.
+    $facts.Status = $(if ($s) { [string]$s.Status } else { 'unreadable: Get-AuthenticodeSignature returned nothing' })
     return $facts
 }
 

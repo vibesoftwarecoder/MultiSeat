@@ -58,7 +58,7 @@ public class UsbipDriverScriptTests
 
     private static string Q(string s) => "'" + s.Replace("'", "''") + "'";
 
-    private static PsResult RunScript(string engine, string script)
+    private static PsResult RunScript(string engine, string script, IDictionary<string, string>? env = null)
     {
         var psi = new ProcessStartInfo(engine)
         {
@@ -69,6 +69,7 @@ public class UsbipDriverScriptTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
+        if (env != null) foreach (var kv in env) psi.Environment[kv.Key] = kv.Value;
         using var p = Process.Start(psi)!;
         var err = p.StandardError.ReadToEndAsync();
         var outp = p.StandardOutput.ReadToEndAsync();
@@ -676,6 +677,7 @@ Write-Output ('@@JSON@@' + (ConvertTo-Json -InputObject $r -Compress))"));
     // Real files already on this machine. The positive case is a real Microsoft hardware-compatibility
     // (WHQL) signed driver; negatives are unsigned and a real non-Microsoft signed file.
     private const string RealFilesScript = @"
+Import-UsbipSecurityModule
 $gs = (New-UsbipDefaultSeams).GetSignature
 function Check($path) {
   $why = ''
@@ -727,9 +729,42 @@ foreach ($d in $cands) {
 if ($third) { $res.Third = Check $third }
 Write-Output ('@@JSON@@' + (ConvertTo-Json -InputObject $res -Compress -Depth 4))";
         var j = J(RunScript(engine, script));
-        Assert.False(j.GetProperty("Unsigned").GetProperty("Ok").GetBoolean());
-        if (j.TryGetProperty("Component", out var c)) Assert.False(c.GetProperty("Ok").GetBoolean(), c.GetProperty("Path").GetString());
-        if (j.TryGetProperty("Third", out var t)) Assert.False(t.GetProperty("Ok").GetBoolean(), t.GetProperty("Path").GetString());
+        var unsigned = j.GetProperty("Unsigned");
+        Assert.False(unsigned.GetProperty("Ok").GetBoolean());
+        // Rejected because the signature is not Valid, not because the signature could not be read at all.
+        Assert.DoesNotContain("unreadable", unsigned.GetProperty("Why").GetString());
+
+        // Every Windows install has Microsoft-signed components. If none is found the check could not run,
+        // and a quiet pass here would prove nothing.
+        Assert.True(j.TryGetProperty("Component", out var c), "no Microsoft-signed Windows component was found to test");
+        Assert.False(c.GetProperty("Ok").GetBoolean(), c.GetProperty("Path").GetString());
+        Assert.Contains("signer is 'Microsoft Windows'", c.GetProperty("Why").GetString());
+
+        // A host is not guaranteed to have a third-party signed file, so this one stays optional.
+        if (j.TryGetProperty("Third", out var t))
+        {
+            Assert.False(t.GetProperty("Ok").GetBoolean(), t.GetProperty("Path").GetString());
+            Assert.Contains("signer is", t.GetProperty("Why").GetString());
+        }
+    }
+
+    [Fact]
+    public void SignatureCheck_StillReads_WhenWindowsPowerShellInheritsPowerShell7sModulePath()
+    {
+        // Windows PowerShell started from PowerShell 7 inherits a PSModulePath that lists PowerShell 7's
+        // modules first. It then autoloads a Microsoft.PowerShell.Security it cannot load, and
+        // Get-AuthenticodeSignature returns nothing. The check must still be able to read a signature.
+        var pwsh = FindPwsh();
+        if (pwsh == null) return;   // no PowerShell 7 here, so the polluted path cannot occur
+        var ps7Modules = Path.Combine(Path.GetDirectoryName(pwsh)!, "Modules");
+        if (!Directory.Exists(ps7Modules)) return;
+        var polluted = ps7Modules + ";" + Environment.GetEnvironmentVariable("PSModulePath");
+
+        var script = ". " + Q(Lib) + @"
+$f = Get-UsbipSignatureFacts (Join-Path $env:windir 'System32\ntdll.dll')
+Write-Output ('@@JSON@@' + (ConvertTo-Json -InputObject @{ Status = $f.Status } -Compress))";
+        var j = J(RunScript("powershell.exe", script, new Dictionary<string, string> { ["PSModulePath"] = polluted }));
+        Assert.Equal("Valid", j.GetProperty("Status").GetString());
     }
 
     // -- Static guards ---------------------------------------------------------------------
