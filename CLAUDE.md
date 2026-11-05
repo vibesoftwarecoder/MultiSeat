@@ -113,6 +113,23 @@ and every client a seat paired was forgotten on reconnect. Found in the field (P
 The failure shape to remember: **pairing succeeds, then the next request from the same client is
 refused.** Details and the still-open TLS-key exposure: `docs/security-posture.md`.
 
+## Second video stream in a seat (`MultiSeat:SecondVideoStream`)
+
+Off by default. When on, `ApolloConfigBuilder` writes `second_video_stream = enabled` into every seat's
+Apollo config (and `= disabled` when off, so a seat never relies on ApolloVibe's own default). The config
+is rewritten on every provision, so a change reaches a seat the next time it is provisioned.
+
+- **A seat offers a WINDOW only.** A whole display needs the console session: a seat is an RDP session, the
+  RDP display driver owns its display list and Windows will not let a new display join it (issue #15).
+  ApolloVibe checks `SM_REMOTESESSION` itself and does not advertise `x-ss-video[1].display:1` in a remote
+  session, so a client that asks for a display gets one stream. Nothing in MultiSeat needs to handle that.
+- **MultiSeat writes no `capture_window` key.** The client names the window it wants (MoonlightVibe,
+  Settings → Second Window), so there is nothing per seat to configure.
+- Costs one more NVENC session and one more encode per seat. The 4-seat figures under Known Constraints do
+  not include it.
+- Tests: `SecondVideoStreamSeatConfigTests` (the line, once, both spellings; mutation-checked).
+- The standalone console Apollo is not MultiSeat's and is configured by hand.
+
 ## Security posture — `docs/security-posture.md`
 
 Read it before changing anything about accounts, the API, or the install scripts. It records what

@@ -293,6 +293,16 @@ public sealed class ApolloConfigBuilder
         sb.AppendLine("usb_forwarding_enabled = disabled");
         sb.AppendLine();
 
+        // ── Second video stream (MultiSeat:SecondVideoStream) ─────────
+        // Lets a client such as MoonlightVibe show one WINDOW of this seat in a second client window.
+        // Written either way, in the spelling the rest of this file uses, so a seat never depends on
+        // ApolloVibe's own default. A seat cannot offer a whole display: its session is RDP, and
+        // ApolloVibe only offers one outside a remote session, so a request for one falls back to a
+        // single stream with no setting needed here.
+        sb.AppendLine("# Second video stream — a window of this seat in a second client window");
+        sb.AppendLine(_options.SecondVideoStream ? "second_video_stream = enabled" : "second_video_stream = disabled");
+        sb.AppendLine();
+
         // ── Security ──────────────────────────────────────────────────
         // file_state must be an absolute path — Apollo resolves relative paths against
         // {exe_dir}/config/, which is shared by all instances. Each seat needs its own

@@ -93,6 +93,20 @@ public sealed class MultiSeatOptions
     /// </summary>
     public string ApolloLogLevel { get; set; } = "info";
 
+    /// <summary>
+    /// Let ApolloVibe offer a second video stream in every seat: a client such as MoonlightVibe can
+    /// then show one window of the seat in a second client window, over the same connection. Written
+    /// into each seat's Apollo config as <c>second_video_stream</c>, and the config is rewritten on
+    /// every provision, so a change reaches a seat the next time it is provisioned.
+    ///
+    /// Off by default, like ApolloVibe's own setting. A seat can offer a WINDOW only. A whole display
+    /// needs the console session: a seat is an RDP session, the RDP display driver owns its display
+    /// list, and Windows will not let a new display join it, so ApolloVibe does not offer one there
+    /// and a client that asks for a display gets one stream. The second stream is one more NVENC
+    /// session and one more encode per seat.
+    /// </summary>
+    public bool SecondVideoStream { get; set; }
+
     // ── API ──────────────────────────────────────────────────────────
     public int ApiPort { get; set; } = Shared.Constants.DefaultApiPort;
     public string ApiKey { get; set; } = string.Empty;  // set in appsettings or env
