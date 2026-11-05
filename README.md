@@ -209,7 +209,7 @@ Then open the dashboard, click the **Settings** gear icon (top-right), paste the
 
 ### Step 7 — Connect with Moonlight
 
-**Recommended: use [MoonlightVibe](https://github.com/vibesoftwarecoder/MoonlightVibe/releases/latest)** — the companion Moonlight fork for MultiSeat. It auto-discovers all active seats from the local MultiSeat service; each seat appears as a separate server in the computer list within ~15 seconds of becoming ready. No manual host entry needed. Also includes mic passthrough support for use with ApolloVibe.
+**Recommended: use [MoonlightVibe](https://github.com/vibesoftwarecoder/MoonlightVibe/releases/latest)** — the companion Moonlight fork for MultiSeat. It auto-discovers all active seats from the local MultiSeat service; each seat appears as a separate server in the computer list within ~15 seconds of becoming ready. No manual host entry needed. With ApolloVibe on the host it also gives you microphone passthrough, USB forwarding on the console and a second window (see **Second screen** below).
 
 **Standard Moonlight:** add the host manually using its IP address and the seat's assigned port:
 
@@ -224,6 +224,21 @@ The port for each seat is shown in the dashboard. Default ports:
 | Seat 0 | 48100 |
 | Seat 1 | 48130 |
 | Seat 2 | 48160 |
+
+---
+
+## Second screen
+
+ApolloVibe and [MoonlightVibe](https://github.com/vibesoftwarecoder/MoonlightVibe) can show a second picture of the host in a second client window, over the same connection and pairing. The second picture is either **one window** of the host, picked by its title, or **a whole display** that the host makes. In MoonlightVibe it is under **Settings → Second Window**.
+
+| Where | A window | A whole display |
+|---|---|---|
+| The console host (the standalone Apollo on the main desktop) | ✅ | ✅ |
+| A MultiSeat seat | ✅ | ❌ |
+
+A seat cannot give a whole display. A seat is an RDP session, its display list belongs to the remote-desktop display driver, and Windows will not let a new display join it. On a seat, show a window: a browser, a chat or a tool that runs in that seat.
+
+⚠️ **MultiSeat does not turn this on for seats yet.** ApolloVibe offers a second stream only when its config says `second_video_stream = enabled`. MultiSeat writes each seat's Apollo config itself and rewrites it on every provision, and it does not write that line. So a seat does not offer a second stream today, and a client that asks gets one window as usual. The standalone console Apollo is configured on its own, outside MultiSeat. For the options and the limits, see the [ApolloVibe README](https://github.com/vibesoftwarecoder/ApolloVibe) and the [MoonlightVibe README](https://github.com/vibesoftwarecoder/MoonlightVibe).
 
 ---
 
@@ -382,17 +397,22 @@ The service runs as SYSTEM. Each seat's Apollo process runs inside its own RDP s
 
 ## Port Layout
 
-Each seat reserves a block of 10 ports starting at `PortBase + (seat_index × 10)`:
+Each seat reserves a block of 30 ports starting at `PortBase + (seat_index × 30)`. The base is the port you give Moonlight, and Apollo's other ports sit at fixed offsets around it:
 
 | Offset | Protocol | Use |
 |--------|----------|-----|
-| +0 | TCP | Apollo HTTPS (Moonlight pairing) |
-| +1 | TCP | Apollo HTTP |
-| +2 | TCP/UDP | RTP video |
-| +3 | TCP/UDP | RTP audio |
-| +4 | TCP/UDP | Control channel |
+| -5 | TCP | Apollo HTTPS (Moonlight pairing and launch) |
+| 0 | TCP | Apollo HTTP, the port you add in Moonlight |
+| +1 | TCP | Apollo web UI (HTTPS) |
+| +7 | TCP | USB forwarding tunnel (off on seats) |
+| +9 | UDP | Video. A second video stream shares this port |
+| +10 | UDP | Control channel |
+| +11 | UDP | Audio |
+| +12 | UDP | Microphone |
+| +13 | TCP | RetroArch netplay |
+| +26 | TCP | RTSP session setup |
 
-Default `PortBase` = 48100 (each seat reserves a 30-port block). Seat 0 = 48100, Seat 1 = 48130, Seat 2 = 48160, etc. The base sits above a stock Apollo's port block so MultiSeat coexists with a standalone Apollo.
+Default `PortBase` = 48100: Seat 0 = 48100, Seat 1 = 48130, Seat 2 = 48160, and so on. The base sits above a stock Apollo's port block so MultiSeat coexists with a standalone Apollo.
 
 ---
 
@@ -409,7 +429,9 @@ Seats are kept in the service's memory. Only a seat with **Auto-start** on is sa
 - **Windows Fast Startup.** With Fast Startup on, Shut down logs off user sessions and hibernates the system session, where the service runs. The next power-on then resumes the service instead of starting it fresh, and every seat's session has been logged off. The check above handles this the same way. If a seat still does not come back, tear it down and create it again, or restart the MultiSeat service. To rule Fast Startup out, use Restart instead of Shut down, or turn it off under Control Panel > Power Options > *Choose what the power buttons do*.
 - **Tearing a seat down does not turn its auto-start off.** A torn-down auto-start seat comes back when the service starts or the PC resumes. Turn auto-start off first to remove a seat for good.
 
-If a seat does not come back, the Event Log says why: look for lines starting `Auto-start (` and `Seat reconciliation` (see **A new seat starts, but Apollo reports `Failed to Open Input Desktop [0x00000005]` (issue #96)**
+If a seat does not come back, the Event Log says why: look for lines starting `Auto-start (` and `Seat reconciliation`.
+
+**A new seat starts, but Apollo reports `Failed to Open Input Desktop [0x00000005]` (issue #96)**
 Apollo cannot open the session's input desktop while another program holds it on the Secure Desktop. On the reporting host a logon-time elevation prompt did this: ASUS Armoury Crate's `ArmourySocketServer.exe` is the suspected trigger, which is a correlation from an outside trace and not yet something MultiSeat has observed directly. Windows keeps the Winlogon desktop active at logon until the shell is ready (or 30 seconds), and again whenever a UAC dialog is open. A session that is not SYSTEM gets access denied on that desktop for as long as it lasts, which was about two minutes on that host.
 
 MultiSeat waits for this. Before it starts Apollo, a helper inside the seat's session waits until the input desktop has stayed openable for `InputDesktopStableMs` (3 seconds), watching for desktop-switch events and re-checking every 250 ms as a backstop. It gives up after `WaitForInputDesktopSeconds` (180) and starts Apollo anyway. The service log says which happened: `input desktop usable after ...ms`, or `input desktop still not usable ... starting Apollo anyway`. Both lines now also report how many desktop-switch events the wait saw and whether the event hook was installed. If a seat times out, the prompt is still there and the cure is to remove it.
@@ -417,8 +439,6 @@ MultiSeat waits for this. Before it starts Apollo, a helper inside the seat's se
 To see what holds the desktop on your host, turn on the probe in `appsettings.local.json` (`"DiagnoseInputDesktopReadiness": true`, optionally `"InputDesktopReadinessProbeSeconds"`), provision a seat, and read `C:\ProgramData\MultiSeat\ms_inputdesktop_readiness_<seat id>.jsonl`. Each `sample` line lists every desktop in the session and the processes with windows on it (look for `Winlogon` with `consent` or `LogonUI` while `OpenInputDesktopSucceeded` is false). Each `desktop-switch` line is one switch event with the input desktop's name at that moment. The first line (`hook`) says whether the event hook installed, and the last (`summary`) counts the events. A run with denied samples and `EventCount` 0 means Windows did not deliver the event to that session, and the 250 ms polling did the work.
 
 *Workaround for the Armoury Crate case (unverified on this host).* ASUS support guides describe the same fix: open Task Scheduler, go to Task Scheduler Library > ASUS > ArmourySocketServer, open the task's Properties, and change the user it runs as to `SYSTEM`. Run as SYSTEM, the task no longer asks for elevation at logon, so no consent prompt appears. This comes from ASUS forum guides and has not been tried on the reference host. It changes how an ASUS component starts, and an Armoury Crate update may put the task back. Apply it only if the probe shows `ArmourySocketServer` (or its consent prompt) on the Secure Desktop during the denied period.
-
-**Where the logs are** below).
 
 **Seat stuck at Provisioning**
 Check the service log (see **Where the logs are** below). Common causes: SudoVDA not installed, Apollo path wrong in `appsettings.json`, or insufficient virtual displays.
