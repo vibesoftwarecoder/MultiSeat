@@ -238,7 +238,7 @@ ApolloVibe and [MoonlightVibe](https://github.com/vibesoftwarecoder/MoonlightVib
 
 A seat cannot give a whole display. A seat is an RDP session, its display list belongs to the remote-desktop display driver, and Windows will not let a new display join it. On a seat, show a window: a browser, a chat or a tool that runs in that seat.
 
-⚠️ **MultiSeat does not turn this on for seats yet.** ApolloVibe offers a second stream only when its config says `second_video_stream = enabled`. MultiSeat writes each seat's Apollo config itself and rewrites it on every provision, and it does not write that line. So a seat does not offer a second stream today, and a client that asks gets one window as usual. The standalone console Apollo is configured on its own, outside MultiSeat. For the options and the limits, see the [ApolloVibe README](https://github.com/vibesoftwarecoder/ApolloVibe) and the [MoonlightVibe README](https://github.com/vibesoftwarecoder/MoonlightVibe).
+**To turn it on for seats,** set `SecondVideoStream` to `true` in `appsettings.local.json` (see Configuration). MultiSeat then writes `second_video_stream = enabled` into every seat's Apollo config, which it rewrites on every provision, so the change reaches a seat the next time that seat is provisioned. It is one setting for all seats and is off by default. It needs an ApolloVibe build that has the second video stream. A client that asks for a display on a seat gets one stream, as before. The standalone console Apollo is configured on its own, outside MultiSeat. For the options and the limits, see the [ApolloVibe README](https://github.com/vibesoftwarecoder/ApolloVibe) and the [MoonlightVibe README](https://github.com/vibesoftwarecoder/MoonlightVibe).
 
 ---
 
