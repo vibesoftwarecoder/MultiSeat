@@ -37,6 +37,33 @@ public class RdpFileBuilderTests
         Assert.Contains("dynamic resolution:i:0", rdp);
     }
 
+    // mstsc redirects printers by default and the installer pre-authorizes every redirection class
+    // for 127.0.0.2, so a seat silently got the console user's printers and its own print queues on
+    // the host's Print Spooler (issue #136). The keys must be present whatever the geometry, the
+    // audio mode, or whether a geometry was given at all.
+    [Theory]
+    [InlineData(AudioMode.SharedHost, true)]
+    [InlineData(AudioMode.PerSession, true)]
+    [InlineData(AudioMode.SharedHost, false)]
+    [InlineData(AudioMode.PerSession, false)]
+    public void RedirectsNoPrintersPortsOrDrives(AudioMode mode, bool withGeometry)
+    {
+        var geometry = withGeometry ? RdpGeometry.ForClient(1920, 1080) : null;
+
+        var lines = RdpFileBuilder.Build(mode, geometry).Split("\r\n");
+
+        Assert.Contains("redirectprinters:i:0", lines);
+        Assert.Contains("redirectcomports:i:0", lines);
+        Assert.Contains("drivestoredirect:s:", lines);
+    }
+
+    // The clipboard is not redirected away on purpose; a seat may rely on it.
+    [Fact]
+    public void LeavesTheClipboardAtItsDefault()
+    {
+        Assert.DoesNotContain("redirectclipboard", BuildWith(1920, 1080));
+    }
+
     [Fact]
     public void OmitsGeometryEntirelyWhenNoneRequested()
     {

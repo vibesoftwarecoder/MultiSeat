@@ -183,7 +183,18 @@ public static class RdpFileBuilder
             "disable menu anims:i:1\r\n" +
             "disable themes:i:1\r\n" +
             "allow font smoothing:i:0\r\n" +
-            "allow desktop composition:i:0\r\n";
+            "allow desktop composition:i:0\r\n" +
+            // Redirect nothing a seat does not use. mstsc defaults printers to ON, and the install
+            // script pre-authorizes 127.0.0.2 for every redirection class (0x7FFFFFFF), so with
+            // these keys absent the console user's printers are redirected into EVERY seat session
+            // with no prompt. Each session then registers its own print queues with the host's one
+            // Print Spooler (issue #136). Clipboard is deliberately left at its default.
+            //   redirectprinters:i:0  → no printer queues in the seat session
+            //   redirectcomports:i:0  → no serial ports
+            //   drivestoredirect:s:   → empty value: no drives
+            "redirectprinters:i:0\r\n" +
+            "redirectcomports:i:0\r\n" +
+            "drivestoredirect:s:\r\n";
 
         if (geometry is null || !geometry.IsValid)
             return content;
